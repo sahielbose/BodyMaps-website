@@ -174,7 +174,7 @@ import { useMorphPicker } from "../helpers/viewer/useMorphPicker";
 import { useToolbarFlyout } from "../helpers/viewer/useToolbarFlyout";
 import { useLassoTool } from "../helpers/viewer/useLassoTool";
 import { useFocusedPane } from "../helpers/viewer/useFocusedPane";
-import { useKeyboardShortcuts } from "../helpers/viewer/useKeyboardShortcuts";
+import { useKeyboardShortcuts, MIN_ZOOM, MAX_ZOOM } from "../helpers/viewer/useKeyboardShortcuts";
 import { type MaskingArea } from "../components/segmentation/MaskingSelect";
 import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
 import { downloadUrlAsFile } from "../helpers/downloadFile";
@@ -3966,7 +3966,7 @@ const aiAvailableOrgans = useMemo(() => {
 									<label className="vp-tb-slider" title="Zoom">
 										<span className="vp-tb-slider__label">Zoom</span>
 										<input
-											type="range" min="0.5" max="2" step="0.05" className="vp-range"
+											type="range" min={MIN_ZOOM} max={MAX_ZOOM} step="0.05" className="vp-range"
 											aria-label="Zoom"
 											value={zoomLevel}
 											onChange={(e) => setZoomLevel(Number(e.target.value))}

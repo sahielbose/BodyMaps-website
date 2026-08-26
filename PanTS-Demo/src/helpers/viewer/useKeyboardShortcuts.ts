@@ -42,8 +42,12 @@ const MAX_BRUSH_MM = 40;
 const DEFAULT_BRUSH_MM = 10;
 const BRUSH_STEP_MM = 2;
 
-const MIN_ZOOM = 0.2;
-const MAX_ZOOM = 8;
+// Shared with the Adjust flyout's zoom slider (VisualizationPage) so the
+// keyboard clamp and the slider range can never disagree — a narrower slider
+// pegged its thumb while the readout kept counting, then snapped the view
+// back into its own range on the next drag.
+export const MIN_ZOOM = 0.2;
+export const MAX_ZOOM = 8;
 const ZOOM_STEP_FACTOR = 1.15; // per keypress, matches a moderate scroll-wheel zoom
 
 interface UseKeyboardShortcutsArgs {
