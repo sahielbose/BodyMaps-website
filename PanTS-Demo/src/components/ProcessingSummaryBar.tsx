@@ -2,11 +2,14 @@ import React from "react";
 
 // One consolidated bar for all in-flight scans, instead of a card per scan.
 // Shows a circular progress wheel (percent complete), a counter (done / total),
-// and a status label. Batch total = still-running + already-finished, so as
-// scans complete the counter climbs while the total holds steady.
+// and a status label. Batch total = running + completed + failed, so as scans
+// complete the counter climbs while the total holds steady - a failure is
+// counted and named, never silently dropped from the denominator (and the
+// wheel tops out below 100% while failures exist).
 type Props = {
 	running: number; // scans still uploading / queued / running
 	done: number; // scans finished in this batch
+	failed?: number; // scans that failed or were cancelled - still part of the total
 	statusLabel: string; // dominant phase, e.g. "Running…"
 	title?: string; // defaults to "Processing scans"
 	closeNote?: string; // e.g. "safe to close" - whether the tab is still needed
@@ -18,8 +21,8 @@ type Props = {
 const SIZE = 46;
 const STROKE = 4;
 
-const ProcessingSummaryBar: React.FC<Props> = ({ running, done, statusLabel, title = "Processing scans", closeNote, closeReady, onViewDetails, onCancelAll }) => {
-	const total = running + done;
+const ProcessingSummaryBar: React.FC<Props> = ({ running, done, failed = 0, statusLabel, title = "Processing scans", closeNote, closeReady, onViewDetails, onCancelAll }) => {
+	const total = running + done + failed;
 	const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
 	const r = (SIZE - STROKE) / 2;
@@ -66,6 +69,9 @@ const ProcessingSummaryBar: React.FC<Props> = ({ running, done, statusLabel, tit
 					<span>
 						{statusLabel}
 						{running > 0 && ` · ${running} in progress`}
+						{failed > 0 && (
+							<span style={{ color: "#ef4444" }}>{` · ${failed} failed`}</span>
+						)}
 						{closeNote && (
 							<span className={`proc-close-note${closeReady ? " proc-close-note--ready" : ""}`}>
 								{" "}· {closeNote}

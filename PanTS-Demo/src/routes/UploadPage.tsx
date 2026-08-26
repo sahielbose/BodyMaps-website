@@ -2441,13 +2441,16 @@ const UploadPage: React.FC = () => {
                     if (g.kind === "single") return <ProcessingCard key={g.upload.sessionId} u={g.upload} />;
                     const running = g.uploads.filter(u => u.status === "Processing");
                     const done = g.uploads.filter(u => u.status === "Completed").length;
+                    // Failed/Cancelled scans stay in the total so the counter's
+                    // denominator never shrinks mid-batch.
+                    const failed = g.uploads.filter(u => u.status === "Failed" || u.status === "Cancelled").length;
                     const phases = running.map(u => sessionPhases[u.sessionId]);
                     const statusLabel =
                       phases.some(p => p === undefined || p === "running") ? "Running…" :
                       phases.some(p => p === "queued") ? "Queued for GPU" : "Uploading…";
                     return (
                       <ProcessingSummaryBar key={g.batchId} title={g.label} running={running.length}
-                        done={done} statusLabel={statusLabel}
+                        done={done} failed={failed} statusLabel={statusLabel}
                         closeNote={closeNote} closeReady={!closeInfo.active}
                         onViewDetails={() => { track("upload_open_batch_details"); setDetailsBatchId(g.batchId); }}
                         onCancelAll={() => running.forEach(u => cancelRun(u))} />
