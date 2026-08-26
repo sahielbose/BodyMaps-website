@@ -14,15 +14,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from constants import Constants  # noqa: E402
 from models.base import ModelBase  # noqa: E402
 
-# Import models for their registration side effects (add new ones here so
-# autogenerate sees their tables).
-from models import job as _job  # noqa: E402,F401
-from models import user as _user  # noqa: E402,F401
-from models import auth_session as _auth_session  # noqa: E402,F401
-from models import oauth_identity as _oauth_identity  # noqa: E402,F401
-from models import application_session as _app_session  # noqa: E402,F401
-from models import combined_labels as _combined_labels  # noqa: E402,F401
-from models import user_role as _user_role  # noqa: E402,F401
+# models.engine imports every model module for its registration side effects;
+# reusing it here (instead of a second hand-maintained list) means a table
+# Alembic can't see cannot exist — this file's old copy of the list had
+# drifted three tables behind, which would have made the next autogenerate
+# emit DROP TABLE for analytics_event, usage_event, and password_reset_token.
+from models import engine as _models_registry  # noqa: E402,F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", Constants.DATABASE_URL)
