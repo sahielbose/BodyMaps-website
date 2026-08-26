@@ -132,6 +132,12 @@ function organRoot(organ: string): string {
     .toLowerCase();
 }
 
+// Mask labels that are findings or hardware, not organs. They must never be
+// presented in the patient-facing healthy organs list.
+function isNonOrganLabel(organ: string): boolean {
+  return organ.endsWith('_lesion') || organ === 'cbd_stent';
+}
+
 // Renders "Case 12" plus " · F · 61y" only for demographics the backend
 // actually has. It returns the string "N/A" for missing age/sex (despite the
 // declared types), which used to render as "Case 12 · N/A · N/Ay".
@@ -745,9 +751,17 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
     setStep(s);
   }, [step]);
 
-  const all = React.useMemo(() => data ? Object.entries(data.organ_volumes).filter(([_, v]) => v.volume > 5 || v.status === 'check') : [], [data]);
+  // Lesion/stent masks are excluded from the volume-based inclusion so they
+  // can never appear in the healthy list ("Pancreatic Lesion" is not a healthy
+  // organ), but any entry the backend flags as 'check' still passes through so
+  // a flagged lesion is not silently dropped from the findings steps.
+  const all = React.useMemo(() => data ? Object.entries(data.organ_volumes).filter(([o, v]) => v.status === 'check' || (!isNonOrganLabel(o) && v.volume > 5)) : [], [data]);
   const flagged = React.useMemo(() => all.filter(([_, v]) => v.status === 'check'), [all]);
-  const normal = React.useMemo(() => all.filter(([_, v]) => v.status !== 'check'), [all]);
+  // A parent organ (or sibling sub-part) is not listed as healthy while one of
+  // its parts is a finding, e.g. "Pancreas" is not a healthy organ on step 1
+  // when "Pancreas Body" is presented as the finding on step 2.
+  const flaggedRoots = React.useMemo(() => new Set(flagged.map(([o]) => organRoot(o))), [flagged]);
+  const normal = React.useMemo(() => all.filter(([o, v]) => v.status !== 'check' && !flaggedRoots.has(organRoot(o))), [all, flaggedRoots]);
   const totalSteps = 2 + flagged.length + 1;
 
   const curOrganName = step >= 2 && step < 2 + flagged.length ? flagged[step - 2]?.[0] : null;
