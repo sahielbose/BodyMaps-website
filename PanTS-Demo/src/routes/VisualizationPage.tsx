@@ -2968,7 +2968,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			cancelAnimationFrame(raf1);
 			cancelAnimationFrame(raf2);
 		};
-	}, [viewMode, layoutPreset, showAISidebar, renderingEngine, NV, viewportIds]);
+		// showAISidebar deliberately NOT a dependency: the sidebar toggle only
+		// changes the stage width, which the stage ResizeObserver below handles
+		// with keepCamera=true — re-fitting here would wipe the user's zoom/pan.
+	}, [viewMode, layoutPreset, renderingEngine, NV, viewportIds]);
 
 	// Apply zoom to the Cornerstone viewports whenever the toolbar slider changes.
 	// (Previously ZoomHandle owned this side effect; the slider now lives in the toolbar.)
@@ -3644,8 +3647,9 @@ const aiAvailableOrgans = useMemo(() => {
 				["--vp-ai-width" as string]: `${aiWidth}px`,
 				// When the AI sidebar opens, shrink the app to the left of it so the
 				// CT views reflow beside the panel instead of being covered by it
-				// (the fixed sidebar occupies --vp-ai-width on the right). The
-				// showAISidebar resize effect re-fits the viewports to the new width.
+				// (the fixed sidebar occupies --vp-ai-width on the right). The stage
+				// ResizeObserver resizes the viewports to the new width while
+				// preserving each pane's zoom/pan.
 				width: showAISidebar ? "calc(100vw - var(--vp-ai-width, 400px))" : "100vw",
 				transition: "width 180ms ease",
 			} as React.CSSProperties}>
