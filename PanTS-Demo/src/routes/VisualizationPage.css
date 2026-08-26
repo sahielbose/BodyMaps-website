@@ -1181,8 +1181,11 @@
 .vp-loading {
   position: fixed;
   inset: 0;
-  z-index: 45;
-  /* above the empty viewports, below the gear/home chrome (z-50) */
+  /* Above the topbar and floating gear (both z-55): this class doubles as the
+     fatal dicomError screen, and no toolbar control should stay clickable over
+     a viewer that has no volume. The error screen carries its own Retry/Back
+     buttons. Full-screen modals (200) and the annotate-HD overlay (900) still win. */
+  z-index: 60;
   display: flex;
   flex-direction: column;
   align-items: center;
