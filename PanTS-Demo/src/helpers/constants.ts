@@ -267,5 +267,3 @@ export const APP_CONSTANTS: APP_CONSTANTS_TYPE = {
 	NVCmapAlpha: NVCmapAlpha,
 	NVColormap: createNVColorMapFromCornerstoneLUT(),
 };
-
-export const ITEMS_PER_DATA_PAGE = 50;
