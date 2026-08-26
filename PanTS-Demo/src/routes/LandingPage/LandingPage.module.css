@@ -134,6 +134,8 @@
 .heroFigure {
   margin-top: 56px;
   width: 100%;
+  will-change: transform, opacity;
+  transform-origin: center top;
 }
 .heroImage {
   width: 100%;

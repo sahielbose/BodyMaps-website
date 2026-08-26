@@ -129,6 +129,43 @@ export default function LandingPage() {
   const [activeView, setActiveView] = useState(0);
   const stepRefs = useRef<(HTMLDivElement | null)[]>([]);
   const rootRef = useReveal();
+  const heroFigureRef = useRef<HTMLDivElement | null>(null);
+
+  /* The hero capture scrolls into place: while it enters the viewport it
+     rises, scales from 94% to full size, and fades in, driven directly by
+     scroll position (the page's scroll container is the root div, not the
+     window). Skipped for reduced motion. */
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    const figure = heroFigureRef.current;
+    if (!rootEl || !figure) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    let frame = 0;
+    const apply = () => {
+      frame = 0;
+      const vh = rootEl.clientHeight;
+      const top = figure.getBoundingClientRect().top;
+      /* 0 when the figure's top is at the bottom edge, 1 once it has risen
+         to 30% of the viewport. */
+      const progress = Math.min(1, Math.max(0, (vh - top) / (vh * 0.7)));
+      const scale = 0.94 + 0.06 * progress;
+      const rise = 48 * (1 - progress);
+      figure.style.transform = `translateY(${rise}px) scale(${scale})`;
+      figure.style.opacity = String(0.4 + 0.6 * progress);
+    };
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(apply);
+    };
+    apply();
+    rootEl.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    return () => {
+      rootEl.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [rootRef]);
 
   useEffect(() => {
     let cancelled = false;
@@ -213,7 +250,7 @@ export default function LandingPage() {
               </div>
             ))}
           </div>
-          <div className={styles.heroFigure} data-reveal>
+          <div className={styles.heroFigure} ref={heroFigureRef}>
             <img
               src="/landing/viewer-fourup.jpg"
               alt="The BodyMaps viewer showing axial, sagittal, and coronal slices of a CT scan with colored organ labels, and a 3D rendering of the segmented organs"
