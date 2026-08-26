@@ -75,6 +75,9 @@ interface UseKeyboardShortcutsArgs {
 	 *  walkthrough owns the screen — snapshots, panel toggles, and slice
 	 *  stepping must not fire invisibly underneath it). */
 	disabled?: boolean;
+	/** Retires the annotation ribbon when a shortcut switches to a measure
+	 *  tool or crosshair mode, mirroring the main-toolbar buttons' wiring. */
+	closeAnnotationToolbarIfOpen?: () => void;
 }
 
 /**
@@ -116,6 +119,7 @@ export function useKeyboardShortcuts({
 	onCollaborationUndo,
 	onUndo,
 	disabled,
+	closeAnnotationToolbarIfOpen,
 }: UseKeyboardShortcutsArgs) {
 	// Last-seen mouse position (viewport-relative clientX/Y), updated on every
 	// mousemove so +/- can zoom toward "wherever the cursor last was" even
@@ -289,9 +293,13 @@ export function useKeyboardShortcuts({
 			// ---- Plain letter shortcuts -------------------------------------------
 			if (TOOL_BY_KEY[key]) {
 				if (onCollaborationUndo && (!collaborationConnected || collaborationLocked)) return;
+				// Leaving annotation for a measure tool must retire the whole
+				// ribbon, not just the brush — same as the Download/HD buttons.
+				closeAnnotationToolbarIfOpen?.();
 				setEditMode(null); // measurement keys take the mouse back from the brush
 				setActiveMeasureTool((prev) => (prev === TOOL_BY_KEY[key] ? null : TOOL_BY_KEY[key]));
 			} else if (key === "c") {
+				closeAnnotationToolbarIfOpen?.();
 				setEditMode(null);
 				setActiveMeasureTool(null);
 				setCrosshairToolActive(true);
@@ -332,5 +340,6 @@ export function useKeyboardShortcuts({
 		onCollaborationUndo,
 		onUndo,
 		disabled,
+		closeAnnotationToolbarIfOpen,
 	]);
 }

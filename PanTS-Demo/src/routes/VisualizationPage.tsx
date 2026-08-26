@@ -2257,6 +2257,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		onCollaborationUndo: liveRoom?.requestUndo,
 		onUndo: handleUndo,
 		disabled: showReportScreen,
+		closeAnnotationToolbarIfOpen,
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
 	// the new speed rather than waiting for the next stop/start.
@@ -3370,14 +3371,16 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// navigation/measurement mode had taken over underneath them. Mirrors
 	// the closing branch of handleToggleAnnotationToolbar exactly, just
 	// gated on "was it open" instead of always toggling.
-	const closeAnnotationToolbarIfOpen = () => {
+	// A function declaration (not a const) so it hoists: the
+	// useKeyboardShortcuts call above this point passes it into the hook.
+	function closeAnnotationToolbarIfOpen() {
 		if (!showAnnotationToolbar) return;
 		setShowAnnotationToolbar(false);
 		setActiveCatalogOrganId(null);
 		setActiveSegmentState(null);
 		setEditMode(null);
 		setActiveToolbarTool(null);
-	};
+	}
 
 	const handleToggleStats = () => {
 		// The right-side slot is shared by stats / metadata / measurements / mask editing.
@@ -3944,6 +3947,7 @@ const aiAvailableOrgans = useMemo(() => {
 										<button
 												className={`vp-tool ${crosshairToolActive && !activeMeasureTool && !editMode && activeToolbarTool !== "pointSegment" && activeToolbarTool !== "boxSegment" ? "vp-tool--active" : ""}`}
 												onClick={() => {
+													closeAnnotationToolbarIfOpen();
 													setEditMode(null);
 													setActiveMeasureTool(null);
 													setCrosshairToolActive((prev) => !prev);
@@ -3985,6 +3989,7 @@ const aiAvailableOrgans = useMemo(() => {
 															role="menuitem"
 															disabled={collaborationDisabled}
 																	onClick={() => {
+																		closeAnnotationToolbarIfOpen();
 																		setEditMode(null);
 																		setActiveMeasureTool((p) => (p === name ? null : name));
 																		measureFlyout.close();
