@@ -29,7 +29,7 @@ feature names, not content. It is rate-limited per IP instead — see below.
 import os
 from datetime import datetime, timedelta
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from api.auth import current_user, refuse_unless_role
 from api.rate_limit import Limiter
@@ -104,13 +104,20 @@ def collect():
     # from one address on one device, and the mmdb read (plus its cache lookup)
     # has no business running twenty times for twenty clicks in one flush.
     ip = request.remote_addr
-    stored = analytics_store.record_events(
-        body.get("events"),
-        user_id=user["id"] if user else None,
-        ip=ip,
-        geo=geoip.lookup(ip),
-        device=geoip.device_type(request.headers.get("User-Agent")),
-    )
+    try:
+        stored = analytics_store.record_events(
+            body.get("events"),
+            user_id=user["id"] if user else None,
+            ip=ip,
+            geo=geoip.lookup(ip),
+            device=geoip.device_type(request.headers.get("User-Agent")),
+        )
+    except Exception:
+        # Storage trouble (e.g. a database whose migrations haven't run) must
+        # honor the never-error contract above rather than 500 on every page
+        # view of the app being measured.
+        current_app.logger.exception("analytics collect failed; dropping batch")
+        return jsonify({"stored": 0}), 200
     return jsonify({"stored": stored}), 200
 
 
