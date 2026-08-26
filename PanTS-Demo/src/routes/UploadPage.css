@@ -61,7 +61,7 @@
 .upload-card {
   background: #f5f5f5;
   border: 1px solid rgba(0,0,0,.06);
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 28px 32px 32px;
   position: relative;
 }
@@ -69,7 +69,7 @@
 /* ── Drop zone ── */
 .dropzone {
   border: 1px dashed rgba(0,0,0,.15);
-  border-radius: 12px;
+  border-radius: 6px;
   background: rgba(0,0,0,.015);
   padding: 72px 24px;
   display: flex;
@@ -117,7 +117,7 @@
   padding: 7px 16px;
   background: rgba(0,0,0,.06);
   border: 1px solid rgba(0,0,0,.12);
-  border-radius: 8px;
+  border-radius: 5px;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 12px;
   font-weight: 500;
@@ -141,7 +141,7 @@
   padding: 10px 12px;
   background: transparent;
   border: 1px dashed rgba(0, 0, 0, 0.18);
-  border-radius: 10px;
+  border-radius: 6px;
   color: rgba(0, 0, 0, 0.55);
   font-size: 13px;
   cursor: pointer;
@@ -173,13 +173,13 @@
   padding: 10px 14px;
   background: #f5f5f5;
   border: 1px solid rgba(0,0,0,.08);
-  border-radius: 10px;
+  border-radius: 6px;
   transition: border-color 0.15s, background 0.15s;
 }
 .file-chip-icon {
   width: 32px;
   height: 32px;
-  border-radius: 7px;
+  border-radius: 5px;
   flex-shrink: 0;
   background: rgba(0,0,0,.05);
   border: 1px solid rgba(0,0,0,.1);
@@ -286,7 +286,7 @@
   padding: 10px 12px 10px 14px;
   background: rgba(0,0,0,.04);
   border: 1px solid rgba(0,0,0,.08);
-  border-radius: 8px;
+  border-radius: 5px;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 13px;
   color: #8f8f8f;
@@ -330,7 +330,7 @@
   right: 0;
   background: #fff;
   border: 1px solid rgba(0,0,0,.12);
-  border-radius: 8px;
+  border-radius: 5px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.10);
   z-index: 200;
   overflow: visible;
@@ -348,9 +348,9 @@
   transition: background 0.12s;
 }
 
-.ps-option:first-child { border-radius: 8px 8px 0 0; }
-.ps-option:last-child  { border-radius: 0 0 8px 8px; }
-.ps-option:only-child  { border-radius: 8px; }
+.ps-option:first-child { border-radius: 5px 5px 0 0; }
+.ps-option:last-child  { border-radius: 0 0 5px 5px; }
+.ps-option:only-child  { border-radius: 5px; }
 
 .ps-option:hover {
   background: rgba(0,0,0,.05);
@@ -415,7 +415,7 @@
   font-weight: 400;
   line-height: 1.55;
   padding: 8px 10px;
-  border-radius: 6px;
+  border-radius: 4px;
   pointer-events: none;
   z-index: 300;
   white-space: normal;
@@ -441,7 +441,7 @@
   padding: 10px 14px;
   background: rgba(0,0,0,.04);
   border: 1px solid rgba(0,0,0,.08);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #8f8f8f;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 13px;
@@ -481,7 +481,7 @@
   padding: 10px 14px;
   background: rgba(0,0,0,.04);
   border: 1px solid rgba(0,0,0,.08);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #8f8f8f;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 13px;
@@ -523,7 +523,7 @@
   min-width: 300px;
   background: #ffffff;
   border: 1px solid rgba(0,0,0,.10);
-  border-radius: 10px;
+  border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0,0,0,.12);
   z-index: 100;
   /* visible (not hidden) so the LesionSegmenter submenu can fly out past the edge */
@@ -603,7 +603,7 @@
 .active-cancel-btn {
   background: transparent;
   border: 1px solid rgba(0, 0, 0, 0.1);
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 6px 12px;
   color: #6a6a6a;
   font-family: 'Space Grotesk', sans-serif;
@@ -636,7 +636,7 @@
   padding: 10px 32px;
   background: #002d72;
   border: 1px solid #002d72;
-  border-radius: 8px;
+  border-radius: 5px;
   color: #ffffff;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 13px;
@@ -660,7 +660,7 @@
   padding: 7px 18px;
   background: rgba(0,0,0,.04);
   border: 1px solid rgba(0,0,0,.12);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #6a6a6a;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 12px;
@@ -686,7 +686,7 @@
   padding: 8px 18px;
   background: rgba(0,0,0,.04);
   border: 1px solid rgba(0,0,0,.08);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #8f8f8f;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 12px;
@@ -768,7 +768,7 @@
   padding: 16px 20px;
   background: rgba(0,0,0,.03);
   border: 1px solid rgba(0,0,0,.08);
-  border-radius: 10px;
+  border-radius: 6px;
 }
 .result-title {
   font-family: 'JetBrains Mono', monospace;
@@ -788,7 +788,7 @@
   padding: 9px 20px;
   background: rgba(0,0,0,.06);
   border: 1px solid rgba(0,0,0,.12);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #111111;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 12px;
@@ -818,7 +818,7 @@
   padding: 10px 16px;
   background: rgba(0,0,0,.025);
   border: 1px solid rgba(0,0,0,.06);
-  border-radius: 8px;
+  border-radius: 5px;
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
   color: #8f8f8f;
@@ -860,7 +860,7 @@
   padding: 12px 14px;
   background: #f5f5f5;
   border: 1px solid rgba(0,0,0,.06);
-  border-radius: 10px;
+  border-radius: 6px;
   cursor: pointer;
   transition: all 0.2s;
 }
@@ -877,7 +877,7 @@
   padding: 6px 14px;
   background: rgba(0,0,0,.06);
   border: 1px solid rgba(0,0,0,.12);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #111111;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 11px;
@@ -905,7 +905,7 @@
   padding: 5px 12px;
   background: rgba(0, 45, 114, .1);
   border: 1px solid rgba(0, 45, 114, .2);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #002d72;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 11px;
@@ -932,7 +932,7 @@
 .upload-active-job {
   background: #f5f5f5;
   border: 1px solid rgba(0,0,0,.06);
-  border-radius: 10px;
+  border-radius: 6px;
   padding: 14px 16px;
   margin-bottom: 8px;
 }
@@ -1020,7 +1020,7 @@
 .upload-completed-icon {
   width: 36px;
   height: 36px;
-  border-radius: 8px;
+  border-radius: 5px;
   background: rgba(0,0,0,.06);
   border: 1px solid rgba(0,0,0,.08);
   display: flex;
@@ -1049,7 +1049,7 @@
   height: 320px;
   background: #0a0b0d;
   border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 12px;
+  border-radius: 6px;
   overflow: hidden;
 }
 .ct-preview-canvas {
@@ -1091,7 +1091,7 @@
   gap: 10px;
   padding: 6px 10px;
   background: rgba(0, 0, 0, 0.45);
-  border-radius: 8px;
+  border-radius: 5px;
   backdrop-filter: blur(2px);
 }
 .dicom-preview-slider {
@@ -1125,7 +1125,7 @@
 .upload-account-banner {
   margin-top: 24px;
   padding: 12px 16px;
-  border-radius: 12px;
+  border-radius: 6px;
   background: #f5f5f5;
   border: 1px solid rgba(0, 0, 0, 0.08);
   font-family: 'JetBrains Mono', monospace;
@@ -1169,7 +1169,7 @@
   align-items: center;
   gap: 18px;
   padding: 16px 20px;
-  border-radius: 12px;
+  border-radius: 6px;
   background: #f5f5f5;
   border: 1px solid rgba(0, 45, 114, 0.14);
 }
@@ -1234,7 +1234,7 @@
 .proc-details-btn {
   flex-shrink: 0;
   padding: 6px 12px;
-  border-radius: 6px;
+  border-radius: 4px;
   background: transparent;
   border: 1px solid rgba(0, 0, 0, 0.12);
   color: #111111;
@@ -1264,7 +1264,7 @@
   min-width: 220px;
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.10);
-  border-radius: 10px;
+  border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   padding: 4px 0;
   z-index: 110;

@@ -13,7 +13,7 @@
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 12px;
+  border-radius: 6px;
   padding: 10px 14px;
   box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.6);
   color: #ffffff;
@@ -34,7 +34,7 @@
 .compareTrayInput {
   width: 96px;
   padding: 5px 8px;
-  border-radius: 8px;
+  border-radius: 5px;
   border: 1px solid rgba(255, 255, 255, 0.2);
   background: rgba(255, 255, 255, 0.06);
   color: #ffffff;
@@ -47,7 +47,7 @@
   background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.2);
   color: #ffffff;
-  border-radius: 8px;
+  border-radius: 5px;
   padding: 5px 10px;
   cursor: pointer;
   font-size: 12px;
@@ -57,7 +57,7 @@
   background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.2);
   color: #ffffff;
-  border-radius: 8px;
+  border-radius: 5px;
   padding: 5px 10px;
   font-size: 12px;
   cursor: pointer;
@@ -71,7 +71,7 @@
   background: #2563eb;
   border: none;
   color: #ffffff;
-  border-radius: 8px;
+  border-radius: 5px;
   padding: 5px 12px;
   cursor: pointer;
   font-size: 12px;

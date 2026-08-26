@@ -9,7 +9,7 @@
 
 .pagerBtn {
   padding: 8px 16px;
-  border-radius: 8px;
+  border-radius: 5px;
   font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 13px;
   font-weight: 600;
@@ -43,7 +43,7 @@
 .pagerInput {
   width: 132px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 5px;
   border: 1px solid rgba(0, 0, 0, 0.12);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 12px;
