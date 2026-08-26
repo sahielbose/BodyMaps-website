@@ -840,6 +840,16 @@ const UploadPage: React.FC = () => {
     } catch (err) {
       if (controller.signal.aborted) return null;
       console.error("Background upload failed:", err);
+      // The finally below clears the status line for the foreground sid, so
+      // this failure notice is deferred one tick to survive it. Copy matters:
+      // the file chip is still selected and Run falls back to a fresh
+      // resumable upload, so a retry really is one click away.
+      const detail = err instanceof Error ? err.message : "network error";
+      setTimeout(() => {
+        setMessage(
+          `Upload of ${file.name} failed (${detail}). It will be retried when you press Run.`,
+        );
+      }, 0);
       return null;
     } finally {
       if (foregroundUploadSidRef.current === sid) {
@@ -868,7 +878,16 @@ const UploadPage: React.FC = () => {
     itemUploadRef.current.set(item.id, { sid, uploadDone });
     const file = item.file;
     enqueueUpload(async () => {
-      resolveDone(await preUploadOnly(sid, file));
+      const name = await preUploadOnly(sid, file);
+      if (!name) {
+        // Failed (or aborted): forget this attempt so the selection/model
+        // effect can start a fresh one instead of the idempotence check
+        // pinning the item to a dead upload forever. Guarded so a newer
+        // attempt for the same item is never deleted by an older failure.
+        const cur = itemUploadRef.current.get(item.id);
+        if (cur && cur.sid === sid) itemUploadRef.current.delete(item.id);
+      }
+      resolveDone(name);
     });
   };
 
@@ -1235,6 +1254,31 @@ const UploadPage: React.FC = () => {
       (async () => {
         const uploadedName = await pre.uploadDone;
         if (!uploadedName) {
+          // The background pre-upload failed or was aborted. The file is
+          // still in hand, so retry through the normal resumable path under
+          // the same session instead of insta-failing a run the user just
+          // asked for. runUpload surfaces its own errors, so if this retry
+          // also fails the card fails with a reason.
+          if (item.kind === "nifti") {
+            const retry: PendingUpload = {
+              sessionId: sid,
+              file: item.file,
+              filename: item.file.name,
+              model,
+              bdmapId: "",
+              totalChunks: Math.ceil(item.file.size / CHUNK_SIZE),
+              nextChunk: 0,
+              chunkSize: CHUNK_SIZE,
+            };
+            const resumable = await savePendingUpload(retry);
+            uploadRemainingRef.current.set(sid, item.file.size);
+            setPhase(sid, "waiting");
+            enqueueUpload(() => {
+              uploadResumableRef.current = resumable;
+              return runUpload(retry, true);
+            });
+            return;
+          }
           setPhase(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
           return;
