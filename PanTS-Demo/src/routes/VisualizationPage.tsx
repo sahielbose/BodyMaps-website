@@ -3347,6 +3347,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		if (enhance.state === "done") {
 			setAnnotateHdLoading(false);
 			setShowAnnotationToolbar(true);
+			// Same mutual exclusion as handleToggleAnnotationToolbar: the class
+			// panel would otherwise open hidden under the right-docked AI sidebar.
+			setShowAISidebar(false);
 		} else if (enhance.state === "failed") {
 			setAnnotateHdLoading(false);
 			setAnnotateHdError(true);
@@ -3381,6 +3384,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const handleToggleAnnotationToolbar = () => {
 		const opening = !showAnnotationToolbar;
 		setShowAnnotationToolbar(opening);
+		if (opening) {
+			// Both the class panel and the AI sidebar dock fixed to the right
+			// edge; the sidebar (z 90) sits above the panel (z 45), so opening
+			// annotation with the assistant up would hide the panel entirely
+			// while the layout reserved space for both. Mirror what
+			// handleToggleAISidebar already does in reverse: the two
+			// right-docked panels are mutually exclusive.
+			setShowAISidebar(false);
+		}
 		if (!opening) {
 			// Closing (deselecting the Annotate button): drop whatever class
 			// was targeted — the isolation effect above reacts to
