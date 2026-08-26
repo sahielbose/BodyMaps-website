@@ -2314,10 +2314,17 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		const enhanceAbort = new AbortController();
 		enhanceAbortRef.current = enhanceAbort;
 		const deadline = window.setTimeout(() => enhanceAbort.abort(), VIEWER_LOAD_TIMEOUT_MS);
-		// The HD stream is the only download in flight, so any progress event is ours.
+		// The HD streams are the only downloads in flight, but there are TWO of
+		// them in sequence (CT, then the segmentation rebuild below), and this
+		// subscription stays live across both. Scale each stream into its own
+		// band so the indicator is monotonic instead of counting to ~100% and
+		// jumping back down when the mask starts streaming.
+		let enhancePhase: "ct" | "seg" = "ct";
 		const unsubscribe = subscribeToVolumeProgress((loaded, total) => {
 			if (total > 0) {
-				setEnhance({ state: "streaming", pct: Math.min(100, Math.round((loaded / total) * 100)) });
+				const frac = Math.min(1, loaded / total);
+				const pct = enhancePhase === "ct" ? Math.round(frac * 90) : 90 + Math.round(frac * 10);
+				setEnhance({ state: "streaming", pct });
 			}
 		});
 		try {
@@ -2347,6 +2354,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			// hdReady in the Annotate button) until this completes, since painting
 			// mid-swap would hit the same mismatch this is meant to fix.
 			if (segUrl) {
+				enhancePhase = "seg";
 				const segOk = await awaitViewerLoadOrAbort(
 					upgradeSegmentationVolume(`${API_BASE}/api/get-segmentations/${pantsCase}.nii.gz`),
 					enhanceAbort.signal,
