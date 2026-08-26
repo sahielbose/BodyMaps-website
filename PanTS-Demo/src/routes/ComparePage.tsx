@@ -205,6 +205,16 @@ export default function ComparePage() {
 		return () => window.removeEventListener("keydown", onKey);
 	}, [showStatsModal]);
 
+	// Draft input state, committed to the URL (and thus to the fetch effects) only on
+	// blur/Enter — typing "1234" must not fire /api/search + /api/mask-data for
+	// "1", "12", "123" and flicker the whole page per keystroke.
+	const [draftA, setDraftA] = useState(idA);
+	const [draftB, setDraftB] = useState(idB);
+	useEffect(() => {
+		setDraftA(idA);
+		setDraftB(idB);
+	}, [idA, idB]);
+
 	const setId = (key: "a" | "b", value: string) => {
 		const next = new URLSearchParams(params);
 		if (value.trim()) next.set(key, value.trim());
@@ -234,8 +244,12 @@ export default function ComparePage() {
 					<BarChip id={idA} data={a} />
 					<input
 						className="cmp__input"
-						value={idA}
-						onChange={(e) => setId("a", e.target.value)}
+						value={draftA}
+						onChange={(e) => setDraftA(e.target.value)}
+						onBlur={() => setId("a", draftA)}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") setId("a", draftA);
+						}}
 						placeholder="Case A id"
 						aria-label="Case A id"
 					/>
@@ -244,8 +258,12 @@ export default function ComparePage() {
 					</button>
 					<input
 						className="cmp__input"
-						value={idB}
-						onChange={(e) => setId("b", e.target.value)}
+						value={draftB}
+						onChange={(e) => setDraftB(e.target.value)}
+						onBlur={() => setId("b", draftB)}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") setId("b", draftB);
+						}}
 						placeholder="Case B id"
 						aria-label="Case B id"
 					/>
