@@ -99,7 +99,9 @@
 .vp-session-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 70;
+  /* Modal tier: above the AI sidebar (z 90), matching the other full-screen
+     viewer overlays (ToolWalkthrough / annotation shortcut overlay, both 200). */
+  z-index: 200;
   display: flex;
   align-items: center;
   justify-content: center;
