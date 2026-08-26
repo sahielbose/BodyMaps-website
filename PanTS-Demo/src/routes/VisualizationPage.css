@@ -1887,3 +1887,11 @@
     transform: rotate(360deg);
   }
 }
+/* While the report walkthrough is open the 3D scene is a passive backdrop:
+   the viewer's own chrome must not stay visible or clickable underneath the
+   overlay (the report brings its own header). */
+.VisualizationPage.report-open .vp-3dbar,
+.VisualizationPage.report-open .vp-topbar,
+.VisualizationPage.report-open .vp-floating-gear {
+  display: none;
+}

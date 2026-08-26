@@ -3629,7 +3629,7 @@ const aiAvailableOrgans = useMemo(() => {
 	return (
 		<div
 			ref={vpRootRef}
-			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${showAnnotationToolbar ? " annotation-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}${quizPractice ? " is-quiz-practice" : ""}`}
+			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${showAnnotationToolbar ? " annotation-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}${quizPractice ? " is-quiz-practice" : ""}${showReportScreen ? " report-open" : ""}`}
 			onPointerDownCapture={(event) => {
 				if (!liveRoom?.followingId) return;
 				const target = event.target as HTMLElement;
@@ -4374,6 +4374,12 @@ const aiAvailableOrgans = useMemo(() => {
 													className="vp-tool"
 													onClick={() => {
 														track("report_open");
+														// The report walkthrough uses the live 3D mesh scene as its
+														// backdrop, so any annotate chrome, organ isolation, or
+														// volume-render mode left active would bleed through it.
+														closeAnnotationToolbarIfOpen();
+														handleClearIsolation();
+														setThreeDMode("mesh");
 														setViewMode("3d");
 														setShowReportScreen(true);
 													}}
