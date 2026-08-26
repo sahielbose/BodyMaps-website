@@ -5,6 +5,14 @@ import { prefetchViewer } from "../helpers/prefetchViewer";
 import type { CaseId } from "../helpers/search";
 import type { PreviewType } from "../types";
 
+// Touch devices have no hover phase, so hover-revealed controls would be
+// unreachable there: the first tap fires mouseenter + click together and the
+// card's onClick navigates immediately. Evaluated once at module load.
+const canHover =
+	typeof window !== "undefined" &&
+	typeof window.matchMedia === "function" &&
+	window.matchMedia("(hover: hover)").matches;
+
 type Props = {
 	id: CaseId;
 	previewMetadata: PreviewType;
@@ -190,8 +198,9 @@ export default function Preview({
 					/>
 				))}
 
-				{/* Bookmark toggle — always visible once saved, otherwise reveals on hover */}
-				{onToggleSave && (saved || hovered) && (
+				{/* Bookmark toggle — always visible once saved (or on touch devices,
+				    which have no hover), otherwise reveals on hover */}
+				{onToggleSave && (saved || hovered || !canHover) && (
 					<button
 						type="button"
 						aria-label={saved ? `Remove case ${id} from saved` : `Save case ${id}`}
@@ -237,8 +246,8 @@ export default function Preview({
 				{/* Compare selector — a labelled checkbox in the bottom-left (kept away from the
 				    top-right bookmark to avoid mis-taps). A checkbox + text reads as "select to
 				    compare" far more clearly than a bare icon. Reveals on hover; stays + turns
-				    blue once selected. */}
-				{onToggleCompare && (compareSelected || hovered) && (
+				    blue once selected. Always visible on touch devices, which have no hover. */}
+				{onToggleCompare && (compareSelected || hovered || !canHover) && (
 					<button
 						type="button"
 						aria-label={compareSelected ? `Remove case ${id} from comparison` : `Add case ${id} to comparison`}
