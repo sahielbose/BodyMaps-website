@@ -132,6 +132,19 @@ function organRoot(organ: string): string {
     .toLowerCase();
 }
 
+// Renders "Case 12" plus " · F · 61y" only for demographics the backend
+// actually has. It returns the string "N/A" for missing age/sex (despite the
+// declared types), which used to render as "Case 12 · N/A · N/Ay".
+function caseSummary(id: string, patient: ReportData['patient']): string {
+  const parts = [`Case ${id}`];
+  const sex: unknown = patient.sex;
+  const age: unknown = patient.age;
+  if (typeof sex === 'string' && sex.trim() && sex.trim().toUpperCase() !== 'N/A') parts.push(sex.trim());
+  if (typeof age === 'number' && Number.isFinite(age)) parts.push(`${age}y`);
+  else if (typeof age === 'string' && /^\d+(\.\d+)?$/.test(age.trim())) parts.push(`${age.trim()}y`);
+  return parts.join(' · ');
+}
+
 function getReportSection(organ: string, comments: string): string | null {
   if (!comments) return null;
   const root = organRoot(organ);
@@ -884,7 +897,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 270 }}>
               <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.36)', letterSpacing: '0.12em', fontWeight: 760 }}>BODYMAPS</span>
               <span style={{ color: 'rgba(255,255,255,0.16)', fontSize: 11 }}>·</span>
-              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.52)' }}>Case {id} · {data.patient.sex} · {data.patient.age}y</span>
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.52)' }}>{caseSummary(id, data.patient)}</span>
             </div>
 
             <div style={{ position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%, -50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 9 }}>
