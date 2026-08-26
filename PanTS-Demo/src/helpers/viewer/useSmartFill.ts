@@ -1,4 +1,4 @@
-import { useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import {
 	canvasPointToVoxel,
 	canvasPointToWorld,
@@ -130,6 +130,22 @@ export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog }: UseSm
 		if (!enabled || !scribbleActiveRef.current) return;
 		addPoint(pane, e);
 	};
+	// A stroke released outside the pane never reaches the pane's own mouseup
+	// handler, which used to leave scribbleActiveRef stuck true — moving the
+	// mouse back over the pane kept painting with no button held. The window
+	// always sees the release, and the handler below reads only refs, so
+	// ending the stroke from here is identical to ending it from the pane.
+	const handleMouseUpRef = useRef<() => void>(() => {});
+	useEffect(() => {
+		const end = () => handleMouseUpRef.current();
+		window.addEventListener("mouseup", end);
+		window.addEventListener("blur", end);
+		return () => {
+			window.removeEventListener("mouseup", end);
+			window.removeEventListener("blur", end);
+		};
+	}, []);
+
 	const handleMouseUp = () => {
 		scribbleActiveRef.current = false;
 		const stroke = strokeRef.current;
@@ -177,6 +193,8 @@ export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog }: UseSm
 			}
 		});
 	});
+
+	handleMouseUpRef.current = handleMouseUp;
 
 	return {
 		markMode,

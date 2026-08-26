@@ -5,7 +5,7 @@
 // simpler point/box prompt gesture: a single click submits immediately in
 // "point" mode; a click-drag defines two corners and submits on mouseup in
 // "box" mode.
-import { useCallback, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import {
 	canvasPointToWorld,
 	worldToCanvasPoint,
@@ -149,6 +149,22 @@ export function useInteractivePromptTool({
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		setLiveBoxCanvas([dragStartCanvas, canvasPos]);
 	};
+
+	// A drag released outside the pane never reaches the pane's mouseup
+	// handler, which used to leave the drag state (and the live preview box)
+	// stuck until the next click — which then submitted a box the user never
+	// meant to draw. A window-level release just abandons the drag; releases
+	// inside the pane are already handled (and reset) before this fires.
+	useEffect(() => {
+		if (!dragStartCanvas) return;
+		const abandon = () => reset();
+		window.addEventListener("mouseup", abandon);
+		window.addEventListener("blur", abandon);
+		return () => {
+			window.removeEventListener("mouseup", abandon);
+			window.removeEventListener("blur", abandon);
+		};
+	}, [dragStartCanvas, reset]);
 
 	const handleMouseUp = (pane: CinePane) => (e: MouseEvent) => {
 		if (!enabled || mode !== "box" || paneRef.current !== pane || !dragStartWorld) return;
