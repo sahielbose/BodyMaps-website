@@ -5153,25 +5153,32 @@ const aiAvailableOrgans = useMemo(() => {
 				popupMinRef={annotationPopupMinRef}
 				sliceJumpRef={sliceJumpWrapRef}
 			/>
-			{/* Point/box-segment SUCCESS/ERROR overlay. Reuses the exact same centered
-			    GuidedStepModal (blurred backdrop + "Got it") that Copy across
-			    slices/Fill between slices use for their own success step,
-			    rather than a small bottom-of-screen pill — consistent with
-			    every other guided-flow tool's confirmation. Rendered once
-			    globally (not per-pane, since a point-prompt submit doesn't
-			    stay anchored to one pane the way a box-drag does). */}
-			{(pointSegment.status === "success" || pointSegment.status === "error" ||
-			  boxSegment.status === "success" || boxSegment.status === "error") && (() => {
-				const active =
-					pointSegment.status === "success" || pointSegment.status === "error"
-						? pointSegment
-						: boxSegment;
+			{/* Point/box-segment APPLYING/SUCCESS/ERROR overlay. Reuses the exact
+			    same centered GuidedStepModal (blurred backdrop + "Got it") that
+			    Copy across slices/Fill between slices use for their own success
+			    step, rather than a small bottom-of-screen pill — consistent with
+			    every other guided-flow tool's confirmation. The applying branch
+			    covers the server round trip, which takes seconds; without it the
+			    prompt click looks dead (the tool is disabled and repeat clicks
+			    are dropped while busy). Rendered once globally (not per-pane,
+			    since a point-prompt submit doesn't stay anchored to one pane the
+			    way a box-drag does). */}
+			{(pointSegment.status !== "idle" || boxSegment.status !== "idle") && (() => {
+				const active = pointSegment.status !== "idle" ? pointSegment : boxSegment;
+				const applying = active.status === "applying";
 				return (
 					<GuidedStepModal
-						title={active.status === "success" ? "Success" : "No change"}
-						instruction={active.statusMessage ?? ""}
-						primaryLabel="Got it"
-						onPrimary={active.dismissStatus}
+						title={
+							applying ? "Applying" : active.status === "success" ? "Success" : "No change"
+						}
+						instruction={
+							applying
+								? "Segmenting from your prompt. This can take a few seconds."
+								: active.statusMessage ?? ""
+						}
+						primaryLabel={applying ? "Working" : "Got it"}
+						onPrimary={applying ? () => {} : active.dismissStatus}
+						busy={applying}
 					/>
 				);
 			})()}
