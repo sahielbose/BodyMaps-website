@@ -72,9 +72,9 @@ export default function Header() {
     <header className={styles.headerRoot}>
       <nav className={styles.nav} aria-label="Main navigation">
         <Link
-          to="/dashboard"
+          to="/"
           className={styles.logoPill}
-          aria-label="Go to the BodyMaps dashboard"
+          aria-label="Go to the BodyMaps home page"
         >
           <img src="/bodymaps-logo.svg" alt="" className={styles.logoImg} />
 
