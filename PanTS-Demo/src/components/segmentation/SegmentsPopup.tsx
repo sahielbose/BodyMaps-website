@@ -426,7 +426,11 @@ export default function SegmentsPopup({
 			const st = resizeStateRef.current;
 			if (!st) return;
 			const delta = st.startX - e.clientX; // dragging left = positive delta = wider
-			const next = Math.min(POPUP_MAX_WIDTH, Math.max(POPUP_MIN_WIDTH, st.startWidth + delta));
+			// Also clamp against the window so the panel can never be dragged
+			// wide enough to crush the CT stage on narrow screens (matches the
+			// 45vw cap VisualizationPage.css puts on the reserved gutter).
+			const maxW = Math.min(POPUP_MAX_WIDTH, Math.floor(window.innerWidth * 0.45));
+			const next = Math.min(maxW, Math.max(POPUP_MIN_WIDTH, st.startWidth + delta));
 			setWidth(next);
 		};
 		const onUp = () => { resizeStateRef.current = null; };

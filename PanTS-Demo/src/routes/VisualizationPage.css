@@ -38,7 +38,10 @@
      fixed-position ribbon anchors via `top: var(--vp-topbar-h)` in
      AnnotationToolbar.css, so only .vp-stage (not the topbar) needs pushing
      down to make room for it. */
-  padding-right: var(--atb-segpanel-w, 320px);
+  /* Clamped against the viewport so the reserved gutter (the class panel is
+     user-resizable up to 560px) can never crush the CT stage at narrow
+     window widths. */
+  padding-right: min(var(--atb-segpanel-w, 320px), 45vw);
 }
 
 .VisualizationPage.annotation-open .vp-stage {
@@ -100,12 +103,17 @@
   align-items: stretch;
   min-height: 0;
   overflow: hidden;
+  /* At extreme narrowness (docks open on a small window) the row scrolls
+     sideways instead of crushing the CT grid below .vp-stage's floor. */
+  overflow-x: auto;
 }
 
 .vp-stage {
   flex: 1 1 auto;
   position: relative;
-  min-width: 0;
+  /* Usable floor so the viewports never collapse to a sliver when the
+     fixed-width docks eat the row; .vp-body scrolls past this point. */
+  min-width: 260px;
   min-height: 0;
   overflow: hidden;
   background: #000;
@@ -1287,7 +1295,8 @@
    so it keeps its mounted state without occupying space when closed. */
 .vp-organs {
   display: none;
-  flex: 0 0 288px;
+  /* Fluid cap so the dock shrinks on narrow windows instead of starving the stage. */
+  flex: 0 0 min(288px, 26vw);
   min-height: 0;
   font-family: var(--vp-font);
   background: rgba(14, 15, 18, 0.94);
@@ -1418,8 +1427,9 @@
 
 /* ---- Organ statistics panel — docked right of the stage (in flow, not overlay) ---- */
 .vp-stats {
-  flex: 0 0 350px;
-  width: 350px;
+  /* Fluid cap so the dock shrinks on narrow windows instead of starving the stage. */
+  flex: 0 0 min(350px, 32vw);
+  width: min(350px, 32vw);
   min-height: 0;
   display: flex;
   flex-direction: column;
