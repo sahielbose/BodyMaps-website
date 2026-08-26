@@ -355,7 +355,13 @@ from openpyxl import load_workbook
 SESSIONS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "tmp")
 PDF_DIR = f"{Constants.PERMISSIONS_DIR}/pdf"
 os.makedirs(SESSIONS_DIR, exist_ok=True)
-os.makedirs(PDF_DIR, exist_ok=True)
+try:
+    os.makedirs(PDF_DIR, exist_ok=True)
+except OSError as e:
+    # PERMISSIONS_DIR defaults to /home/visitor/data, which is not creatable on
+    # a dev machine — that must not kill the whole API at import time. PDF export
+    # re-creates the directory when actually writing a report.
+    print(f"[boot] could not create PDF_DIR {PDF_DIR} ({e}); PDF export disabled until it exists")
 
 def _arg(name: str, default=None):
     return request.args.get(name, default)
@@ -705,6 +711,7 @@ def get_report(id):
     # Per-request filenames: with gunicorn's 8 threads, two simultaneous report
     # requests sharing temp.pdf/final.pdf would corrupt each other's output.
     request_token = uuid.uuid4().hex
+    os.makedirs(PDF_DIR, exist_ok=True)
     temp_pdf_path = f"{PDF_DIR}/temp_{request_token}.pdf"
     output_pdf_path = f"{PDF_DIR}/final_{request_token}.pdf"
     try:
@@ -1988,6 +1995,7 @@ def _create_organ_overview_image(ct_array, mask_array, label_id, output_path, co
 def generate_report_pdf(id):
     if not _is_safe_id(id):
         return jsonify({"error": "Invalid id"}), 400
+    os.makedirs(PDF_DIR, exist_ok=True)
     temp_pdf_path = f"{PDF_DIR}/temp_report_{id}.pdf"
     output_pdf_path = f"{PDF_DIR}/report_{id}.pdf"
     try:
