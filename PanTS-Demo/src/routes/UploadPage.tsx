@@ -1404,8 +1404,9 @@ const UploadPage: React.FC = () => {
   };
 
   // Download one completed scan's result zip. Parameterised so it works from a
-  // completed card and from inside the batch-details modal.
-  const downloadResult = async (sid: string) => {
+  // completed card and from inside the batch-details modal. Returns whether
+  // the download actually started, so downloadBatch can report honestly.
+  const downloadResult = async (sid: string): Promise<boolean> => {
     setMessage("Preparing download...");
     try {
       const statusRes = await fetch(`${API_BASE}/api/inference-status/${sid}`);
@@ -1418,7 +1419,7 @@ const UploadPage: React.FC = () => {
         setMessage(
           `Status: ${statusData.status || "unknown"}. Please wait until completed.`,
         );
-        return;
+        return false;
       }
       stopPolling(sid);
 
@@ -1439,19 +1440,30 @@ const UploadPage: React.FC = () => {
       setMessage(
         "Download started: zip includes combined_labels.nii.gz and output.csv",
       );
+      return true;
     } catch (err) {
       console.error(err);
       setMessage("Download failed: " + (err as Error).message);
+      return false;
     }
   };
 
-  // Download a whole batch as one archive. In this mock there's no server-side
-  // bundling endpoint yet, so it surfaces intent; wire to a real batch-zip
-  // endpoint when the backend supports it.
-  const downloadBatch = (uploads: RecentUpload[]) => {
+  // Download a whole batch: one result zip per completed scan, sequentially
+  // through the same per-scan path the single Download button uses. Interim
+  // until a server-side batch-zip endpoint exists (there is none today).
+  const downloadBatch = async (uploads: RecentUpload[]) => {
     const completed = uploads.filter(u => u.status === "Completed");
     if (completed.length === 0) { setMessage("No completed scans to download yet."); return; }
-    setMessage(`Downloading ${completed.length} scan${completed.length === 1 ? "" : "s"} as a batch…`);
+    setMessage(`Downloading ${completed.length} scan${completed.length === 1 ? "" : "s"}...`);
+    let ok = 0;
+    for (const u of completed) {
+      if (await downloadResult(u.sessionId)) ok++;
+    }
+    setMessage(
+      ok === completed.length
+        ? `Downloaded ${ok} scan${ok === 1 ? "" : "s"}.`
+        : `Downloaded ${ok} of ${completed.length} scans. The rest failed, use each scan's own Download button to retry.`,
+    );
   };
 
   const handleRunEpaiOnReconstruction = async () => {
