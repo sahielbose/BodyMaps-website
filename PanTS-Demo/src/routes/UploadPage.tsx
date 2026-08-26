@@ -147,10 +147,11 @@ type SelectedItem =
 
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
-  // Running inference requires an account, so any upload action while signed
-  // out opens the auth popup instead of proceeding. It opens on sign-in: most
-  // people hitting this already have an account, and the popup switches to
-  // sign-up in one click for the ones who don't.
+  // Only running inference requires an account. Picking files and the "None"
+  // view-only mode stay open to everyone: that path never leaves the browser,
+  // so the auth popup appears at Run, not at file selection. It opens on
+  // sign-in: most people hitting this already have an account, and the popup
+  // switches to sign-up in one click for the ones who don't.
   const { isAuthenticated, promptAuth, user, refreshUsage } = useAuth();
   const ensureAccount = (): boolean => {
     if (isAuthenticated) return true;
@@ -304,7 +305,6 @@ const UploadPage: React.FC = () => {
 
   /* ── File handling ── */
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!ensureAccount()) { e.target.value = ""; return; }
     if (!e.target.files) return;
     const filteredFiles = Array.from(e.target.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
@@ -327,8 +327,6 @@ const UploadPage: React.FC = () => {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    // Inlined (not via ensureAccount) so the memoized closure sees fresh auth.
-    if (!isAuthenticated) { promptAuth(); return; }
     if (!e.dataTransfer.files) return;
     const filteredFiles = Array.from(e.dataTransfer.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
@@ -346,7 +344,7 @@ const UploadPage: React.FC = () => {
         file: f,
       })),
     ]);
-  }, [isAuthenticated, promptAuth]);
+  }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -372,10 +370,6 @@ const UploadPage: React.FC = () => {
   const handleDicomInferenceSelect = (
     e: React.ChangeEvent<HTMLInputElement>,
   ) => {
-    if (!ensureAccount()) {
-      e.target.value = "";
-      return;
-    }
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-picking the same folder later
     const candidates = files.filter(looksLikeDicom);
@@ -1255,12 +1249,12 @@ const UploadPage: React.FC = () => {
   };
 
   const handleRunEpaiInference = async () => {
-    if (!ensureAccount()) return;
     const items = selectedItems;
     const first = items[0] ?? null;
 
     // "None" model = view only: open the scan in its full local viewer, nothing is
-    // uploaded or run. DICOM opens the /dicom viewer, NIfTI the /local-nifti viewer.
+    // uploaded or run, so no account is needed. DICOM opens the /dicom viewer,
+    // NIfTI the /local-nifti viewer.
     if (selectedModel === "None") {
       if (!first) { alert("Select a scan to view first."); return; }
       if (first.kind === "dicom") {
@@ -1277,6 +1271,10 @@ const UploadPage: React.FC = () => {
       alert("Select a file to upload first.");
       return;
     }
+
+    // Real models upload and run on the servers, and that is the point where an
+    // account becomes necessary.
+    if (!ensureAccount()) return;
 
     // Caught here rather than per-file, so a plan that runs one scan at a time
     // says so before anything uploads instead of accepting the first and
@@ -1427,9 +1425,7 @@ const UploadPage: React.FC = () => {
           {/* ── Drop zone ── */}
           <div
             className={`dropzone${isDragOver ? " drag-over" : ""}`}
-            onClick={() => {
-              if (ensureAccount()) fileInputRef.current?.click();
-            }}
+            onClick={() => fileInputRef.current?.click()}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -1483,7 +1479,7 @@ const UploadPage: React.FC = () => {
                 className="dropzone-btn"
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (ensureAccount()) fileInputRef.current?.click();
+                  fileInputRef.current?.click();
                 }}
               >
                 Select NIfTI file
@@ -1493,7 +1489,7 @@ const UploadPage: React.FC = () => {
                 className="dropzone-btn"
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (ensureAccount()) dicomUploadInputRef.current?.click();
+                  dicomUploadInputRef.current?.click();
                 }}
               >
                 Select DICOM folder
