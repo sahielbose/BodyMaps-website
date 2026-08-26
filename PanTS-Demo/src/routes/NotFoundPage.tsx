@@ -50,7 +50,7 @@ export default function NotFoundPage() {
             marginTop: "0.75rem",
             color: "var(--paper)",
             background: "#002d72",
-            borderRadius: 6,
+            borderRadius: 4,
             padding: "0.5rem 1rem",
             fontWeight: 500,
             fontSize: "0.9375rem",

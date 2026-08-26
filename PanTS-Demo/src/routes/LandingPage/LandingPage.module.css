@@ -67,7 +67,7 @@
 }
 .btnPrimary {
   padding: 12px 24px;
-  border-radius: 6px;
+  border-radius: 4px;
   font-family: var(--font-sans);
   font-size: 15px;
   font-weight: 500;
@@ -85,7 +85,7 @@
 }
 .btnSecondary {
   padding: 12px 24px;
-  border-radius: 6px;
+  border-radius: 4px;
   font-family: var(--font-sans);
   font-size: 15px;
   font-weight: 500;
@@ -142,7 +142,7 @@
   height: auto;
   display: block;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: 5px;
 }
 .heroCaption {
   font-size: 13px;
@@ -241,7 +241,7 @@
   position: relative;
   aspect-ratio: 8 / 5;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: 5px;
   overflow: hidden;
   background: #08090b;
 }
@@ -286,7 +286,7 @@
   aspect-ratio: 1 / 1;
   object-fit: cover;
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-radius: 4px;
   background: #08090b;
   transition: border-color 0.15s ease;
 }
@@ -311,7 +311,7 @@
 .toolChip {
   padding: 7px 13px;
   border: 1px solid var(--rule);
-  border-radius: 5px;
+  border-radius: 3px;
   background: var(--paper);
   font-size: 13.5px;
   color: var(--ink);
@@ -322,7 +322,7 @@
   margin-top: 28px;
   max-width: 560px;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: 5px;
   padding: 20px;
   display: flex;
   flex-direction: column;
@@ -332,7 +332,7 @@
   align-self: flex-end;
   background: #002d72;
   color: #ffffff;
-  border-radius: 8px 8px 2px 8px;
+  border-radius: 5px 5px 2px 5px;
   padding: 10px 14px;
   font-size: 14.5px;
   max-width: 85%;
@@ -341,7 +341,7 @@
   align-self: flex-start;
   background: var(--paper-2);
   border: 1px solid var(--rule);
-  border-radius: 8px 8px 8px 2px;
+  border-radius: 5px 5px 5px 2px;
   padding: 10px 14px;
   font-size: 14.5px;
   color: var(--ink);
@@ -357,7 +357,7 @@
 }
 .uploadStep {
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: 5px;
   background: var(--paper);
   padding: 20px;
 }

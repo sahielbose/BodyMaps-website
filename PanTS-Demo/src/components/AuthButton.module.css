@@ -4,7 +4,7 @@
 
 .signInBtn {
 	padding: 8px 16px;
-	border-radius: 6px;
+	border-radius: 4px;
 	font-family: var(--font-sans);
 	font-size: 14px;
 	font-weight: 500;
@@ -31,7 +31,7 @@
 	align-items: center;
 	gap: 8px;
 	padding: 6px 12px 6px 6px;
-	border-radius: 6px;
+	border-radius: 4px;
 	background: transparent;
 	border: 1px solid rgba(0, 0, 0, 0.1);
 	cursor: pointer;
@@ -79,7 +79,7 @@
 	min-width: 220px;
 	background: #ffffff;
 	border: 1px solid rgba(0, 0, 0, 0.08);
-	border-radius: 12px;
+	border-radius: 8px;
 	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
 	padding: 6px;
 	z-index: 100;
@@ -112,7 +112,7 @@
 	padding: 9px 12px;
 	border: none;
 	background: transparent;
-	border-radius: 8px;
+	border-radius: 5px;
 	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 13px;
 	color: #111111;
