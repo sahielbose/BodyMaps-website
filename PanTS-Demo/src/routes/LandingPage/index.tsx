@@ -221,7 +221,9 @@ export default function LandingPage() {
   ];
 
   return (
-    <div className={styles.root} ref={rootRef}>
+    // data-scroll-root: this fixed div (not the window) is the page's scroll
+    // container; ScrollToTop and the Header drawer's scroll lock target it.
+    <div className={styles.root} ref={rootRef} data-scroll-root="">
       <Header />
       <main>
         {/* ── Hero ── */}

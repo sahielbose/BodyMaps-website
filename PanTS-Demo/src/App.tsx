@@ -11,6 +11,7 @@ import LandingPage from "./routes/LandingPage";
 import ComparePage from "./routes/ComparePage";
 import Homepage from "./routes/Homepage";
 import TeamPage from "./routes/TeamPage/index";
+import ScrollToTop from "./components/ScrollToTop";
 import ScrollToTopButton from "./components/ScrollToTopButton";
 
 // The viewer routes pull in the WebGL stack (NiiVue + Cornerstone + three.js), which
@@ -92,6 +93,7 @@ function App() {
           <div className="App">
             <BrowserRouter basename={BASENAME}>
               <AnalyticsRouteTracker />
+              <ScrollToTop />
               <ScrollToTopButton />
               <Suspense fallback={<RouteFallback />}>
                 <Routes>
