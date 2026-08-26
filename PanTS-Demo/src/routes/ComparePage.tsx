@@ -10,6 +10,7 @@ import { alignStatRows } from "../helpers/compareStats";
 import { API_BASE } from "../helpers/constants";
 import { loadOrganNorms, type OrganNorms } from "../helpers/organNorms";
 import { computeStatRows, KURTOSIS_TOOLTIP, type OrganMetric } from "../helpers/organStatsExport";
+import { caseIdToApiId } from "../helpers/search";
 import "./ComparePage.css";
 
 type Demographics = { sex: string | null; age: number | null; tumor: number | null };
@@ -80,7 +81,9 @@ function useCaseData(id: string): CaseData {
 // for the hero card that's now the page's main content.
 function Thumbnail({ id, size = "lg" }: { id: string; size?: "sm" | "lg" }) {
 	const local = `${API_BASE}/api/get_image_preview/${id}`;
-	const caseIdStr = `PanTS_${id.toString().padStart(8, "0")}`;
+	// Shared helper keeps CancerVerse ids ("CV_00000001") as-is and pads PanTS
+	// ids, so the HF URL matches the dashboard Preview's instead of 404ing on CV.
+	const caseIdStr = caseIdToApiId(id);
 	const hf = `${API_BASE}/api/proxy-image?url=${encodeURIComponent(
 		`https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/profile_only/${caseIdStr}/profile.jpg`
 	)}`;
