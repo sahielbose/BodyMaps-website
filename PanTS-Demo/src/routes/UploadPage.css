@@ -1336,3 +1336,51 @@
   padding: 1px 5px;
   border-radius: 4px;
 }
+
+/* ── Narrow viewports ──
+   Functional only, no redesign: the pipeline stacks so its dropdowns stay
+   usable, menus are capped to the viewport, and the lesion submenu renders
+   inline below its item (a hover flyout never opens on touch and would fly
+   off-screen anyway). */
+@media (max-width: 640px) {
+  .pipeline-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .pipeline-step {
+    min-width: 100%;
+  }
+  .pipeline-arrow {
+    display: none;
+  }
+  .run-btn {
+    margin-left: 0;
+    width: 100%;
+  }
+  .model-dropdown-menu {
+    min-width: 0;
+    max-width: calc(100vw - 32px);
+  }
+  .model-dropdown-item.has-submenu {
+    flex-wrap: wrap;
+  }
+  .model-submenu-arrow {
+    display: none; /* points at a flyout that is now inline below */
+  }
+  .model-submenu {
+    position: static;
+    width: 100%;
+    min-width: 0;
+    box-shadow: none;
+    border: none;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 0;
+    transform: none;
+    opacity: 1;
+    visibility: visible;
+  }
+  .model-submenu::before {
+    display: none;
+  }
+}
