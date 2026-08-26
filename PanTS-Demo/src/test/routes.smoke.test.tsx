@@ -47,7 +47,7 @@ describe("route smoke tests", () => {
 
   it("Homepage (Dashboard) renders", async () => {
     renderRoute(<Homepage />);
-    expect(await screen.findByText("Browse Library")).toBeInTheDocument();
+    expect(await screen.findByText("Browse the library")).toBeInTheDocument();
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining("tumor=1&sort_by=quality"),
