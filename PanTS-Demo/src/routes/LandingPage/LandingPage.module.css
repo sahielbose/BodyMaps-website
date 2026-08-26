@@ -1,145 +1,436 @@
-/* ===== LandingPage.module.css ===== */
+/* ===== LandingPage.module.css =====
+   One scrolling page. White ground, ink text, JHU blue for actions only.
+   Reveals are opacity/transform only and are skipped for reduced motion. */
 
-/* ---------- Keyframes ---------- */
-@keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(14px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-/* ---------- Root container ---------- */
-/* Theme: BodyMaps brand tokens — ink primary (fills/CTAs), orange strictly as accent. */
 .root {
   position: fixed;
   inset: 0;
-  background: #ffffff;
+  background: var(--paper);
   display: flex;
   flex-direction: column;
   overflow-x: hidden;
-  overflow-y: auto; /* short viewports scroll instead of clipping the hero */
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  color: #111111;
+  overflow-y: auto;
+  font-family: var(--font-sans);
+  color: var(--ink);
 }
 
-.statGroup {
-  display: flex;
-  align-items: stretch;
+/* ---------- Reveal-on-scroll ---------- */
+/* Scoped under .root so the attribute selector cannot leak to other pages. */
+.root [data-reveal] {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.55s ease, transform 0.55s ease;
+}
+.root .revealed {
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .root [data-reveal] {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
 }
 
-/* ---------- Centered Hero ---------- */
+/* ---------- Hero ---------- */
 .hero {
-  flex: 1;
-  min-height: 0;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 88px 32px 96px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
   text-align: center;
-  padding: 24px;
-  padding-bottom: 100px;
-  animation: fadeInUp 0.7s cubic-bezier(.2,.8,.2,1) both;
 }
 .heroTitle {
-  font-size: clamp(64px, 12vw, 132px);
-  font-weight: 700;
-  color: #002D72;
-  letter-spacing: -0.04em;
-  line-height: 1;
+  font-size: clamp(34px, 4.6vw, 52px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.12;
   margin: 0;
-}
-.heroTitleAlt {
-  color: #111111;
+  max-width: 17em;
 }
 .heroSubtitle {
-  font-size: clamp(20px, 2.4vw, 30px);
+  font-size: clamp(16px, 1.6vw, 19px);
   font-weight: 400;
-  color: #8f8f8f;
-  letter-spacing: -0.01em;
-  margin: 22px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 20px 0 0;
+  max-width: 38em;
+}
+.heroActions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 32px;
+}
+.btnPrimary {
+  padding: 12px 24px;
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  background: #002d72;
+  color: #ffffff;
+  border: 1px solid #002d72;
+  text-decoration: none;
+  transition: background 0.15s ease;
+}
+.btnPrimary:hover {
+  background: #00399a;
+  border-color: #00399a;
+  color: #ffffff;
+}
+.btnSecondary {
+  padding: 12px 24px;
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  background: transparent;
+  color: #002d72;
+  border: 1px solid rgba(0, 45, 114, 0.35);
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.btnSecondary:hover {
+  background: rgba(0, 45, 114, 0.05);
+  border-color: rgba(0, 45, 114, 0.55);
+  color: #002d72;
 }
 
-/* ---------- Hero Stats Row ---------- */
+/* ---------- Hero stats ---------- */
 .heroStats {
   display: flex;
-  align-items: stretch;
+  align-items: baseline;
   justify-content: center;
-  margin-top: 40px;
+  flex-wrap: wrap;
+  gap: 12px 56px;
+  margin-top: 44px;
 }
 .heroStatItem {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 0 44px;
 }
 .heroStatValue {
-  font-size: 34px;
-  font-weight: 700;
-  color: #002D72;
-  letter-spacing: -0.02em;
-  line-height: 1.1;
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
 }
 .heroStatLabel {
-  font-size: 11px;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  color: #6a6a6a;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  margin-top: 8px;
-}
-.heroStatDivider {
-  width: 1px;
-  align-self: center;
-  height: 48px;
-  background: rgba(0,0,0,.08);
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 4px;
 }
 
-/* ---------- Hero Actions ---------- */
-.heroActions {
+/* ---------- Hero figure ---------- */
+.heroFigure {
+  margin-top: 56px;
+  width: 100%;
+}
+.heroImage {
+  width: 100%;
+  height: auto;
+  display: block;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+.heroCaption {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 12px 0 0;
+}
+
+/* ---------- Generic sections ---------- */
+.section {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 72px 32px;
+}
+.sectionAlt {
+  background: var(--paper-2);
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+.sectionAlt .section {
+  padding: 64px 32px;
+}
+.sectionTitle {
+  font-size: clamp(24px, 2.6vw, 32px);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  margin: 0;
+}
+.sectionLead {
+  font-size: 16px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 14px 0 0;
+  max-width: 44em;
+}
+.sectionLink {
+  display: inline-block;
+  margin-top: 28px;
+  color: #002d72;
+  font-weight: 500;
+  font-size: 15px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.sectionLink:hover {
+  color: #001d4a;
+}
+
+/* ---------- Pinned viewer walk-through ---------- */
+.viewsSection {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 24px 32px 48px;
+}
+.sectionIntro {
+  margin-bottom: 40px;
+}
+.viewsLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 56px;
+  align-items: start;
+}
+.viewsSteps {
   display: flex;
-  align-items: center;
-  gap: 18px;
-  margin-top: 44px;
+  flex-direction: column;
 }
-.btnPrimary {
-  padding: 16px 44px;
-  border-radius: 14px;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  font-size: 16px;
+.viewStep {
+  min-height: 45vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  opacity: 0.35;
+  transition: opacity 0.3s ease;
+}
+.viewStepActive {
+  opacity: 1;
+}
+.viewStepTitle {
+  font-size: 20px;
   font-weight: 600;
-  cursor: pointer;
-  background: #002D72;
+  margin: 0;
+}
+.viewStepBody {
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  margin: 10px 0 0;
+  max-width: 30em;
+}
+.viewsSticky {
+  position: sticky;
+  top: calc(var(--header-h) + 40px);
+}
+.viewsFrame {
+  position: relative;
+  aspect-ratio: 8 / 5;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #08090b;
+}
+.viewImage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+}
+.viewImageActive {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .viewStep {
+    opacity: 1;
+    transition: none;
+  }
+  .viewImage {
+    transition: none;
+  }
+}
+
+/* ---------- Dataset sample cases ---------- */
+.caseRow {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 32px;
+}
+.caseCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-decoration: none;
+  color: var(--ink);
+}
+.caseThumb {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: #08090b;
+  transition: border-color 0.15s ease;
+}
+.caseCard:hover .caseThumb {
+  border-color: rgba(0, 45, 114, 0.5);
+}
+.caseLabel {
+  font-size: 13px;
+  color: var(--muted);
+}
+.caseCard:hover .caseLabel {
+  color: var(--ink);
+}
+
+/* ---------- Annotation tools ---------- */
+.toolRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 28px;
+}
+.toolChip {
+  padding: 7px 13px;
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  background: var(--paper);
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+/* ---------- AI transcript ---------- */
+.chatCard {
+  margin-top: 28px;
+  max-width: 560px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.chatQuestion {
+  align-self: flex-end;
+  background: #002d72;
   color: #ffffff;
-  border: 1px solid #002D72;
-  transition: all 0.2s ease;
+  border-radius: 8px 8px 2px 8px;
+  padding: 10px 14px;
+  font-size: 14.5px;
+  max-width: 85%;
 }
-.btnPrimary:hover {
-  background: #00399a;
-  border-color: #00399a;
-  transform: translateY(-1px);
+.chatAnswer {
+  align-self: flex-start;
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: 8px 8px 8px 2px;
+  padding: 10px 14px;
+  font-size: 14.5px;
+  color: var(--ink);
+  max-width: 85%;
 }
-.btnSecondary {
-  padding: 16px 44px;
-  border-radius: 14px;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+
+/* ---------- Upload steps ---------- */
+.stepsRow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  margin-top: 32px;
+}
+.uploadStep {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--paper);
+  padding: 20px;
+}
+.uploadStepNum {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--muted);
+}
+.uploadStepTitle {
   font-size: 16px;
   font-weight: 600;
-  cursor: pointer;
-  background: transparent;
-  color: #002D72;
-  border: 1px solid rgba(0,45,114,.35);
-  transition: all 0.2s ease;
+  margin: 8px 0 0;
 }
-.btnSecondary:hover {
-  background: rgba(0,45,114,.06);
-  border-color: rgba(0,45,114,.55);
-  transform: translateY(-1px);
+.uploadStepBody {
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 6px 0 0;
+}
+.uploadNote {
+  font-size: 14px;
+  color: var(--muted);
+  margin: 24px 0 0;
 }
 
 /* ---------- Responsive ---------- */
-@media (max-width: 720px) {
-  .heroStats { flex-wrap: wrap; gap: 8px 0; }
-  .heroStatItem { padding: 0 26px; }
-  .heroStatValue { font-size: 26px; }
-  .heroActions { flex-direction: column; width: 100%; max-width: 320px; }
-  .btnPrimary, .btnSecondary { width: 100%; }
+@media (max-width: 860px) {
+  .hero {
+    padding: 56px 20px 64px;
+  }
+  .heroActions {
+    flex-direction: column;
+    width: 100%;
+    max-width: 320px;
+  }
+  .btnPrimary,
+  .btnSecondary {
+    width: 100%;
+    text-align: center;
+    box-sizing: border-box;
+  }
+  .heroStats {
+    gap: 16px 32px;
+  }
+  .viewsLayout {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+  .viewsSticky {
+    position: sticky;
+    top: var(--header-h);
+    z-index: 1;
+  }
+  /* On small screens the image pins above the steps and the steps scroll
+     beneath it. */
+  .viewsLayout {
+    display: flex;
+    flex-direction: column-reverse;
+  }
+  .viewStep {
+    min-height: 0;
+    padding: 28px 0;
+    opacity: 1;
+  }
+  .section,
+  .sectionAlt .section {
+    padding: 48px 20px;
+  }
+  .viewsSection {
+    padding: 16px 20px 32px;
+  }
+  .caseRow {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .stepsRow {
+    grid-template-columns: 1fr;
+  }
 }
