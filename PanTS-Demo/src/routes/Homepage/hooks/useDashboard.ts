@@ -93,6 +93,7 @@ export function useDashboard() {
   // Cases picked for side-by-side comparison (max 2). Adding a third drops the oldest.
   const [compareIds, setCompareIds] = useState<CaseId[]>([]);
   const [compareTyped, setCompareTyped] = useState("");
+  const [compareError, setCompareError] = useState<string | null>(null);
 
   const toggleCompare = (id: CaseId) => {
     setCompareIds((prev) =>
@@ -104,14 +105,28 @@ export function useDashboard() {
     setCompareIds((prev) => (prev.includes(id) ? prev : [...prev, id].slice(-2)));
   };
 
+  // Clear any stale validation error as soon as the user edits the tray input.
+  const handleSetCompareTyped = (s: string) => {
+    setCompareError(null);
+    setCompareTyped(s);
+  };
+
   const submitTypedCompare = () => {
-    const raw = compareTyped.trim();
-    if (raw.toUpperCase().startsWith("CV")) {
+    // Uppercase so "cv_00000001" matches the canonical CancerVerse id form.
+    const raw = compareTyped.trim().toUpperCase();
+    if (!raw) return;
+    if (raw.startsWith("CV")) {
+      // CancerVerse ids keep their prefix so they route to the CV endpoints.
       addCompareId(raw);
     } else {
       const n = parseInt(raw, 10);
-      if (Number.isFinite(n) && n > 0) addCompareId(n);
+      if (!Number.isFinite(n) || n < 1 || n > 9901) {
+        setCompareError("Case IDs are 1 to 9901.");
+        return;
+      }
+      addCompareId(n);
     }
+    setCompareError(null);
     setCompareTyped("");
   };
 
@@ -401,7 +416,8 @@ export function useDashboard() {
     savedIds,
     compareIds,
     compareTyped,
-    setCompareTyped,
+    setCompareTyped: handleSetCompareTyped,
+    compareError,
     handleToggleSave,
     toggleCompare,
     submitTypedCompare,

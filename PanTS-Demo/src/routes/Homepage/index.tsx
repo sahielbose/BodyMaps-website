@@ -119,6 +119,7 @@ export default function Homepage() {
           compareIds={dash.compareIds}
           compareTyped={dash.compareTyped}
           setCompareTyped={dash.setCompareTyped}
+          compareError={dash.compareError}
           onSubmitTyped={dash.submitTypedCompare}
           onClear={dash.handleClearCompare}
           onCompare={dash.handleCompare}

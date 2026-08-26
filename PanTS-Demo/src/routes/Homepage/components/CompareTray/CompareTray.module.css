@@ -67,6 +67,15 @@
   opacity: 0.5;
 }
 
+/* Mirrors the dashboard SearchBar's inline error (small red text, aria-live),
+   lightened for legibility on the tray's dark background. */
+.compareTrayError {
+  flex-basis: 100%;
+  margin: 0;
+  color: #f87171;
+  font-size: 12px;
+}
+
 .compareTrayCompareBtn {
   background: #2563eb;
   border: none;

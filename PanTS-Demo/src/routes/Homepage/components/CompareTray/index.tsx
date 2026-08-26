@@ -5,6 +5,7 @@ interface Props {
   compareIds: CaseId[];
   compareTyped: string;
   setCompareTyped: (s: string) => void;
+  compareError: string | null;
   onSubmitTyped: () => void;
   onClear: () => void;
   onCompare: () => void;
@@ -14,6 +15,7 @@ export default function CompareTray({
   compareIds,
   compareTyped,
   setCompareTyped,
+  compareError,
   onSubmitTyped,
   onClear,
   onCompare,
@@ -33,10 +35,11 @@ export default function CompareTray({
         >
           <input
             value={compareTyped}
-            onChange={(e) => setCompareTyped(e.target.value.replace(/[^0-9]/g, ""))}
+            // Digits for PanTS ids plus C/V/_ so CancerVerse ids ("CV_00000001")
+            // can be typed; uppercased on submit.
+            onChange={(e) => setCompareTyped(e.target.value.replace(/[^0-9CVcv_]/g, ""))}
             placeholder="type case #"
-            inputMode="numeric"
-            aria-label="Add a case by number"
+            aria-label="Add a case by ID"
             className={styles.compareTrayInput}
           />
           <button
@@ -58,6 +61,11 @@ export default function CompareTray({
       >
         Compare →
       </button>
+      {compareIds.length < 2 && compareError && (
+        <p aria-live="polite" className={styles.compareTrayError}>
+          {compareError}
+        </p>
+      )}
     </div>
   );
 }
