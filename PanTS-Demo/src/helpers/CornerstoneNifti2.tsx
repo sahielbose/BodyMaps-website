@@ -2111,7 +2111,8 @@ async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
  * module comment above) — pass `isHd ? "full" : "low"` from the caller's own
  * hdReady state, not a guess.
  *
- * Returns the number of voxels changed (0 if the proposal was empty), or
+ * Returns the number of voxels actually modified (0 if the proposal was
+ * empty, or if every proposed voxel already held `activeSegmentIndex`), or
  * throws with a message safe to show the user (the backend already returns
  * plain-English error strings for the common cases — empty grow, no CT, etc).
  */
@@ -2182,23 +2183,24 @@ export async function submitInteractiveSegmentPrompt(
     );
   }
 
-  let changed = 0;
   // Sparse before/after capture for undo — only voxels this proposal
   // actually touches AND actually changes (skips a no-op write where the
   // voxel already held activeSegmentIndex), so undo/redo stay cheap even
-  // though `proposal.data` spans the whole volume.
+  // though `proposal.data` spans the whole volume. `changed` is the count of
+  // REAL modifications, not raw proposal coverage — an earlier version
+  // counted every nonzero proposal voxel, so clicking an already-labeled
+  // structure reported "success (N vox)" while nothing changed and no undo
+  // entry existed.
   const touchedIdx: number[] = [];
   const priorValues: number[] = [];
   for (let idx = 0; idx < proposal.data.length; idx++) {
-    if (proposal.data[idx]) {
-      if (segScalars[idx] !== activeSegmentIndex) {
-        touchedIdx.push(idx);
-        priorValues.push(segScalars[idx]);
-      }
+    if (proposal.data[idx] && segScalars[idx] !== activeSegmentIndex) {
+      touchedIdx.push(idx);
+      priorValues.push(segScalars[idx]);
       segScalars[idx] = activeSegmentIndex;
-      changed++;
     }
   }
+  const changed = touchedIdx.length;
   if (changed > 0) {
     (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
     // NOT _rebuildSegmentationRepresentations() — this only mutated voxels
@@ -2218,18 +2220,16 @@ export async function submitInteractiveSegmentPrompt(
     // (Cornerstone's own HistoryMemo), so undoing a point/box segment never
     // also reverts (or gets shadowed by) an unrelated brush stroke; see
     // undoMaskEdit's recency check for how the two stacks interleave.
-    if (touchedIdx.length > 0) {
-      const applyAndRefresh = (values: number[]) => {
-        touchedIdx.forEach((idx, i) => { segScalars[idx] = values[i]; });
-        (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
-        _notifySegmentationChanged();
-      };
-      const redoValues = touchedIdx.map(() => activeSegmentIndex);
-      pushEditHistory({
-        undo: () => applyAndRefresh(priorValues),
-        redo: () => applyAndRefresh(redoValues),
-      });
-    }
+    const applyAndRefresh = (values: number[]) => {
+      touchedIdx.forEach((idx, i) => { segScalars[idx] = values[i]; });
+      (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
+      _notifySegmentationChanged();
+    };
+    const redoValues = touchedIdx.map(() => activeSegmentIndex);
+    pushEditHistory({
+      undo: () => applyAndRefresh(priorValues),
+      redo: () => applyAndRefresh(redoValues),
+    });
   }
 
   return changed;
