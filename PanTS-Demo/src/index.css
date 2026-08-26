@@ -2,7 +2,10 @@
 @import "./styles/brand.css";
 
 #root {
-  width: 100vw;
+  /* 100%, not 100vw: on classic-scrollbar platforms 100vw includes the
+     vertical scrollbar's width, which forced a permanent horizontal
+     scrollbar on every window-scrolling page. */
+  width: 100%;
 }
 
 :root {

@@ -64,7 +64,9 @@
 
 
 #root {
-  max-width: 100vw;
+  /* 100%, not 100vw: 100vw includes the scrollbar width on classic-scrollbar
+     platforms and made #root overflow the body horizontally. */
+  max-width: 100%;
   overflow-x: hidden;
   min-height:100vh;
 }
