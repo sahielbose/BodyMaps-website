@@ -35,7 +35,7 @@ const SignupRedirect = lazy(() => import("./routes/SignupRedirect"));
 const ResetPassword = lazy(() => import("./routes/ResetPassword"));
 const LegalPage = lazy(() => import("./routes/LegalPage"));
 const SharePatientCard = lazy(() => import("./routes/SharePatientCard"));
-const RotatingHeartLoader = lazy(() => import("./components/Loading"));
+const NotFoundPage = lazy(() => import("./routes/NotFoundPage"));
 
 const BASENAME = import.meta.env.VITE_BASENAME;
 
@@ -118,7 +118,6 @@ function App() {
                     path="/reconstruction/:reconstructionId"
                     element={<VisualizationPage />}
                   />
-                  <Route path="/test" element={<RotatingHeartLoader />} />
                   <Route path="/upload" element={<UploadPage />} />
                   {/* Both sign in and sign up are the popup now. /login and
                       /signup stay routable so old links don't 404. */}
@@ -151,6 +150,8 @@ function App() {
                     path="/compare-viewer"
                     element={<CompareViewerPage />}
                   />
+                  {/* Unknown URLs land here instead of an empty page. */}
+                  <Route path="*" element={<NotFoundPage />} />
                 </Routes>
               </Suspense>
               {/* Global auth popup, above all routes. Inside the router so it
