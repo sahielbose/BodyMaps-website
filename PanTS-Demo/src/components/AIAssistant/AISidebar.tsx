@@ -473,6 +473,7 @@ export default function AISidebar({
     setInput("");
     setAttachments([]);
     setModelMenuOpen(false);
+    setLightboxUrl(null);
   }, [caseId, sessionId]);
 
   // Auto-scroll to the newest content ONLY when the user is already near the
@@ -508,7 +509,10 @@ export default function AISidebar({
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      if (modelMenuOpen) setModelMenuOpen(false);
+      // Innermost layer first: the full-screen lightbox sits above the
+      // sidebar, so Escape must dismiss it before closing anything else.
+      if (lightboxUrl) setLightboxUrl(null);
+      else if (modelMenuOpen) setModelMenuOpen(false);
       else closeSidebar();
     };
     window.addEventListener("pointerdown", handlePointerDown);
@@ -517,7 +521,7 @@ export default function AISidebar({
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleEscape);
     };
-  }, [closeSidebar, modelMenuOpen, open]);
+  }, [closeSidebar, lightboxUrl, modelMenuOpen, open]);
 
   const selectModel = (value: string) => {
     setSelectedModel(value);
@@ -738,11 +742,14 @@ export default function AISidebar({
     [onResize, onResizeEnd]
   );
 
-  // Stop any narration when the panel closes or the case changes.
+  // Stop any narration when the panel closes or the case changes. Also drop
+  // the lightbox: it portals to <body>, so left open it would outlive the
+  // sidebar and strand a full-screen overlay over the viewer.
   useEffect(() => {
     if (!open) {
       window.speechSynthesis?.cancel();
       setSpeakingId(null);
+      setLightboxUrl(null);
     }
   }, [open]);
 
