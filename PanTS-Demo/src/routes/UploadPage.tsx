@@ -86,7 +86,6 @@ import { track } from "../helpers/analytics";
 import UpgradeDialog, { type UpgradeBlock } from "../components/UpgradeDialog";
 import { useAuth } from "../contexts/authContext";
 import {
-  canPostprocess,
   gatingPlan,
   isModelLocked,
   maxConcurrentScans,
@@ -1717,22 +1716,29 @@ const UploadPage: React.FC = () => {
                 </button>
                 {preDropOpen && (
                   <div className="model-dropdown-menu">
+                    {/* OpenVAE preprocessing isn't wired into the run yet
+                        (nothing consumes this value), so it's shown but
+                        disabled rather than silently discarded. */}
                     {[
                       {
                         id: "",
                         label: "None (skip)",
                         desc: "Upload and segment as-is",
+                        disabled: false,
                       },
                       {
                         id: "OpenVAE",
                         label: "OpenVAE",
                         desc: "Enhance the scan quality before segmenting",
+                        disabled: true,
                       },
                     ].map((opt) => (
                       <div
                         key={opt.id}
-                        className={`model-dropdown-item${preValue === opt.id ? " selected" : ""}`}
+                        className={`model-dropdown-item${preValue === opt.id ? " selected" : ""}${opt.disabled ? " locked" : ""}`}
+                        aria-disabled={opt.disabled || undefined}
                         onClick={() => {
+                          if (opt.disabled) return;
                           setPreValue(opt.id);
                           setPreDropOpen(false);
                         }}
@@ -1746,7 +1752,12 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {preValue === opt.id && (
+                          {opt.disabled && (
+                            <span className="model-dropdown-lock">
+                              Coming soon
+                            </span>
+                          )}
+                          {!opt.disabled && preValue === opt.id && (
                             <svg
                               width="12"
                               height="12"
@@ -1970,32 +1981,31 @@ const UploadPage: React.FC = () => {
                 </button>
                 {postDropOpen && (
                   <div className="model-dropdown-menu">
+                    {/* ShapeKit postprocessing isn't wired into the run yet
+                        (nothing consumes this value), so it's shown but
+                        disabled - no Donate lock on a control that does
+                        nothing. The plan gate returns when the wiring lands. */}
                     {[
                       {
                         id: "",
                         label: "None (skip)",
                         desc: "Use results as-is",
+                        disabled: false,
                       },
                       {
                         id: "ShapeKit",
                         label: "ShapeKit",
                         desc: "Clean up and smooth organ outlines",
+                        disabled: true,
                       },
                     ].map((opt) => {
-                      const locked =
-                        opt.id !== "" && isAuthenticated && !canPostprocess(plan);
                       return (
                       <div
                         key={opt.id}
-                        className={`model-dropdown-item${postValue === opt.id ? " selected" : ""}${locked ? " locked" : ""}`}
+                        className={`model-dropdown-item${postValue === opt.id ? " selected" : ""}${opt.disabled ? " locked" : ""}`}
+                        aria-disabled={opt.disabled || undefined}
                         onClick={() => {
-                          if (locked) {
-                            setPostDropOpen(false);
-                            setUpgradeBlock({
-                              reason: "postprocessing", feature: opt.label, plan: plan as PlanId,
-                            });
-                            return;
-                          }
+                          if (opt.disabled) return;
                           track("upload_select_postprocessing");
                           setPostValue(opt.id);
                           setPostDropOpen(false);
@@ -2010,8 +2020,12 @@ const UploadPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="model-dropdown-item-side">
-                          {locked && <span className="model-dropdown-lock">Donate</span>}
-                          {!locked && postValue === opt.id && (
+                          {opt.disabled && (
+                            <span className="model-dropdown-lock">
+                              Coming soon
+                            </span>
+                          )}
+                          {!opt.disabled && postValue === opt.id && (
                             <svg
                               width="12"
                               height="12"
