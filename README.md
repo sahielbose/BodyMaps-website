@@ -211,6 +211,13 @@ nohup /home/visitor/.conda/envs/PanTS_backend/bin/gunicorn \
 echo "PID: $!"
 ```
 
+The production environment must set `TRUST_PROXY=true` and `TRUST_PROXY_HOPS=2`
+(campus edge proxy + nginx). Forgetting it does not crash anything, which is
+exactly the problem: every request then keys rate limits on the proxy's own
+address (the whole site shares one 120/min analytics bucket) and analytics
+geolocates every visitor to the server. The backend prints a `[boot]` warning
+to the gunicorn log when it starts without it.
+
 #### 6. Verify the backend is running
 Give it a few seconds to load, then check the backend booted, the dataset loads, and masks serve (all three must succeed).
 ```
