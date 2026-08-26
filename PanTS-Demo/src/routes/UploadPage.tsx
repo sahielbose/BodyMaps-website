@@ -718,6 +718,20 @@ const UploadPage: React.FC = () => {
         if (foreground) setMessage("");
         return;
       }
+      // 401 is an expired or missing sign-in, not a failure of the scan
+      // itself (the client can still believe it is signed in when the cookie
+      // has lapsed). Mirror the 402 shape: mark Cancelled, say why, and open
+      // the sign-in popup instead of leaving a wordless Failed card.
+      if (res.status === 401) {
+        await deletePendingUpload(sid);
+        setPhase(sid);
+        setRecentUploads(updateRecentUploadStatus(sid, "Cancelled"));
+        setMessage(
+          "Your session expired before the run could start. Sign in and run the scan again.",
+        );
+        promptAuth();
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Failed to start inference");
 
       // Queued server-side now - nothing here is needed to finish the run, so
