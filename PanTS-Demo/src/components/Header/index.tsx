@@ -38,6 +38,19 @@ export default function Header() {
 
     closeButtonRef.current?.focus();
 
+    // Lock background scrolling while the drawer is open. Most pages scroll
+    // the window (locked via body overflow); the landing page scrolls its own
+    // fixed root, tagged data-scroll-root.
+    const scrollRoots = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-scroll-root]"),
+    );
+    const prevBodyOverflow = document.body.style.overflow;
+    const prevRootOverflows = scrollRoots.map((el) => el.style.overflowY);
+    document.body.style.overflow = "hidden";
+    scrollRoots.forEach((el) => {
+      el.style.overflowY = "hidden";
+    });
+
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         closeMenuAndRestoreFocus();
@@ -48,6 +61,10 @@ export default function Header() {
 
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = prevBodyOverflow;
+      scrollRoots.forEach((el, i) => {
+        el.style.overflowY = prevRootOverflows[i];
+      });
     };
   }, [menuOpen]);
 
