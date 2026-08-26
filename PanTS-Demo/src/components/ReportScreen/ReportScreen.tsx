@@ -736,6 +736,11 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
   useEffect(() => { if (data) fetchPlain(); }, [data]);
 
   const go = useCallback((s: Step) => {
+    // Any step navigation dismisses the Patient/Doctor coachmark, so a user
+    // who advances via Back / Explain finding / the timeline is never left
+    // under the darkened blur veil. The Start-walkthrough handlers call
+    // setModePromptOpen(true) AFTER go(1), so the coachmark still opens.
+    setModePromptOpen(false);
     setDir(s > step ? 'r' : 'l');
     setStep(s);
   }, [step]);
@@ -782,7 +787,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
           <StatPill tone="green" title="Healthy" value={`${normal.length}`} sub={`organ${normal.length === 1 ? '' : 's'}`} />
           <StatPill tone="amber" title="Finding" value={`${flagged.length}`} sub={flagged.length === 1 ? 'to explain' : 'to explain'} />
         </div>
-        <PrimaryButton onClick={() => { setModePromptOpen(true); go(1); }}>Start review →</PrimaryButton>
+        <PrimaryButton onClick={() => { go(1); setModePromptOpen(true); }}>Start review →</PrimaryButton>
       </div>
     );
 
@@ -1039,7 +1044,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
                 </p>
                 <button
                   className="rs-primary"
-                  onClick={() => { setModePromptOpen(true); go(1); }}
+                  onClick={() => { go(1); setModePromptOpen(true); }}
                   style={{
                     padding: '14px 26px',
                     borderRadius: 999,
@@ -1063,11 +1068,14 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
           {/* Coachmark: after Start walkthrough, point users to the existing Patient / Doctor toggle */}
           {modePromptOpen && step > 0 && (
             <>
-              <div style={{
+              {/* Clicking the veil dismisses the coachmark (the current lang
+                  stays as-is; the toggle in the top bar remains available). */}
+              <div onClick={() => setModePromptOpen(false)} style={{
                 position: 'fixed',
                 inset: 0,
                 zIndex: 10004,
-                pointerEvents: 'none',
+                pointerEvents: 'auto',
+                cursor: 'pointer',
                 background: 'rgba(0,0,0,0.48)',
                 backdropFilter: 'blur(18px)',
                 WebkitBackdropFilter: 'blur(18px)',
