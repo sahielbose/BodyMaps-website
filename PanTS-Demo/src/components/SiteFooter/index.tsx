@@ -5,7 +5,7 @@ function SiteFooter() {
   return (
     <footer className={styles.footer}>
       <span className={styles.tagline}>
-        BodyMaps — the intelligence layer for medical imaging AI.
+        BodyMaps, the open library of labeled body CT scans.
       </span>
       <span className={styles.partner}>
         For commercial use, please visit{" "}

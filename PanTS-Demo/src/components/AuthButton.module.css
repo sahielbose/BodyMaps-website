@@ -3,23 +3,21 @@
    match the landing page's active tab / primary button. */
 
 .signInBtn {
-	padding: 8px 20px;
-	border-radius: 22px;
-	font-family: "IBM Plex Sans", system-ui, sans-serif;
-	font-size: 12px;
-	font-weight: 600;
-	letter-spacing: 0.06em;
+	padding: 8px 16px;
+	border-radius: 6px;
+	font-family: var(--font-sans);
+	font-size: 14px;
+	font-weight: 500;
 	cursor: pointer;
 	background: #002d72;
 	color: #ffffff;
 	border: 1px solid #002d72;
-	transition: background 0.2s ease, transform 0.2s ease;
+	transition: background 0.15s ease;
 	white-space: nowrap;
 }
 .signInBtn:hover {
 	background: #00399a;
 	border-color: #00399a;
-	transform: translateY(-1px);
 }
 
 /* ── Signed-in trigger ── */
@@ -33,7 +31,7 @@
 	align-items: center;
 	gap: 8px;
 	padding: 6px 12px 6px 6px;
-	border-radius: 22px;
+	border-radius: 6px;
 	background: transparent;
 	border: 1px solid rgba(0, 0, 0, 0.1);
 	cursor: pointer;

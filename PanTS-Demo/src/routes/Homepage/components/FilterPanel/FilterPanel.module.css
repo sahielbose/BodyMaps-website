@@ -8,43 +8,53 @@
 }
 
 .filterLabel {
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  font-size: 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: rgba(0, 0, 0, 0.75);
+  color: var(--ink);
 }
 
 .facetsLoading {
   align-self: center;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 11px;
-  color: rgba(0, 0, 0, 0.35);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--muted-2);
 }
 
+/* Option toggles: quiet outlined controls; the chosen one gets an ink-blue
+   border and text rather than a solid fill, so a row of them reads as a
+   set of options, not a row of buttons. */
 .pill {
-  padding: 7px 16px;
-  border-radius: 8px;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  padding: 6px 12px;
+  border-radius: 5px;
+  font-family: var(--font-sans);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(0, 0, 0, 0.04);
-  color: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--muted);
   transition: border-color 0.15s, background 0.15s, color 0.15s;
   outline: none;
 }
+.pill:hover {
+  border-color: rgba(0, 45, 114, 0.4);
+  color: var(--ink);
+}
 .pillActive {
-  border-color: #002D72;
-  background: #002D72;
-  color: #ffffff;
+  border-color: #002d72;
+  background: rgba(0, 45, 114, 0.06);
+  color: #002d72;
+  font-weight: 600;
+}
+.pillActive:hover {
+  background: rgba(0, 45, 114, 0.06);
+  color: #002d72;
 }
 
 .countBadge {
   margin-left: 7px;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 10px;
-  opacity: 0.6;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.7;
 }

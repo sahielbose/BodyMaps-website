@@ -23,7 +23,7 @@ export default function LibraryHeader({
 }: Props) {
   return (
     <div className={styles.sectionHeader}>
-      <span>Browse Library</span>
+      <span>Browse the library</span>
       <div className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2">
         <button className={styles.actionBtn} onClick={onBrowseAll}>
           <IconDatabase size={14} />
@@ -31,7 +31,7 @@ export default function LibraryHeader({
         </button>
         <button className={styles.actionBtn} onClick={onShuffle}>
           <IconArrowsShuffle size={14} />
-          Shuffle Cases
+          Shuffle cases
         </button>
         <button
           className={`${styles.actionBtn} ${showSaved ? styles.actionBtnActive : ""}`}

@@ -75,20 +75,16 @@
 
 /* ── Member info ── */
 .memberName {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: #1f2533;
-  margin-bottom: 4px;
+  color: var(--ink);
+  margin-bottom: 3px;
 }
 
 .memberRole {
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #8a8f99;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted);
 }
 
 /* ── Responsive ── */

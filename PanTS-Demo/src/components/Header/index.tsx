@@ -5,10 +5,10 @@ import AuthButton from "../AuthButton";
 import styles from "./Header.module.css";
 
 const TABS = [
-  { id: "overview", label: "OVERVIEW", path: "/" },
-  { id: "dataset", label: "DATASET", path: "/dashboard" },
-  { id: "upload", label: "UPLOAD", path: "/upload" },
-  { id: "team", label: "TEAM", path: "/team" },
+  { id: "overview", label: "Overview", path: "/" },
+  { id: "dataset", label: "Dataset", path: "/dashboard" },
+  { id: "upload", label: "Upload", path: "/upload" },
+  { id: "team", label: "Team", path: "/team" },
 ] as const;
 
 export default function Header() {

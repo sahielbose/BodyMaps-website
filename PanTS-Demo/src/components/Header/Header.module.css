@@ -39,41 +39,41 @@
   line-height: 1.1;
 }
 
-/* ── Tab bar (desktop) ── */
+/* ── Tab bar (desktop) ──
+   Plain text links with an underline on the active tab. No pills: the nav
+   should read as navigation, not as buttons. */
 .tabBar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 28px;
   flex-shrink: 0;
 }
 .tabPill {
   display: inline-flex;
   align-items: center;
-  padding: 8px 22px;
-  border-radius: 22px;
-  font-size: 12px;
-  font-weight: 600;
+  padding: 6px 0;
+  font-size: 14px;
+  font-weight: 500;
   cursor: pointer;
-  border: 1px solid transparent;
-  color: #6a6a6a;
-  transition: color 0.2s ease, background 0.2s ease;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  color: var(--muted);
+  transition: color 0.15s ease;
+  font-family: var(--font-sans);
   background: transparent;
-  letter-spacing: 0.08em;
   text-decoration: none;
   line-height: inherit;
+  border-bottom: 2px solid transparent;
 }
 .tabPill:hover {
-  color: #111111;
+  color: var(--ink);
 }
 .tabPillActive {
-  background: #002D72;
-  color: #ffffff;
-  border-color: #002D72;
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: #002d72;
   cursor: default;
 }
 .tabPillActive:hover {
-  color: #ffffff;
+  color: var(--ink);
 }
 
 /* ── Right-side actions (auth button + hamburger) ── */
