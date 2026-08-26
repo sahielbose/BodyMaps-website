@@ -202,6 +202,12 @@ const UploadPage: React.FC = () => {
   const itemUploadRef = useRef<
     Map<string, { sid: string; uploadDone: Promise<string | null> }>
   >(new Map());
+  // Session ids of runs the user started in THIS page visit. Only these may
+  // auto-open the viewer on completion; runs resumed on page load finish
+  // quietly (finishSession announces them instead of navigating), so returning
+  // to /upload mid-inference can't teleport the user away from what they're
+  // doing.
+  const userStartedRef = useRef<Set<string>>(new Set());
 
   const [selectedItems, setSelectedItems] = useState<SelectedItem[]>([]);
   // Which selected item's inline preview is open (null = none). One at a time.
@@ -411,13 +417,22 @@ const UploadPage: React.FC = () => {
     setRecentUploads(uploads);
     setSessionId(sid);
     setInferenceCompleted(true);
-    // Only auto-open the viewer when no other run is still in flight.
+    // Only auto-open the viewer for a run the user started in this page
+    // visit, and only when no other run is still in flight. A run resumed on
+    // page load finishing must never yank the user out of what they're doing
+    // (renaming a scan, picking the next batch) - announce it instead.
+    const startedHere = userStartedRef.current.has(sid);
+    userStartedRef.current.delete(sid);
     if (!uploads.some((u) => u.status === "Processing")) {
-      setTimeout(() => {
-        navigate(
-          model === "OpenVAE" ? `/reconstruction/${sid}` : `/session/${sid}`,
-        );
-      }, 600);
+      if (startedHere) {
+        setTimeout(() => {
+          navigate(
+            model === "OpenVAE" ? `/reconstruction/${sid}` : `/session/${sid}`,
+          );
+        }, 600);
+      } else {
+        setMessage("Scan complete. Open it from Completed Uploads below.");
+      }
     }
   };
 
@@ -1182,6 +1197,9 @@ const UploadPage: React.FC = () => {
     const sourceName = (item.kind === "dicom" ? item.label : item.file.name) || undefined;
     const label = friendlyScanName(model, ts);
 
+    // Started by the user in this visit - allowed to auto-open the viewer.
+    userStartedRef.current.add(sid);
+
     track("upload_start_inference");
     setRecentUploads(
       addRecentUpload({
@@ -1384,6 +1402,7 @@ const UploadPage: React.FC = () => {
         );
 
       const sid = data.session_id || newSessionId;
+      userStartedRef.current.add(sid); // user-started: may auto-open on completion
       setSessionId(sid);
       setSelectedModel("ePAI" as const);
       setMessage(`ePAI inference started on reconstructed CT. Session: ${sid}`);
