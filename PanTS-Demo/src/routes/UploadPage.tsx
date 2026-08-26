@@ -908,12 +908,32 @@ const UploadPage: React.FC = () => {
   // blocks the batch exactly as before.
   useEffect(() => {
     if (selectedModel === "None") return;
+    // Signed-out users can pick files and browse freely, but no scan data may
+    // leave the browser before the account gate at Run (ensureAccount) has
+    // been passed. Once they sign in this effect re-runs and the pre-upload
+    // starts then.
+    if (!isAuthenticated) return;
+    // A model the plan locks would 402 at Run anyway - don't send scan data
+    // for a run that can never start.
+    if (isModelLocked(plan, selectedModel)) return;
     const slots = maxConcurrentScans(plan as PlanId);
     const running = recentUploads.filter((u) => u.status === "Processing").length;
     if (selectedItems.length + running > slots) return;
     selectedItems.forEach(preStartUpload);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedModel, selectedItems, plan, recentUploads]);
+  }, [selectedModel, selectedItems, plan, recentUploads, isAuthenticated]);
+
+  // Retroactive half of the same gate: if the model returns to "None" (whose
+  // promise is "files never leave your browser") or the user signs out, any
+  // pre-upload already in flight is aborted and forgotten - switching the
+  // gate off must stop bytes that are mid-transfer, not just future ones.
+  useEffect(() => {
+    if (selectedModel !== "None" && isAuthenticated) return;
+    itemUploadRef.current.forEach((pre) => {
+      uploadAbortRef.current.get(pre.sid)?.abort();
+    });
+    itemUploadRef.current.clear();
+  }, [selectedModel, isAuthenticated]);
 
   // Uploads the file described by `p`, finalizes, then starts inference.
   // Resumable: the file lives in IndexedDB and the chunk cursor is persisted, so
