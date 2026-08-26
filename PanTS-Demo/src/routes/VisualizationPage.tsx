@@ -1432,6 +1432,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// also drive that state, and clicking HD manually should NOT pop the
 	// annotation toolbar open when it finishes.
 	const [annotateHdLoading, setAnnotateHdLoading] = useState(false);
+	const [annotateHdError, setAnnotateHdError] = useState(false);
 
 	// Click/box-to-segment (interactive prompt tools). `res` MUST match the
 	// grid the live segmentation volume is actually on right now — same
@@ -1466,6 +1467,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	});
 
 	const enhanceStartedRef = useRef(false);
+	// Lets the HD-loading overlay's Cancel button abort the in-flight enhance.
+	const enhanceAbortRef = useRef<AbortController | null>(null);
 	// Live mirrors so the async swap re-applies the *current* window/visibility, not
 	// the values captured when the stream started.
 	const windowRef = useRef({ w: windowWidth, c: windowCenter });
@@ -2295,9 +2298,22 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// ---- Progressive resolution: background full-res stream + in-place swap --------
 
 	const runEnhance = async () => {
-		if (!pantsCase || !viewerReady || enhanceStartedRef.current) return;
+		if (!pantsCase) {
+			// Session/no-case volumes have no HD variant to fetch — fail loudly so
+			// the annotateHdLoading watcher can clear itself instead of idling.
+			setEnhance({ state: "failed", pct: null });
+			return;
+		}
+		if (!viewerReady || enhanceStartedRef.current) return;
 		enhanceStartedRef.current = true;
 		setEnhance({ state: "streaming", pct: 0 });
+		// Abortable with a deadline: the nifti loader's in-flight requests can
+		// stall without rejecting (same failure mode the initial load works
+		// around), so the awaits below race against this signal rather than
+		// trusting the loader to settle.
+		const enhanceAbort = new AbortController();
+		enhanceAbortRef.current = enhanceAbort;
+		const deadline = window.setTimeout(() => enhanceAbort.abort(), VIEWER_LOAD_TIMEOUT_MS);
 		// The HD stream is the only download in flight, so any progress event is ours.
 		const unsubscribe = subscribeToVolumeProgress((loaded, total) => {
 			if (total > 0) {
@@ -2305,9 +2321,14 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			}
 		});
 		try {
-			const newVolumeId = await upgradeCtVolume(`${API_BASE}/api/get-main-nifti/${pantsCase}.nii.gz`);
+			const newVolumeId = await awaitViewerLoadOrAbort(
+				upgradeCtVolume(`${API_BASE}/api/get-main-nifti/${pantsCase}.nii.gz`),
+				enhanceAbort.signal,
+				() => {}
+			);
 			if (!viewerReadyRef.current) return;
 			if (!newVolumeId) {
+				enhanceStartedRef.current = false;
 				setEnhance({ state: "failed", pct: null });
 				return;
 			}
@@ -2326,12 +2347,17 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			// hdReady in the Annotate button) until this completes, since painting
 			// mid-swap would hit the same mismatch this is meant to fix.
 			if (segUrl) {
-				const segOk = await upgradeSegmentationVolume(`${API_BASE}/api/get-segmentations/${pantsCase}.nii.gz`);
+				const segOk = await awaitViewerLoadOrAbort(
+					upgradeSegmentationVolume(`${API_BASE}/api/get-segmentations/${pantsCase}.nii.gz`),
+					enhanceAbort.signal,
+					() => {}
+				);
 				if (!segOk) {
 					// CT upgraded but mask didn't — don't claim "done" (which the
 					// Annotate button treats as a green light) while the mask is
-					// still misaligned. Report failed so the button stays disabled
-					// and hdReady falls back to isHd if/when the case is reloaded.
+					// still misaligned. Report failed (and re-arm the started
+					// guard) so the user can retry instead of the button dying.
+					enhanceStartedRef.current = false;
 					setEnhance({ state: "failed", pct: null });
 					return;
 				}
@@ -2339,8 +2365,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setEnhance({ state: "done", pct: 100 });
 			sessionRef.current?.log("session", "Enhanced to full resolution");
 		} catch {
+			enhanceStartedRef.current = false;
 			setEnhance({ state: "failed", pct: null });
 		} finally {
+			window.clearTimeout(deadline);
+			enhanceAbortRef.current = null;
 			unsubscribe();
 		}
 	};
@@ -3320,6 +3349,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setShowAnnotationToolbar(true);
 		} else if (enhance.state === "failed") {
 			setAnnotateHdLoading(false);
+			setAnnotateHdError(true);
 		}
 	}, [enhance.state, annotateHdLoading]);
 
@@ -3333,13 +3363,19 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// segmentation volume exists would edit a mask on the wrong grid.
 	const handleAnnotateClick = () => {
 		if (collaborationDisabled) return;
-		const hdReadyNow = isHd || enhance.state === "done";
+		// Session/no-case volumes are served at full resolution already (the
+		// session CT endpoint has no low-res variant), so there is no HD upgrade
+		// to run — treat them as HD and just toggle the toolbar.
+		const hdReadyNow = isHd || enhance.state === "done" || !pantsCase;
 		if (hdReadyNow) {
 			handleToggleAnnotationToolbar();
 			return;
 		}
+		setAnnotateHdError(false);
 		setAnnotateHdLoading(true);
-		if (enhance.state === "idle") void runEnhance();
+		// "failed" is retryable: runEnhance re-arms its own started guard on
+		// every failure path, so a fresh click here starts a fresh attempt.
+		if (enhance.state === "idle" || enhance.state === "failed") void runEnhance();
 	};
 
 	const handleToggleAnnotationToolbar = () => {
@@ -4183,7 +4219,8 @@ const aiAvailableOrgans = useMemo(() => {
 												// off the HD upgrade immediately and shows a full-screen
 												// loading overlay; the toolbar only opens once that
 												// finishes (see handleAnnotateClick / annotateHdLoading).
-													const hdReady = isHd || enhance.state === "done";
+													// Session/no-case volumes have no HD variant — see handleAnnotateClick.
+													const hdReady = isHd || enhance.state === "done" || !pantsCase;
 													const annotationDisabled = collaborationDisabled;
 												return (
 													<button
@@ -5127,6 +5164,68 @@ const aiAvailableOrgans = useMemo(() => {
 					<div className="vp-annotate-hd-overlay__label">
 						Loading HD resolution{enhance.state === "streaming" && enhance.pct != null ? ` — ${enhance.pct}%` : "…"}
 					</div>
+					<button
+						type="button"
+						className="vp-annotate-hd-overlay__cancel"
+						aria-label="Cancel HD loading"
+						onClick={() => {
+							enhanceAbortRef.current?.abort();
+							setAnnotateHdLoading(false);
+						}}
+						style={{
+							marginTop: 14,
+							padding: "7px 16px",
+							borderRadius: 5,
+							border: "1px solid rgba(255,255,255,0.35)",
+							background: "transparent",
+							color: "rgba(255,255,255,0.85)",
+							fontFamily: "inherit",
+							fontSize: 13,
+							cursor: "pointer",
+						}}
+					>
+						Cancel
+					</button>
+				</div>
+			)}
+			{annotateHdError && !annotateHdLoading && (
+				<div
+					className="vp-annotate-hd-error"
+					role="alert"
+					style={{
+						position: "fixed",
+						bottom: 24,
+						left: "50%",
+						transform: "translateX(-50%)",
+						zIndex: 950,
+						background: "rgba(12,14,18,0.94)",
+						border: "1px solid rgba(255,255,255,0.16)",
+						borderRadius: 6,
+						padding: "10px 14px",
+						color: "rgba(255,255,255,0.9)",
+						fontSize: 13.5,
+						display: "flex",
+						alignItems: "center",
+						gap: 12,
+					}}
+				>
+					<span>HD load failed. Click Annotate to try again.</span>
+					<button
+						type="button"
+						aria-label="Dismiss"
+						onClick={() => setAnnotateHdError(false)}
+						style={{
+							background: "transparent",
+							border: "none",
+							color: "rgba(255,255,255,0.6)",
+							cursor: "pointer",
+							fontSize: 15,
+							lineHeight: 1,
+							padding: 2,
+						}}
+					>
+						×
+					</button>
 				</div>
 			)}
 			<AnnotationToolbar
