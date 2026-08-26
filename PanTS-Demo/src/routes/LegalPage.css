@@ -6,30 +6,18 @@
 	background: #fafafa;
 	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	color: #111111;
-}
-
-.legal-header {
-	padding: 20px 28px;
-}
-
-.legal-brand {
-	display: inline-flex;
-	align-items: center;
-	gap: 10px;
-	text-decoration: none;
-	color: #111111;
-	font-weight: 600;
-	font-size: 16px;
-}
-.legal-logo {
-	width: 30px;
-	height: 30px;
+	/* Column layout so the shared SiteFooter sits at the bottom of the page. */
+	display: flex;
+	flex-direction: column;
 }
 
 .legal-main {
+	flex: 1;
+	width: 100%;
+	box-sizing: border-box;
 	max-width: 680px;
 	margin: 0 auto;
-	padding: 16px 24px 80px;
+	padding: 32px 24px 80px;
 }
 
 .legal-title {

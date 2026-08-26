@@ -1,5 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
+import Header from "../components/Header";
+import SiteFooter from "../components/SiteFooter";
 import "./LegalPage.css";
 
 // Terms of Service and Privacy Policy.
@@ -80,12 +82,7 @@ const LegalPage: React.FC<{ kind: "terms" | "privacy" }> = ({ kind }) => {
 
 	return (
 		<div className="legal-wrapper">
-			<header className="legal-header">
-				<Link to="/" className="legal-brand">
-					<img src="/bodymaps-logo.svg" alt="" className="legal-logo" />
-					<span>BodyMaps</span>
-				</Link>
-			</header>
+			<Header />
 
 			<main className="legal-main">
 				<h1 className="legal-title">{isTerms ? "Terms of Service" : "Privacy Policy"}</h1>
@@ -110,6 +107,8 @@ const LegalPage: React.FC<{ kind: "terms" | "privacy" }> = ({ kind }) => {
 					<Link to="/team">team page</Link>.
 				</p>
 			</main>
+
+			<SiteFooter />
 		</div>
 	);
 };

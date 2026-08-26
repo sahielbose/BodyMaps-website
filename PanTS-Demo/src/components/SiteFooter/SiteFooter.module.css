@@ -22,6 +22,11 @@
   letter-spacing: 0.01em;
 }
 
+.legalLinks {
+  display: inline-flex;
+  gap: 16px;
+}
+
 .partner {
   font-size: 12px;
 }
