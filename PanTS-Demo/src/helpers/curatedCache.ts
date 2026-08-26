@@ -41,6 +41,11 @@ function doFetch(): Promise<SearchItem[]> {
       throw new Error("curated fetch failed");
     }
     const items = interleave(tumorRes?.items ?? [], noTumorRes?.items ?? []);
+    if (items.length === 0) {
+      // Backend reachable but returned no cases (e.g. PANTS_PATH unset, transient
+      // empty response). Don't cache; let the next mount retry.
+      throw new Error("curated fetch returned no items");
+    }
     cachedItems = items;
     return items;
   });

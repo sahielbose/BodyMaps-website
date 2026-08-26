@@ -66,6 +66,16 @@ export default function CaseGrid({
     );
   }
 
+  if (!showSaved && !loading && previewIds.length === 0) {
+    return (
+      <div className={styles.emptyState}>
+        {resultCount === 0
+          ? "No cases match these filters."
+          : "No cases available right now. The dataset may be unreachable. Try again in a moment."}
+      </div>
+    );
+  }
+
   return (
     <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
       {showSaved
