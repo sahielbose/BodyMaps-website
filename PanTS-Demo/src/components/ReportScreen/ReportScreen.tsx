@@ -631,8 +631,6 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
   const [dir, setDir] = useState<'r' | 'l'>('r');
   const [lang, setLang] = useState<Lang>('patient');
   const [modePromptOpen, setModePromptOpen] = useState(false);
-  const [plain2, setPlain2] = useState<string[]>([]);
-  const [pLoad, setPLoad] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   // De-identified share link, minted on demand (see mintShareLink below) —
@@ -722,24 +720,6 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       console.error('Copy failed:', e);
     }
   };
-
-  const fetchPlain = useCallback(async () => {
-    if (plain2.length || !data) return;
-    setPLoad(true);
-    try {
-      const r = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/explain-impressions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ impression: data.impression }),
-      });
-      const j = await r.json();
-      setPlain2(j.plain_language || []);
-    } catch {
-      // Plain-language text is optional; retain the original report on failure.
-    } finally { setPLoad(false); }
-  }, [data, plain2]);
-
-  useEffect(() => { if (data) fetchPlain(); }, [data]);
 
   const go = useCallback((s: Step) => {
     // Any step navigation dismisses the Patient/Doctor coachmark, so a user
@@ -879,7 +859,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       </div>
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, lang, data, plain2, pLoad]);
+  }, [step, lang, data]);
 
   if (!loading && !data) return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 9998, pointerEvents: 'none' }}>
