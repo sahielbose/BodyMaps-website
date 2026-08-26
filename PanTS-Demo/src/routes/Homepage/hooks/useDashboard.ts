@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   buildSearchParams,
@@ -59,6 +59,9 @@ export function useDashboard() {
   );
   const [loading, setLoading] = useState(!initialData);
   const [searchId, setSearchId] = useState<number>(0);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [facetError, setFacetError] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [facetData, setFacetData] = useState<FacetData | null>(null);
   const [matchTotal, setMatchTotal] = useState<number | null>(null);
@@ -122,28 +125,48 @@ export function useDashboard() {
     return ids;
   };
 
+  // Monotonic sequence shared by every grid fetch (curated / search / shuffle) so
+  // a slow, superseded response can never overwrite a newer request's results.
+  const requestSeq = useRef(0);
+  // The last APPLIED filter set. Pill edits mutate `filters` immediately (they're
+  // draft state until Apply/Search), so pagination must not read `filters` directly.
+  const appliedFiltersRef = useRef<Filters>(filters);
+  // The most recent grid fetch, so an inline error banner can offer Retry.
+  const lastFetchRef = useRef<() => void>(() => {});
+  const retryLast = () => lastFetchRef.current();
+
   // Curated cases: fullest-body scans split half tumor / half no-tumor, interleaved.
   // Reads the shared module-scope cache first: if the app-boot idle warm-up (or an
   // earlier mount) already resolved it, this renders synchronously from memory with
   // no spinner and no network round trip -- the fix for Team/Overview -> Dataset
   // tab switches paying a full refetch every time despite the data being static.
   const loadCurated = async () => {
+    const reqId = ++requestSeq.current;
+    setFetchError(null);
     const cached = getCachedCurated();
     if (cached) {
       ingestItems(cached);
       return;
     }
+    lastFetchRef.current = () => void loadCurated();
     setLoading(true);
     setPreviewMetadata({});
     try {
-      ingestItems(await fetchCurated());
+      const items = await fetchCurated();
+      if (reqId !== requestSeq.current) return;
+      ingestItems(items);
     } catch (e) {
+      if (reqId !== requestSeq.current) return;
       console.error(e);
+      setFetchError("Could not load cases. Check your connection and try again.");
       setLoading(false);
     }
   };
 
   const runSearch = async (f: Filters, p = 1) => {
+    const reqId = ++requestSeq.current;
+    setFetchError(null);
+    lastFetchRef.current = () => void runSearch(f, p);
     setLoading(true);
     setPreviewMetadata({});
     try {
@@ -152,11 +175,19 @@ export function useDashboard() {
       const res = await fetch(`${API_BASE}/api/search?${params.toString()}`);
       if (!res.ok) throw new Error(`Search failed (${res.status})`);
       const data = await res.json();
-      setResultCount(data.total ?? 0);
-      setPage(data.page ?? p);
+      if (reqId !== requestSeq.current) return;
+      const total = data.total ?? 0;
+      const pages = Math.max(1, Math.ceil(total / PER_PAGE));
+      const serverPage = data.page ?? p;
+      setResultCount(total);
+      // Clamp against the fresh total so a page past the end can't render
+      // summaries like "5 results, page 2 of 1".
+      setPage(Math.min(serverPage, pages));
       ingestItems(data.items ?? []);
     } catch (e) {
+      if (reqId !== requestSeq.current) return;
       console.error(e);
+      setFetchError("Could not load cases. Check your connection and try again.");
       setLoading(false);
     }
   };
@@ -164,7 +195,8 @@ export function useDashboard() {
   const goToPage = (p: number) => {
     const pages = resultCount ? Math.max(1, Math.ceil(resultCount / PER_PAGE)) : 1;
     const next = Math.min(Math.max(1, p), pages);
-    runSearch(filters, next);
+    // Paginate with the last-applied filters, never with un-applied pill edits.
+    runSearch(appliedFiltersRef.current, next);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -172,6 +204,7 @@ export function useDashboard() {
   // pills and their counts stay stable regardless of which filter is active.
   const loadFacetOptions = async () => {
     try {
+      setFacetError(false);
       const params = new URLSearchParams();
       params.set("fields", "tumor,sex,manufacturer,ct_phase,site_nat,year");
       params.set("top_k", "8");
@@ -185,6 +218,7 @@ export function useDashboard() {
       });
     } catch (e) {
       console.error(e);
+      setFacetError(true);
     }
   };
 
@@ -204,6 +238,7 @@ export function useDashboard() {
     const urlFilters = parseFiltersFromParams(searchParams);
     if (countActiveFilters(urlFilters) > 0) {
       setShowFilters(true);
+      appliedFiltersRef.current = urlFilters;
       runSearch(urlFilters);
     } else {
       loadCurated();
@@ -238,12 +273,17 @@ export function useDashboard() {
   }, []);
 
   const handleShuffle = async () => {
+    const reqId = ++requestSeq.current;
+    setShowSaved(false);
+    setFetchError(null);
+    lastFetchRef.current = () => void handleShuffle();
     setLoading(true);
     setPreviewMetadata({});
     setResultCount(null);
     setPage(1);
     setFilters(EMPTY_FILTERS);
-    setSearchParams({});
+    appliedFiltersRef.current = EMPTY_FILTERS;
+    setSearchParams({}, { replace: true });
     try {
       const params = new URLSearchParams({
         n: String(CARD_COUNT),
@@ -256,6 +296,7 @@ export function useDashboard() {
       const res = await fetch(`${API_BASE}/api/random?${params.toString()}`);
       if (!res.ok) throw new Error(`Shuffle failed (${res.status})`);
       const data = await res.json();
+      if (reqId !== requestSeq.current) return;
       const ids = ingestItems(data.items ?? []);
       setRecentShuffleIds((previous) => {
         const deduped: CaseId[] = [];
@@ -267,14 +308,18 @@ export function useDashboard() {
         return deduped.slice(-32);
       });
     } catch (e) {
+      if (reqId !== requestSeq.current) return;
       console.error(e);
+      setFetchError("Could not load cases. Check your connection and try again.");
       setLoading(false);
     }
   };
 
   const handleBrowseAll = () => {
+    setShowSaved(false);
     setFilters(EMPTY_FILTERS);
-    setSearchParams({});
+    appliedFiltersRef.current = EMPTY_FILTERS;
+    setSearchParams({}, { replace: true });
     runSearch(EMPTY_FILTERS, 1);
   };
 
@@ -288,24 +333,36 @@ export function useDashboard() {
   };
 
   const handleApplyFilters = () => {
-    setSearchParams(buildSearchParams(filters));
+    setShowSaved(false);
+    appliedFiltersRef.current = filters;
+    setSearchParams(buildSearchParams(filters), { replace: true });
     runSearch(filters, 1);
     setShowFilters(false);
   };
 
   const handleResetFilters = () => {
     setFilters(EMPTY_FILTERS);
+    appliedFiltersRef.current = EMPTY_FILTERS;
     setResultCount(null);
     setPage(1);
-    setSearchParams({});
+    setSearchParams({}, { replace: true });
     loadCurated();
+  };
+
+  const handleSetSearchId = (n: number) => {
+    setSearchError(null);
+    setSearchId(n);
   };
 
   const handleSearch = () => {
     track("dataset_search");
     if (searchId) {
-      const clamped = Math.max(1, Math.min(9901, searchId));
-      navigation("/case/" + clamped);
+      if (searchId < 1 || searchId > 9901) {
+        setSearchError("Case IDs are 1 to 9901.");
+        return;
+      }
+      setSearchError(null);
+      navigation("/case/" + searchId);
       return;
     }
     handleApplyFilters();
@@ -321,7 +378,12 @@ export function useDashboard() {
     previewMetadata,
     loading,
     searchId,
-    setSearchId,
+    setSearchId: handleSetSearchId,
+    searchError,
+    fetchError,
+    facetError,
+    retryLast,
+    retryFacets: loadFacetOptions,
     showFilters,
     setShowFilters,
     filters,

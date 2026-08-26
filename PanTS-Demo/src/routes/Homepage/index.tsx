@@ -37,6 +37,7 @@ export default function Homepage() {
           <SearchBar
             searchId={dash.searchId}
             setSearchId={dash.setSearchId}
+            searchError={dash.searchError}
             showFilters={dash.showFilters}
             setShowFilters={dash.setShowFilters}
             activeFilterCount={dash.activeFilterCount}
@@ -48,6 +49,8 @@ export default function Homepage() {
               filters={dash.filters}
               setFilters={dash.setFilters}
               facetData={dash.facetData}
+              facetError={dash.facetError}
+              onRetryFacets={dash.retryFacets}
               toggleMulti={dash.toggleMulti}
             />
           )}
@@ -74,18 +77,31 @@ export default function Homepage() {
           />
         )}
 
-        <CaseGrid
-          showSaved={dash.showSaved}
-          savedCases={dash.savedCases}
-          loading={dash.loading}
-          resultCount={dash.resultCount}
-          previewIds={dash.previewIds}
-          previewMetadata={dash.previewMetadata}
-          savedIds={dash.savedIds}
-          compareIds={dash.compareIds}
-          onToggleSave={dash.handleToggleSave}
-          onToggleCompare={dash.toggleCompare}
-        />
+        {!dash.showSaved && !dash.loading && dash.fetchError ? (
+          <div className="py-12 text-center">
+            <p className="text-sm text-gray-600">{dash.fetchError}</p>
+            <button
+              onClick={dash.retryLast}
+              className="mt-3 text-sm font-medium underline"
+              style={{ color: "#002d72" }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <CaseGrid
+            showSaved={dash.showSaved}
+            savedCases={dash.savedCases}
+            loading={dash.loading}
+            resultCount={dash.resultCount}
+            previewIds={dash.previewIds}
+            previewMetadata={dash.previewMetadata}
+            savedIds={dash.savedIds}
+            compareIds={dash.compareIds}
+            onToggleSave={dash.handleToggleSave}
+            onToggleCompare={dash.toggleCompare}
+          />
+        )}
 
         {!dash.showSaved && dash.resultCount !== null && dash.resultCount > PER_PAGE && (
           <Pagination

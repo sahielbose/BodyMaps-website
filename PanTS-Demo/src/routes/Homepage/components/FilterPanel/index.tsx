@@ -21,10 +21,19 @@ interface Props {
   filters: Filters;
   setFilters: React.Dispatch<React.SetStateAction<Filters>>;
   facetData: FacetData | null;
+  facetError: boolean;
+  onRetryFacets: () => void;
   toggleMulti: (key: MultiFilterKey, value: string) => void;
 }
 
-export default function FilterPanel({ filters, setFilters, facetData, toggleMulti }: Props) {
+export default function FilterPanel({
+  filters,
+  setFilters,
+  facetData,
+  facetError,
+  onRetryFacets,
+  toggleMulti,
+}: Props) {
   const facetCount = (field: string, value: string | number): number | null => {
     const rows = facetData?.counts[field];
     if (!rows) return null;
@@ -148,9 +157,30 @@ export default function FilterPanel({ filters, setFilters, facetData, toggleMult
                 Any
               </button>
               {rows.length === 0 ? (
-                <span className={styles.facetsLoading}>
-                  {facetData ? "—" : "Loading…"}
-                </span>
+                facetError && !facetData ? (
+                  <span className={styles.facetsLoading}>
+                    Couldn't load options.{" "}
+                    <button
+                      type="button"
+                      onClick={onRetryFacets}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        padding: 0,
+                        font: "inherit",
+                        color: "#002d72",
+                        textDecoration: "underline",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Retry
+                    </button>
+                  </span>
+                ) : (
+                  <span className={styles.facetsLoading}>
+                    {facetData ? "—" : "Loading…"}
+                  </span>
+                )
               ) : (
                 rows.map((r) => {
                   const val = String(r.value);
