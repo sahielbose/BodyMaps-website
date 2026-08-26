@@ -2259,7 +2259,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		collaborationLocked: liveRoom?.collaborationLocked,
 		onCollaborationUndo: liveRoom?.requestUndo,
 		onUndo: handleUndo,
-		disabled: showReportScreen,
+		// Suspended while any full-screen layer owns the keyboard: the report
+		// walkthrough, the HD-loading overlay, and the point/box prompt status
+		// modal — otherwise S still snapshots the hidden panes, V starts cine,
+		// and [ / ] scroll slices invisibly underneath them.
+		disabled:
+			showReportScreen ||
+			annotateHdLoading ||
+			pointSegment.status !== "idle" ||
+			boxSegment.status !== "idle",
 		closeAnnotationToolbarIfOpen,
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
