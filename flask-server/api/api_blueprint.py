@@ -2071,9 +2071,14 @@ async def get_segmentations(combined_labels_id):
         if os.path.exists(low_path):
             return _serve_dataset_volume(low_path)
 
-    img = nib.load(nifti_path)
+    # Mirror get-main-nifti's missing-file handling: a clean JSON 404 lets the
+    # viewer fail fast instead of receiving a werkzeug HTML 500 page.
+    if not os.path.exists(nifti_path):
+        print(f"Could not find filepath: {nifti_path}. ")
+        return jsonify({"error": "Could not find filepath"}), 404
 
     try:
+        img = nib.load(nifti_path)
         serve_path = nifti_path
         if img.get_data_dtype() != np.uint8:
             # The source is a float label map; Cornerstone needs uint8. Cache the
