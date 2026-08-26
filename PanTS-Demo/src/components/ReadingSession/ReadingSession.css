@@ -5,7 +5,11 @@
 /* ---- REC pill ---- */
 .vp-rec {
   position: fixed;
-  top: 14px;
+  /* Sit below the main toolbar instead of on top of its centered controls.
+     --vp-topbar-h is kept in sync by VisualizationPage (0px when the toolbar
+     is hidden, live measured height when shown), so the pill lands 10px from
+     the top when there is no toolbar and drops flush beneath it when open. */
+  top: calc(var(--vp-topbar-h, 0px) + 10px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 60;
