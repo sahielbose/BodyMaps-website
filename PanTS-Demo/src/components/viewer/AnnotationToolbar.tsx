@@ -14,6 +14,8 @@ import {
 	IconWaveSine,
 	IconCircleDashed,
 	IconCheck,
+	IconTarget,
+	IconBoxAlignTopLeft,
 } from "@tabler/icons-react";
 import "./AnnotationToolbar.css";
 import NumberSliderField from "../NumberSliderField";
@@ -138,6 +140,8 @@ const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon
 	{ id: "erase", label: "Erase", Icon: IconEraser, description: "Erase parts of a shape manually." },
 	{ id: "scissors", label: "Scissors", Icon: IconScissors, description: "Lasso tool using anchor points." },
 	{ id: "levelTracing", label: "Level Tracing", Icon: IconRipple, description: "Traces the boundary of similar intensity around cursor." },
+	{ id: "pointSegment", label: "Segment from click", Icon: IconTarget, description: "Click a structure once and the model proposes its full 3D mask." },
+	{ id: "boxSegment", label: "Segment from box", Icon: IconBoxAlignTopLeft, description: "Drag a box around a structure on one slice to get its 3D mask." },
 	{ id: "margin", label: "Margin", Icon: IconArrowsDiagonal, description: "Grow or shrink by a specified margin size." },
 	{ id: "smoothing", label: "Smoothing", Icon: IconWaveSine, description: "Smooth class boundaries." },
 	{ id: "islands", label: "Islands", Icon: IconDroplet, description: "Edit islands (connected components) in a class." },
