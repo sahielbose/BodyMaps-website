@@ -2256,6 +2256,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		collaborationLocked: liveRoom?.collaborationLocked,
 		onCollaborationUndo: liveRoom?.requestUndo,
 		onUndo: handleUndo,
+		disabled: showReportScreen,
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
 	// the new speed rather than waiting for the next stop/start.
@@ -4378,6 +4379,10 @@ const aiAvailableOrgans = useMemo(() => {
 														// backdrop, so any annotate chrome, organ isolation, or
 														// volume-render mode left active would bleed through it.
 														closeAnnotationToolbarIfOpen();
+														setShowAISidebar(false);
+														setShowStats(false);
+														setShowMetadata(false);
+														setShowMeasurePanel(false);
 														handleClearIsolation();
 														setThreeDMode("mesh");
 														setViewMode("3d");

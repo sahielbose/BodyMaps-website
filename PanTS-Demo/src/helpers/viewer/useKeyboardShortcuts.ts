@@ -71,6 +71,10 @@ interface UseKeyboardShortcutsArgs {
 	 *  equivalent per-tool concept, so Shift+⌘Z still calls redoMaskEdit()
 	 *  directly below. */
 	onUndo: () => void;
+	/** Suspend every shortcut (e.g. while a full-screen overlay like the report
+	 *  walkthrough owns the screen — snapshots, panel toggles, and slice
+	 *  stepping must not fire invisibly underneath it). */
+	disabled?: boolean;
 }
 
 /**
@@ -111,6 +115,7 @@ export function useKeyboardShortcuts({
 	collaborationLocked,
 	onCollaborationUndo,
 	onUndo,
+	disabled,
 }: UseKeyboardShortcutsArgs) {
 	// Last-seen mouse position (viewport-relative clientX/Y), updated on every
 	// mousemove so +/- can zoom toward "wherever the cursor last was" even
@@ -193,6 +198,7 @@ export function useKeyboardShortcuts({
 		};
 
 		const onKey = (e: KeyboardEvent) => {
+			if (disabled) return;
 			const target = e.target as HTMLElement | null;
 			if (
 				target &&
@@ -325,5 +331,6 @@ export function useKeyboardShortcuts({
 		collaborationLocked,
 		onCollaborationUndo,
 		onUndo,
+		disabled,
 	]);
 }
