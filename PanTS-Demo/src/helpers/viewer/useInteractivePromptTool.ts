@@ -99,7 +99,7 @@ export function useInteractivePromptTool({
 			// session already produced — the model has nothing to carve from
 			// yet, and the backend would reject it anyway. Explain locally
 			// instead of burning a server round trip.
-			const msg = "Add a positive click first — right-click then removes from that object.";
+			const msg = "Add a positive click first. Right-click then removes from that object.";
 			onLog?.(msg);
 			setStatus("error");
 			setStatusMessage(msg);
@@ -147,7 +147,7 @@ export function useInteractivePromptTool({
 					refineHintShownRef.current = true;
 					setStatus("success");
 					setStatusMessage(
-						"Applied. The tool stays armed, and each new click refines this same object — left-click adds, right-click (or Alt-click) removes. Switching tools or classes starts a fresh one."
+						"Applied. The tool stays armed, and each new click refines this same object: left-click adds, right-click (or Alt-click) removes. Switching tools or classes starts a fresh one."
 					);
 				} else {
 					// Feedback is the mask itself plus the log line — a modal
@@ -157,8 +157,8 @@ export function useInteractivePromptTool({
 				}
 			} else {
 				const msg = include
-					? "Interactive segment: nothing changed from that prompt — try a different spot."
-					: "Nothing to remove there — that click didn't change the object.";
+					? "Interactive segment: nothing changed from that prompt. Try a different spot."
+					: "Nothing to remove there. That click didn't change the object.";
 				onLog?.(msg);
 				setStatus("error");
 				setStatusMessage(msg);
