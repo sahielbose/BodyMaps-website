@@ -67,9 +67,10 @@ export function useInteractivePromptTool({
 	// One refinement session per armed stretch of the tool. Created lazily on
 	// the first submit; torn down whenever the arming context changes (the
 	// effect below), so a stale token can never leak across classes or cases.
-	// `hasResult` gates prompts that only make sense against an existing
-	// object (corrective clicks).
-	const promptSessionRef = useRef<(PromptSessionState & { hasResult: boolean }) | null>(null);
+	// Note `mode` is deliberately NOT in the teardown deps: the point and box
+	// tools share this one instance, so switching between them keeps refining
+	// the same object.
+	const promptSessionRef = useRef<PromptSessionState | null>(null);
 	// Show the "keep clicking to refine" explainer once per page visit, not
 	// on every session — after the first time it's just in the way.
 	const refineHintShownRef = useRef(false);
@@ -94,23 +95,16 @@ export function useInteractivePromptTool({
 			onLog?.("Interactive segment: no case loaded.");
 			return;
 		}
-		if (!include && !promptSessionRef.current?.hasResult) {
-			// A corrective prompt only means something against an object this
-			// session already produced — the model has nothing to carve from
-			// yet, and the backend would reject it anyway. Explain locally
-			// instead of burning a server round trip.
-			const msg = "Add a positive click first. Right-click then removes from that object.";
-			onLog?.(msg);
-			setStatus("error");
-			setStatusMessage(msg);
-			return;
-		}
+		// No corrective-prompt gate here: whether a right-click has something
+		// to carve from (a prior result, or an existing label the seed scan
+		// finds) is decided inside submitInteractiveSegmentPrompt, which
+		// throws a plain-English message — still before any network round
+		// trip — when it doesn't.
 		if (!promptSessionRef.current) {
 			promptSessionRef.current = {
 				token: crypto.randomUUID(),
 				prevProposal: null,
 				priorValues: new Map(),
-				hasResult: false,
 			};
 		}
 		const session = promptSessionRef.current;
@@ -129,14 +123,12 @@ export function useInteractivePromptTool({
 			);
 			if (result.sessionActive) {
 				session.prevProposal = result.proposal;
-				session.hasResult = true;
 			} else {
 				// One-shot response (fallback path ran server-side): the mask
 				// was merged additively and there is no accumulated object to
 				// refine, so don't carry replace semantics into the next click.
 				session.prevProposal = null;
 				session.priorValues.clear();
-				session.hasResult = false;
 			}
 			if (result.changed > 0) {
 				const parts: string[] = [];
@@ -147,7 +139,7 @@ export function useInteractivePromptTool({
 					refineHintShownRef.current = true;
 					setStatus("success");
 					setStatusMessage(
-						"Applied. The tool stays armed, and each new click refines this same object: left-click adds, right-click (or Alt-click) removes. Switching tools or classes starts a fresh one."
+						"Applied. The tool stays armed, and each new click refines this same object: left-click adds, right-click (or Alt-click) removes. Switching classes starts a fresh one."
 					);
 				} else {
 					// Feedback is the mask itself plus the log line — a modal

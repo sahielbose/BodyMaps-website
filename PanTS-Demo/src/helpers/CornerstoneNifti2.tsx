@@ -2090,8 +2090,10 @@ export interface InteractivePrompt {
   tolerance?: number;
   /** false = corrective prompt: carve the clicked region OUT of the current
    *  session's object instead of adding to it. Model-only (the backend
-   *  refuses it when the interactive model is unavailable), and only
-   *  meaningful mid-session — the hook gates it until a first result. */
+   *  refuses it when the interactive model is unavailable), and needs an
+   *  object to carve from — a prior session result or a seedable existing
+   *  label; submitInteractiveSegmentPrompt throws a plain-English message
+   *  (before any network round trip) when neither exists. */
   include?: boolean;
 }
 
@@ -2109,7 +2111,9 @@ export interface PromptSessionState {
   /** The mask this session's previous response covered (same grid as the
    *  segmentation volume), or null before the first response. Retraction is
    *  restricted to these voxels so labelmap content the session never wrote
-   *  is left untouched. */
+   *  is left untouched. Doubles as the "has this session sent anything yet"
+   *  flag: while null, the next submit runs the seed-from-mask scan (see
+   *  submitInteractiveSegmentPrompt). */
   prevProposal: Uint8Array | null;
   /** Pre-session labelmap value for every voxel this session overwrote, so
    *  retracting restores what was actually there (possibly another organ's
@@ -2140,6 +2144,27 @@ async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
   return await new Response(stream).arrayBuffer();
 }
 
+async function _compressGzip(bytes: Uint8Array): Promise<ArrayBuffer> {
+  // Same browser floor as _decompressGzip — CompressionStream and
+  // DecompressionStream shipped together everywhere that matters.
+  const cs = new (window as any).CompressionStream("gzip");
+  const stream = new Blob([bytes]).stream().pipeThrough(cs);
+  return await new Response(stream).arrayBuffer();
+}
+
+function _toBase64(buf: ArrayBuffer): string {
+  // btoa needs a binary string; build it in chunks because
+  // String.fromCharCode(...) has an argument-count ceiling far below a
+  // full-volume mask's gzip size.
+  const bytes = new Uint8Array(buf);
+  const CHUNK = 0x8000;
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
 /**
  * Send a point/box prompt to the backend's interactive-segment endpoint and
  * merge the returned proposal into the live segmentation volume as
@@ -2160,6 +2185,11 @@ async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
  * `activeSegmentIndex`, and voxels the session previously covered that the
  * refined proposal no longer does are restored to their pre-session values.
  * Without a confirmed session it behaves exactly as before — add-only.
+ *
+ * On a session's first request, voxels the target class already holds are
+ * shipped up as an initial segmentation (seed-from-mask), so the model
+ * refines the existing label instead of starting an empty object — see the
+ * inline comment at the seed scan below.
  */
 export async function submitInteractiveSegmentPrompt(
   apiBase: string,
@@ -2185,6 +2215,41 @@ export async function submitInteractiveSegmentPrompt(
   if (prompt.tolerance != null) body.tolerance = prompt.tolerance;
   if (prompt.include === false) body.include = false;
   if (session) body.session_token = session.token;
+
+  // Seed-from-mask: on a session's FIRST request (no response yet — after one,
+  // prevProposal is non-null even for an empty result), any voxels the target
+  // class already holds are shipped up as an initial segmentation, so the
+  // model REFINES the existing label (nnInteractive's continue-from-seg mode)
+  // instead of starting an empty object next to it. This is what makes a
+  // shipped organ label correctable: arm the tool on "liver", right-click the
+  // overshoot, and the model carves it out of the real liver mask. The seed
+  // doubles as the retraction baseline for this first response, so seeded
+  // voxels the model rejects are cleared rather than orphaned.
+  let seedMask: Uint8Array | null = null;
+  if (session && session.prevProposal === null) {
+    const scalars = (segVolume as any)?.voxelManager?.getCompleteScalarDataArray?.()
+      ?? (segVolume as any)?.scalarData;
+    if (scalars) {
+      const seed = new Uint8Array(scalars.length);
+      let count = 0;
+      for (let idx = 0; idx < scalars.length; idx++) {
+        if (scalars[idx] === activeSegmentIndex) {
+          seed[idx] = 1;
+          count++;
+        }
+      }
+      if (count > 0) {
+        seedMask = seed;
+        body.initial_seg_gz_b64 = _toBase64(await _compressGzip(seed));
+      }
+    }
+  }
+  if (prompt.include === false && !session?.prevProposal && !seedMask) {
+    // A corrective prompt needs something to carve from — either an object
+    // this session already produced, or an existing label to seed with.
+    // Explain locally instead of burning a server round trip.
+    throw new Error("Add a positive click first. Right-click then removes from that object.");
+  }
 
   const httpRes = await fetch(`${apiBase}/api/interactive-segment/${caseId}`, {
     method: "POST",
@@ -2252,11 +2317,13 @@ export async function submitInteractiveSegmentPrompt(
   // holds activeSegmentIndex, goes back to its pre-session value. Both
   // paths record prior AND next per voxel, since retractions don't write
   // activeSegmentIndex.
+  // The retraction baseline: the previous session response, or — on a seeded
+  // first response — the seed itself, so voxels of the pre-existing label
+  // that the model's refinement dropped are retracted right away.
+  const sessionBaseline = session?.prevProposal ?? seedMask;
   const prevProposal =
-    sessionActive &&
-    session!.prevProposal &&
-    session!.prevProposal.length === proposal.data.length
-      ? session!.prevProposal
+    sessionActive && sessionBaseline && sessionBaseline.length === proposal.data.length
+      ? sessionBaseline
       : null;
   const touchedIdx: number[] = [];
   const priorValues: number[] = [];

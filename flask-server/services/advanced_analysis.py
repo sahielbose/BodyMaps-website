@@ -122,6 +122,14 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
     interactive model understands that; there is no region-grow equivalent,
     so corrective prompts never fall back and are refused outright when the
     model path is unavailable.
+
+    `prompt["initial_seg_gz_b64"]` (base64 of a gzipped uint8 labelmap in
+    NIfTI file order, one byte per CT voxel, nonzero = in the object) seeds a
+    fresh session from an existing mask — the model continues from a shipped
+    organ label instead of starting an empty object. Seeded requests are
+    model-only for the same reason corrective ones are: region_grow can't
+    honor the seed, and silently answering with an unrelated threshold blob
+    would read as the model mangling the user's existing label.
     """
     if "point_ijk" in prompt:
         seed = tuple(int(v) for v in prompt["point_ijk"])
@@ -143,6 +151,24 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
     include = prompt.get("include")
     include = True if include is None else bool(include)
 
+    initial_seg = None
+    seg_b64 = prompt.get("initial_seg_gz_b64")
+    if seg_b64:
+        import base64
+        import gzip
+        try:
+            raw = gzip.decompress(base64.b64decode(seg_b64))
+        except Exception:
+            raise ValueError("initial_seg_gz_b64 is not valid base64 gzip data.")
+        if len(raw) != ct.size:
+            raise ValueError(
+                f"initial_seg has {len(raw)} voxels but the CT has {ct.size} — "
+                "resolution mismatch between the viewer and this request."
+            )
+        # The client ships the labelmap as raw linear bytes in NIfTI file
+        # order (i fastest), so a Fortran reshape recovers [i, j, k] indexing.
+        initial_seg = np.frombuffer(raw, dtype=np.uint8).reshape(ct.shape, order="F")
+
     if USE_NNINTERACTIVE:
         try:
             from services.nninteractive_predictor import predict
@@ -153,6 +179,7 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
                 box_ijk=box_ijk,
                 session_token=session_token,
                 include=include,
+                initial_seg=initial_seg,
             )
             if session_token is not None or mask.sum() > 0:
                 # In-session responses are authoritative even when empty (a
@@ -163,16 +190,17 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
             print("[segment_from_prompt] nnInteractive returned empty mask, falling back to region_grow")
         except Exception as e:
             from services import nninteractive_predictor as _predictor
-            if not include or _predictor.session_is_active(session_token):
-                # A corrective prompt has no fallback, and a token that
-                # already refined an object across earlier prompts must not
-                # silently switch models mid-session. Fail loudly instead.
+            if not include or initial_seg is not None or _predictor.session_is_active(session_token):
+                # A corrective prompt has no fallback, a seeded prompt would
+                # lose its seed, and a token that already refined an object
+                # across earlier prompts must not silently switch models
+                # mid-session. Fail loudly instead.
                 raise
             print(f"[segment_from_prompt] nnInteractive failed ({type(e).__name__}: {e}), falling back to region_grow")
 
-    if not include:
+    if not include or initial_seg is not None:
         raise ValueError(
-            "Corrective clicks need the interactive model server, which is not available right now."
+            "That prompt needs the interactive model server, which is not available right now."
         )
     tolerance = min(max(float(prompt.get("tolerance", 80.0)), 1.0), 1000.0)
     return region_grow(ct, seed, tolerance=tolerance, box_ijk=box_ijk)

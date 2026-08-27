@@ -126,6 +126,12 @@ def _add_interaction(session, entry: dict, run_prediction: bool = True) -> None:
             include_interaction=entry["include"],
             run_prediction=run_prediction,
         )
+    elif entry["kind"] == "initial_seg":
+        # Always prediction-deferred: the seed is context for the prompt that
+        # follows in the same request, never a prediction of its own. The
+        # remote client also mirrors the seed into our _target_buffer
+        # in-place (buffer[:] = seg), so the module-level ref stays valid.
+        session.add_initial_seg_interaction(entry["seg"], run_prediction=False)
     else:
         session.add_bbox_interaction(
             entry["axis_pairs"],
@@ -166,7 +172,14 @@ def predict(
     box_ijk=None,
     session_token=None,
     include: bool = True,
+    initial_seg: np.ndarray | None = None,
 ) -> np.ndarray:
+    """`initial_seg` (uint8, ct.shape) seeds a FRESH session with an existing
+    mask before the first prompt — nnInteractive's "continue from existing
+    segmentation" mode, which is how a shipped organ label becomes refinable
+    instead of the first click starting an empty object. Ignored unless this
+    request starts a fresh session (mid-session requests already carry their
+    context in the accumulated interactions)."""
     global _active_token, _history
     from nnInteractive.inference.remote.remote_session import SessionExpiredError
 
@@ -199,15 +212,24 @@ def predict(
         _active_token = token
         _history = []
 
+    new_entries = []
+    if starting_fresh and initial_seg is not None:
+        # np.frombuffer views are read-only and F-strided after the reshape
+        # upstream; blosc2 packing wants a plain contiguous buffer.
+        new_entries.append({"kind": "initial_seg", "seg": np.ascontiguousarray(initial_seg)})
+    new_entries.append(entry)
+
     try:
         if starting_fresh:
             session.reset_interactions()
-        _add_interaction(session, entry)
+        for pending in new_entries:
+            _add_interaction(session, pending)
     except SessionExpiredError:
         session = _rebuild_and_replay(ct, case_key)
-        _add_interaction(session, entry)
+        for pending in new_entries:
+            _add_interaction(session, pending)
 
     if token is not None:
-        _history.append(entry)
+        _history.extend(new_entries)
 
     return _target_buffer.copy()

@@ -7051,7 +7051,8 @@ def interactive_segment(case_id):
     """Click-to-segment: seed prompt -> proposed mask (.nii.gz in CT geometry).
 
     Body JSON: { point_lps:[x,y,z] | point_ijk:[i,j,k], tolerance?, box_lps?,
-                 res?: "low"|"full", session_token?: str, include?: bool }.
+                 res?: "low"|"full", session_token?: str, include?: bool,
+                 initial_seg_gz_b64?: str }.
     res should match the resolution the viewer loaded so the returned mask's
     voxel grid aligns with the labelmap. Consecutive requests carrying the same
     session_token accumulate on the model server as one prompt session, so each
@@ -7062,6 +7063,9 @@ def interactive_segment(case_id):
     marks a corrective prompt (carve the clicked region OUT of the session's
     object) — model-only, no fallback, and an empty result is then legitimate
     (the corrections shrank the object to nothing) rather than a 422.
+    initial_seg_gz_b64 (base64 gzip of a uint8 labelmap in NIfTI file order)
+    seeds a fresh session from an existing mask so the model refines a
+    shipped label instead of starting an empty object; also model-only.
     """
     if not _ANALYSIS_SLOTS.acquire(blocking=False):
         return jsonify(_ANALYSIS_BUSY_RESPONSE[0]), _ANALYSIS_BUSY_RESPONSE[1]
