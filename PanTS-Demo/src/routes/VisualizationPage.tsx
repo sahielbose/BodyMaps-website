@@ -77,7 +77,7 @@ import {
   applyMargin, getActualMarginMm,
   applyIslandsOperation, applyLogicalOperator, applySmoothing,
   deleteSegmentEverywhere, getSegmentAtVoxel, getActiveEditSegment, type LogicalOperation,
-  type LevelTraceOperation
+  type LevelTraceOperation, projectPromptMarker
 } from "../helpers/CornerstoneNifti2";
 import {
     API_BASE,
@@ -3280,6 +3280,34 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						)}
 					</svg>
 				)}
+				{/* Landed prompts of the live refinement session: green = add,
+				    red = remove. Rendered on EVERY pane (a 3D point belongs to
+				    one slice per orientation); projectPromptMarker hides those
+				    not on this pane's current slice. */}
+				{promptSegment.promptMarkers.map((m, i) => {
+					const at = projectPromptMarker(pane, m.world);
+					if (!at) return null;
+					return (
+						<div
+							key={`prompt-marker-${i}`}
+							style={{
+								position: "absolute",
+								left: at[0],
+								top: at[1],
+								width: 9,
+								height: 9,
+								marginLeft: -4.5,
+								marginTop: -4.5,
+								borderRadius: "50%",
+								background: m.include ? "#4ade80" : "#f87171",
+								border: "1.5px solid rgba(255, 255, 255, 0.9)",
+								boxShadow: "0 0 3px rgba(0, 0, 0, 0.6)",
+								pointerEvents: "none",
+								zIndex: 39,
+							}}
+						/>
+					);
+				})}
 			</>
 		);
 	};

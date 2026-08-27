@@ -20,6 +20,7 @@ import {
 	worldToCanvasPoint,
 	submitInteractiveSegmentPrompt,
 	type CinePane,
+	type PromptMarker,
 	type PromptSessionState,
 } from "../CornerstoneNifti2";
 // Avoid importing Point3 from "@cornerstonejs/core/types" directly — Vite's
@@ -128,6 +129,7 @@ export function useInteractivePromptTool({
 				token: crypto.randomUUID(),
 				prevProposal: null,
 				priorValues: new Map(),
+				markers: [],
 			};
 		}
 		const session = promptSessionRef.current;
@@ -343,10 +345,20 @@ export function useInteractivePromptTool({
 	const liveBoxDisplay = liveBoxCanvas;
 	void worldToCanvasPoint; // referenced for parity with usePolygonDraw's reprojection pattern; box mode doesn't need it since it never stores world corners across a re-render before submit.
 
+	// Landed-prompt markers for the pane overlays. Read straight off the
+	// session each render (the array mutates without a state update): every
+	// submit round-trip already re-renders via setStatus, and undo/redo ride
+	// the segmentation-changed refresh, so the overlay tracks closely enough
+	// without duplicating the array into state. Hidden once the session is
+	// dead — those prompts no longer back the model's context.
+	const session = promptSessionRef.current;
+	const promptMarkers: PromptMarker[] = session && !session.dead ? session.markers : [];
+
 	return {
 		pane,
 		liveBox: liveBoxDisplay,
 		liveStroke: liveStrokeCanvas,
+		promptMarkers,
 		status,
 		statusMessage,
 		dismissStatus,

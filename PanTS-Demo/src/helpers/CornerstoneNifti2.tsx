@@ -2134,6 +2134,21 @@ export interface PromptSessionState {
    *  session as absent: the next prompt starts a fresh session, whose seed
    *  scan rebuilds the model's context from the labelmap as it stands. */
   dead?: boolean;
+  /** Where this session's prompts landed, oldest first, for the pane
+   *  overlays — so mid-refinement the user can see which clicks the model
+   *  is already honoring. Kept 1:1 with the server's accumulated prompts:
+   *  pushed per apply, popped by that apply's undo entry, and gone with the
+   *  session itself (marker lifetime IS session lifetime). */
+  markers: PromptMarker[];
+}
+
+/** One landed prompt for the pane overlays. */
+export interface PromptMarker {
+  /** World (LPS) anchor: the click itself for point prompts, the gesture's
+   *  first vertex for boxes and strokes. */
+  world: [number, number, number];
+  /** false = corrective (remove) prompt — drawn in the remove color. */
+  include: boolean;
 }
 
 /** Best-effort server half of undoing a session apply: ask the backend to
@@ -2434,11 +2449,21 @@ export async function submitInteractiveSegmentPrompt(
     // prevProposal with this response right after we return, so undo has
     // to put the older one back for the next prompt's retraction pass.
     const proposalBefore = session ? session.prevProposal : null;
+    const marker: PromptMarker | null =
+      sessionActive && session
+        ? {
+            world: [prompt.pointLps[0], prompt.pointLps[1], prompt.pointLps[2]],
+            include: prompt.include !== false,
+          }
+        : null;
+    if (marker) session!.markers.push(marker);
     pushEditHistory({
       undo: () => {
         applyAndRefresh(priorValues);
         if (sessionActive && session) {
           session.prevProposal = proposalBefore;
+          const at = session.markers.lastIndexOf(marker!);
+          if (at >= 0) session.markers.splice(at, 1);
           // Fire-and-forget: the labelmap is already restored above, and
           // any sync failure marks the session dead, which is consistent
           // too (the next prompt re-seeds from the restored labelmap).
@@ -2450,7 +2475,10 @@ export async function submitInteractiveSegmentPrompt(
         // The model server keeps a single undo snapshot and has no redo,
         // so the re-applied voxels are context it no longer holds — end
         // the session; the next prompt re-seeds from the redone labelmap.
-        if (sessionActive && session) session.dead = true;
+        if (sessionActive && session) {
+          session.markers.push(marker!);
+          session.dead = true;
+        }
       },
     });
   }
@@ -3675,6 +3703,40 @@ export function worldToCanvasPoint(pane: CinePane, world: Point3): [number, numb
   if (!viewport) return null;
   try {
     const [x, y] = viewport.worldToCanvas(world) as Point2;
+    return [x, y];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Canvas position for a prompt marker on `pane`, or null when the marker's
+ * world point isn't on the pane's CURRENT slice (within half a voxel along
+ * the view normal) or projects outside the canvas. worldToCanvas projects
+ * onto the view plane regardless of depth, so without the slab check a
+ * marker placed on axial slice 80 would float over every axial slice.
+ */
+export function projectPromptMarker(pane: CinePane, world: Point3): [number, number] | null {
+  const engine = getRenderingEngine(renderingEngineId);
+  if (!engine) return null;
+  const viewport = engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]) as any;
+  if (!viewport) return null;
+  try {
+    const cam = viewport.getCamera?.();
+    const n = cam?.viewPlaneNormal;
+    const f = cam?.focalPoint;
+    if (!n || !f) return null;
+    const dist = Math.abs(
+      (world[0] - f[0]) * n[0] + (world[1] - f[1]) * n[1] + (world[2] - f[2]) * n[2]
+    );
+    const spacing = viewport.getImageData?.()?.spacing ?? [1, 1, 1];
+    const halfSlab =
+      (Math.abs(n[0]) * spacing[0] + Math.abs(n[1]) * spacing[1] + Math.abs(n[2]) * spacing[2]) / 2 +
+      1e-3;
+    if (dist > halfSlab) return null;
+    const [x, y] = viewport.worldToCanvas(world) as Point2;
+    const el = viewport.canvas as HTMLCanvasElement | undefined;
+    if (el && (x < 0 || y < 0 || x > el.clientWidth || y > el.clientHeight)) return null;
     return [x, y];
   } catch {
     return null;
