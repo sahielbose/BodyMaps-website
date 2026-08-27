@@ -21,6 +21,10 @@ itsdangerous==2.2.0
 Jinja2==3.1.4
 Mako==1.3.8
 nibabel==5.2.1
+# Remote client for the interactive segmentation model server (point/box/
+# scribble/lasso prompts). Client only — no torch; the model itself runs in
+# the separate nninteractive-server process (see scripts/demo_interactive.sh).
+nninteractive-client==2.5.1
 numpy>=2.0
 openpyxl
 packaging==24.1
