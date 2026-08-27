@@ -1453,10 +1453,17 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// Slicer plugin behaves. Two instances would each hold their own token
 	// and silently start a new object on every tool switch.
 	const promptToolArmed =
-		activeToolbarTool === "pointSegment" || activeToolbarTool === "boxSegment";
+		activeToolbarTool === "pointSegment" ||
+		activeToolbarTool === "boxSegment" ||
+		activeToolbarTool === "scribbleSegment";
 	const promptSegment = useInteractivePromptTool({
 		enabled: promptToolArmed,
-		mode: activeToolbarTool === "boxSegment" ? "box" : "point",
+		mode:
+			activeToolbarTool === "boxSegment"
+				? "box"
+				: activeToolbarTool === "scribbleSegment"
+					? "scribble"
+					: "point",
 		apiBase: API_BASE,
 		caseId: pantsCase ?? null,
 		activeSegmentIndex: activeSegment,
@@ -1622,7 +1629,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		if (editMode === "brush" || editMode === "eraser") {
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(editMode === "brush" ? EDIT_BRUSH : EDIT_ERASER);
-		} else if (editMode === "smartfill" || activeToolbarTool === "pointSegment" || activeToolbarTool === "boxSegment") {
+		} else if (editMode === "smartfill" || promptToolArmed) {
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(null);
 			toggleCrosshairTool(false);
@@ -3236,6 +3243,27 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						/>
 					);
 				})()}
+				{promptSegment.pane === pane && promptSegment.liveStroke && promptSegment.liveStroke.length > 1 && (
+					<svg
+						style={{
+							position: "absolute",
+							inset: 0,
+							width: "100%",
+							height: "100%",
+							pointerEvents: "none",
+							zIndex: 40,
+						}}
+					>
+						<polyline
+							points={promptSegment.liveStroke.map(([x, y]) => `${x},${y}`).join(" ")}
+							fill="none"
+							stroke="#6fd3ff"
+							strokeWidth={2.5}
+							strokeLinecap="round"
+							strokeLinejoin="round"
+						/>
+					</svg>
+				)}
 			</>
 		);
 	};
@@ -4006,7 +4034,7 @@ const aiAvailableOrgans = useMemo(() => {
 										    dropdowns (same portal-flyout pattern as Measure/Cine originally used)
 										    so the bar reads as ~9 clusters instead of ~20 individual icons. */}
 										<button
-												className={`vp-tool ${crosshairToolActive && !activeMeasureTool && !editMode && activeToolbarTool !== "pointSegment" && activeToolbarTool !== "boxSegment" ? "vp-tool--active" : ""}`}
+												className={`vp-tool ${crosshairToolActive && !activeMeasureTool && !editMode && !promptToolArmed ? "vp-tool--active" : ""}`}
 												onClick={() => {
 													closeAnnotationToolbarIfOpen();
 													setEditMode(null);
@@ -4015,7 +4043,7 @@ const aiAvailableOrgans = useMemo(() => {
 												}}
 												aria-label="Crosshair mode"
 											>
-												<IconPointer size={20} color={crosshairToolActive && !activeMeasureTool && !editMode && activeToolbarTool !== "pointSegment" && activeToolbarTool !== "boxSegment" ? "#08090b" : "white"} />
+												<IconPointer size={20} color={crosshairToolActive && !activeMeasureTool && !editMode && !promptToolArmed ? "#08090b" : "white"} />
 												<span className="vp-tool__tip">Crosshair</span>
 											</button>
 

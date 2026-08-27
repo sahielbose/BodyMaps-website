@@ -103,6 +103,46 @@ def _corners_to_axis_pairs(lo, hi) -> list[list[int]]:
     return pairs
 
 
+def _rasterize_stroke(points, shape: tuple, closed: bool) -> np.ndarray:
+    """Full-volume uint8 mask of a stroke drawn on ONE viewport slice.
+
+    `points` are [i, j, k] voxel coords that all lie (up to rounding) on a
+    single plane — the pane the user drew on. The plane's axis is whichever
+    coordinate varies least across the stroke, matching how the box prompt
+    flattens (_corners_to_axis_pairs). Open strokes rasterize as a 3px-wide
+    polyline (the scribble gesture); closed ones as a filled polygon (lasso).
+    The model server wants these as full-volume binary masks — that's the
+    wire format add_scribble_interaction/add_lasso_interaction take.
+    """
+    from PIL import Image, ImageDraw
+
+    pts = np.asarray(points, dtype=float)
+    spread = pts.max(axis=0) - pts.min(axis=0)
+    axis = int(np.argmin(spread))
+    slice_idx = int(round(pts[:, axis].mean()))
+    slice_idx = max(0, min(shape[axis] - 1, slice_idx))
+    other = [d for d in range(3) if d != axis]
+
+    # PIL canvases are (width, height) with xy=(x, y); map width to the first
+    # remaining volume axis so the later transpose lands as [other0, other1] —
+    # exactly the shape vol[fixed-axis slice] indexes as. Out-of-bounds stroke
+    # coords just clip at the canvas edge, which is the behavior we want.
+    img = Image.new("L", (shape[other[0]], shape[other[1]]), 0)
+    draw = ImageDraw.Draw(img)
+    xy = [(float(p[other[0]]), float(p[other[1]])) for p in points]
+    if closed:
+        draw.polygon(xy, fill=1, outline=1)
+    else:
+        draw.line(xy, fill=1, width=3, joint="curve")
+    plane = np.array(img, dtype=np.uint8).T
+
+    vol = np.zeros(shape, dtype=np.uint8)
+    index = [slice(None)] * 3
+    index[axis] = slice_idx
+    vol[tuple(index)] = plane
+    return vol
+
+
 def _normalize_token(session_token) -> str | None:
     if not session_token:
         return None
@@ -132,6 +172,15 @@ def _add_interaction(session, entry: dict, run_prediction: bool = True) -> None:
         # remote client also mirrors the seed into our _target_buffer
         # in-place (buffer[:] = seg), so the module-level ref stays valid.
         session.add_initial_seg_interaction(entry["seg"], run_prediction=False)
+    elif entry["kind"] == "scribble":
+        # Rasterized from the stored points at send time (not stored as a
+        # volume) so replay-after-expiry re-rasterizes instead of holding a
+        # 30MB+ mask per stroke in _history.
+        session.add_scribble_interaction(
+            _rasterize_stroke(entry["points"], _cached_ct_shape, closed=False),
+            include_interaction=entry["include"],
+            run_prediction=run_prediction,
+        )
     else:
         session.add_bbox_interaction(
             entry["axis_pairs"],
@@ -170,6 +219,7 @@ def predict(
     case_key: str,
     point_ijk=None,
     box_ijk=None,
+    scribble_ijk=None,
     session_token=None,
     include: bool = True,
     initial_seg: np.ndarray | None = None,
@@ -198,13 +248,19 @@ def predict(
         # cleared, so this "replay" is simply a clean rebuild.
         session = _rebuild_and_replay(ct, case_key)
 
-    if point_ijk is not None:
-        entry = {"kind": "point", "coords": [int(v) for v in point_ijk], "include": bool(include)}
+    if scribble_ijk is not None:
+        entry = {
+            "kind": "scribble",
+            "points": [[int(v) for v in p] for p in scribble_ijk],
+            "include": bool(include),
+        }
     elif box_ijk is not None:
         lo, hi = box_ijk
         entry = {"kind": "bbox", "axis_pairs": _corners_to_axis_pairs(lo, hi), "include": bool(include)}
+    elif point_ijk is not None:
+        entry = {"kind": "point", "coords": [int(v) for v in point_ijk], "include": bool(include)}
     else:
-        raise ValueError("predict() needs point_ijk or box_ijk")
+        raise ValueError("predict() needs point_ijk, box_ijk, or scribble_ijk")
 
     token = _normalize_token(session_token)
     starting_fresh = token is None or token != _active_token

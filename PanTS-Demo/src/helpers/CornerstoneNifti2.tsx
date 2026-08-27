@@ -2087,6 +2087,11 @@ export async function upgradeSegmentationVolume(fullResSegUrl: string): Promise<
 export interface InteractivePrompt {
   pointLps: Point3;
   boxLps?: [Point3, Point3];
+  /** Stroke prompt: 2+ world points along a line the user drew on ONE pane.
+   *  The backend rasterizes it to a thin polyline mask on that slice and the
+   *  model segments the structure under it. pointLps should still carry the
+   *  stroke's first vertex. Takes precedence over boxLps server-side. */
+  scribbleLps?: Point3[];
   tolerance?: number;
   /** false = corrective prompt: carve the clicked region OUT of the current
    *  session's object instead of adding to it. Model-only (the backend
@@ -2211,6 +2216,9 @@ export async function submitInteractiveSegmentPrompt(
       [prompt.boxLps[0][0], prompt.boxLps[0][1], prompt.boxLps[0][2]],
       [prompt.boxLps[1][0], prompt.boxLps[1][1], prompt.boxLps[1][2]],
     ];
+  }
+  if (prompt.scribbleLps) {
+    body.scribble_lps = prompt.scribbleLps.map((p) => [p[0], p[1], p[2]]);
   }
   if (prompt.tolerance != null) body.tolerance = prompt.tolerance;
   if (prompt.include === false) body.include = false;

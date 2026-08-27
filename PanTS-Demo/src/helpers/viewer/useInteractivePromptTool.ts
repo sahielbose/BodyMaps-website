@@ -1,9 +1,10 @@
 // helpers/viewer/useInteractivePromptTool.ts
 //
 // Mirrors usePolygonDraw's architecture (pane tracking, world-space storage,
-// canvas reprojection) but for the much simpler point/box prompt gesture: a
-// single click submits immediately in "point" mode; a click-drag defines two
-// corners and submits on mouseup in "box" mode.
+// canvas reprojection) but for the simpler prompt gestures: a single click
+// submits immediately in "point" mode; a click-drag defines two corners and
+// submits on mouseup in "box" mode; a freehand drag collects a polyline and
+// submits it on mouseup in "scribble" mode.
 //
 // The tool is equip-and-use, like the brush: it stays armed after a
 // successful prompt, and consecutive prompts share one PromptSessionState —
@@ -27,7 +28,7 @@ import {
 // everything this file does with it.
 type Point3 = [number, number, number];
 
-export type PromptMode = "point" | "box";
+export type PromptMode = "point" | "box" | "scribble";
 
 interface UseInteractivePromptToolArgs {
 	enabled: boolean;
@@ -53,6 +54,12 @@ export function useInteractivePromptTool({
 	const [dragStartCanvas, setDragStartCanvas] = useState<[number, number] | null>(null);
 	const [dragStartWorld, setDragStartWorld] = useState<Point3 | null>(null);
 	const [liveBoxCanvas, setLiveBoxCanvas] = useState<[[number, number], [number, number]] | null>(null);
+	// Stroke gesture (scribble): points accumulate in refs — the source of
+	// truth mousemove appends to — with a state mirror for the overlay, so
+	// rapid mousemoves can't lose points to a stale-closure state read.
+	const strokeCanvasRef = useRef<[number, number][]>([]);
+	const strokeWorldRef = useRef<Point3[]>([]);
+	const [liveStrokeCanvas, setLiveStrokeCanvas] = useState<[number, number][] | null>(null);
 	const paneRef = useRef<CinePane | null>(null);
 	const busyRef = useRef(false);
 	// Drives the applying/success overlay (mirrors CopyAcrossSlicesFlyout's
@@ -82,10 +89,18 @@ export function useInteractivePromptTool({
 		setDragStartCanvas(null);
 		setDragStartWorld(null);
 		setLiveBoxCanvas(null);
+		strokeCanvasRef.current = [];
+		strokeWorldRef.current = [];
+		setLiveStrokeCanvas(null);
 		paneRef.current = null;
 	}, []);
 
-	const submit = useCallback(async (_pane: CinePane, pointWorld: Point3, boxWorld?: [Point3, Point3], include: boolean = true) => {
+	const submit = useCallback(async (
+		_pane: CinePane,
+		pointWorld: Point3,
+		opts: { box?: [Point3, Point3]; scribble?: Point3[]; include?: boolean } = {},
+	) => {
+		const include = opts.include ?? true;
 		if (busyRef.current) return; // one in-flight request at a time
 		if (activeSegmentIndex == null) {
 			onLog?.("Interactive segment: no target segment selected.");
@@ -117,7 +132,7 @@ export function useInteractivePromptTool({
 				apiBase,
 				caseId,
 				activeSegmentIndex,
-				{ pointLps: pointWorld, boxLps: boxWorld, tolerance, include },
+				{ pointLps: pointWorld, boxLps: opts.box, scribbleLps: opts.scribble, tolerance, include },
 				res,
 				session,
 			);
@@ -177,10 +192,10 @@ export function useInteractivePromptTool({
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		const world = canvasPointToWorld(pane, canvasPos);
 		if (!world) return;
-		// Alt+click = corrective (remove) — same polarity gesture in both
-		// modes, and the keyboard-only sibling of right-click for setups
+		// Alt+click = corrective (remove) — same polarity gesture in every
+		// mode, and the keyboard-only sibling of right-click for setups
 		// where right-click is spoken for (trackpads, tablet pens).
-		void submit(pane, world, undefined, !e.altKey);
+		void submit(pane, world, { include: !e.altKey });
 	};
 
 	// Right-click = corrective prompt at the cursor, in both modes (in box
@@ -194,21 +209,22 @@ export function useInteractivePromptTool({
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		const world = canvasPointToWorld(pane, canvasPos);
 		if (!world) return;
-		void submit(pane, world, undefined, false);
+		void submit(pane, world, { include: false });
 	};
 
-	// Box mode: mousedown starts the drag, mousemove updates the live preview
-	// rectangle, mouseup submits both corners. Mirrors the pointer semantics a
-	// user already expects from the scissors' click-drag box operations.
-	// Alt held at mousedown makes the whole drag corrective (remove-box);
+	// Drag modes (box and scribble): mousedown starts the gesture, mousemove
+	// updates the live preview (rectangle or polyline), mouseup submits. Box
+	// mirrors the pointer semantics a user already expects from the scissors'
+	// click-drag operations; scribble collects the freehand path itself.
+	// Alt held at mousedown makes the whole gesture corrective (remove);
 	// polarity is latched at the start so releasing Alt mid-drag doesn't
 	// silently flip what the submit will do.
 	const dragIncludeRef = useRef(true);
 	const handleMouseDown = (pane: CinePane) => (e: MouseEvent) => {
-		if (!enabled || mode !== "box") return;
+		if (!enabled || (mode !== "box" && mode !== "scribble")) return;
 		// Left button only — the right button belongs to handleContextMenu's
 		// corrective point, and a right-drag would otherwise strand a live
-		// preview box when the context menu event interrupts it.
+		// preview when the context menu event interrupts it.
 		if (e.button !== 0) return;
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
@@ -218,14 +234,35 @@ export function useInteractivePromptTool({
 		paneRef.current = pane;
 		setDragStartCanvas(canvasPos);
 		setDragStartWorld(world);
-		setLiveBoxCanvas([canvasPos, canvasPos]);
+		if (mode === "box") {
+			setLiveBoxCanvas([canvasPos, canvasPos]);
+		} else {
+			strokeCanvasRef.current = [canvasPos];
+			strokeWorldRef.current = [world];
+			setLiveStrokeCanvas([canvasPos]);
+		}
 	};
 
 	const handleMouseMove = (pane: CinePane) => (e: MouseEvent) => {
-		if (!enabled || mode !== "box" || paneRef.current !== pane || !dragStartCanvas) return;
+		if (!enabled || paneRef.current !== pane || !dragStartCanvas) return;
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
-		setLiveBoxCanvas([dragStartCanvas, canvasPos]);
+		if (mode === "box") {
+			setLiveBoxCanvas([dragStartCanvas, canvasPos]);
+		} else if (mode === "scribble") {
+			const pts = strokeCanvasRef.current;
+			const last = pts[pts.length - 1];
+			// ≥2px spacing keeps the point count proportional to path length,
+			// not event rate — a slow careful stroke stays a few hundred
+			// points instead of thousands.
+			if (!last || Math.hypot(canvasPos[0] - last[0], canvasPos[1] - last[1]) >= 2) {
+				const world = canvasPointToWorld(pane, canvasPos);
+				if (!world) return;
+				pts.push(canvasPos);
+				strokeWorldRef.current.push(world);
+				setLiveStrokeCanvas([...pts]);
+			}
+		}
 	};
 
 	// A drag released outside the pane never reaches the pane's mouseup
@@ -245,11 +282,33 @@ export function useInteractivePromptTool({
 	}, [dragStartCanvas, reset]);
 
 	const handleMouseUp = (pane: CinePane) => (e: MouseEvent) => {
-		if (!enabled || mode !== "box" || paneRef.current !== pane || !dragStartWorld) return;
+		if (!enabled || (mode !== "box" && mode !== "scribble") || paneRef.current !== pane || !dragStartWorld) return;
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
-		const endWorld = canvasPointToWorld(pane, canvasPos);
 		const startWorld = dragStartWorld;
+		const include = dragIncludeRef.current;
+
+		if (mode === "scribble") {
+			const worldPts = strokeWorldRef.current;
+			const canvasPts = strokeCanvasRef.current;
+			reset();
+			// Path length, not displacement: a stroke that curls back to its
+			// start is a real scribble, while a jitter-only "click" isn't.
+			let pathLen = 0;
+			for (let i = 1; i < canvasPts.length; i++) {
+				pathLen += Math.hypot(canvasPts[i][0] - canvasPts[i - 1][0], canvasPts[i][1] - canvasPts[i - 1][1]);
+			}
+			if (worldPts.length < 2 || pathLen < 8) {
+				// Degenerate stroke -> point prompt, same polarity, mirroring
+				// the degenerate-box behavior below.
+				void submit(pane, startWorld, { include });
+			} else {
+				void submit(pane, worldPts[0], { scribble: worldPts, include });
+			}
+			return;
+		}
+
+		const endWorld = canvasPointToWorld(pane, canvasPos);
 		reset();
 		if (!endWorld) return;
 		// A click with ~no drag is treated as a degenerate box — submit as a
@@ -258,9 +317,9 @@ export function useInteractivePromptTool({
 		const dx = Math.abs(canvasPos[0] - (dragStartCanvas?.[0] ?? 0));
 		const dy = Math.abs(canvasPos[1] - (dragStartCanvas?.[1] ?? 0));
 		if (dx < 4 && dy < 4) {
-			void submit(pane, startWorld, undefined, dragIncludeRef.current);
+			void submit(pane, startWorld, { include });
 		} else {
-			void submit(pane, startWorld, [startWorld, endWorld], dragIncludeRef.current);
+			void submit(pane, startWorld, { box: [startWorld, endWorld], include });
 		}
 	};
 
@@ -273,6 +332,7 @@ export function useInteractivePromptTool({
 	return {
 		pane,
 		liveBox: liveBoxDisplay,
+		liveStroke: liveStrokeCanvas,
 		status,
 		statusMessage,
 		dismissStatus,

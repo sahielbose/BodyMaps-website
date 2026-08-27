@@ -130,6 +130,12 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
     model-only for the same reason corrective ones are: region_grow can't
     honor the seed, and silently answering with an unrelated threshold blob
     would read as the model mangling the user's existing label.
+
+    `prompt["scribble_lps"]` ([[x,y,z], ...], 2+ points on one viewport
+    slice) is a stroke prompt: the backend rasterizes it to a thin polyline
+    mask on that slice and the model segments the structure under it. Takes
+    precedence over point/box when present (point_lps still accompanies it,
+    as the stroke's first vertex, for older-server compatibility). Model-only.
     """
     if "point_ijk" in prompt:
         seed = tuple(int(v) for v in prompt["point_ijk"])
@@ -146,6 +152,12 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
             tuple(min(a, b) for a, b in zip(c0, c1)),
             tuple(max(a, b) + 1 for a, b in zip(c0, c1)),
         )
+
+    scribble_ijk = None
+    if prompt.get("scribble_lps"):
+        scribble_ijk = [lps_to_ijk(affine, p) for p in prompt["scribble_lps"]]
+        if len(scribble_ijk) < 2:
+            raise ValueError("A scribble needs at least 2 points.")
 
     session_token = prompt.get("session_token") or None
     include = prompt.get("include")
@@ -169,19 +181,27 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
         # order (i fastest), so a Fortran reshape recovers [i, j, k] indexing.
         initial_seg = np.frombuffer(raw, dtype=np.uint8).reshape(ct.shape, order="F")
 
+    # Prompts that only the interactive model can honor: corrective (no
+    # region-grow equivalent), seeded (the fallback would ignore the seed and
+    # mangle the existing label), and stroke-shaped (region_grow takes one
+    # seed point — answering a drawn stroke with a blob grown from its first
+    # vertex would silently ignore what the user drew).
+    model_only = (not include) or initial_seg is not None or scribble_ijk is not None
+
     if USE_NNINTERACTIVE:
         try:
             from services.nninteractive_predictor import predict
             mask = predict(
                 ct,
                 case_key or "unkeyed",
-                point_ijk=seed if box_ijk is None else None,
-                box_ijk=box_ijk,
+                point_ijk=seed if (box_ijk is None and scribble_ijk is None) else None,
+                box_ijk=box_ijk if scribble_ijk is None else None,
+                scribble_ijk=scribble_ijk,
                 session_token=session_token,
                 include=include,
                 initial_seg=initial_seg,
             )
-            if session_token is not None or mask.sum() > 0:
+            if session_token is not None or model_only or mask.sum() > 0:
                 # In-session responses are authoritative even when empty (a
                 # refinement can legitimately shrink the object) — see the
                 # docstring. Only tokenless one-shot prompts keep the empty
@@ -190,15 +210,14 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
             print("[segment_from_prompt] nnInteractive returned empty mask, falling back to region_grow")
         except Exception as e:
             from services import nninteractive_predictor as _predictor
-            if not include or initial_seg is not None or _predictor.session_is_active(session_token):
-                # A corrective prompt has no fallback, a seeded prompt would
-                # lose its seed, and a token that already refined an object
-                # across earlier prompts must not silently switch models
-                # mid-session. Fail loudly instead.
+            if model_only or _predictor.session_is_active(session_token):
+                # No fallback exists for model-only prompts, and a token that
+                # already refined an object across earlier prompts must not
+                # silently switch models mid-session. Fail loudly instead.
                 raise
             print(f"[segment_from_prompt] nnInteractive failed ({type(e).__name__}: {e}), falling back to region_grow")
 
-    if not include or initial_seg is not None:
+    if model_only:
         raise ValueError(
             "That prompt needs the interactive model server, which is not available right now."
         )
