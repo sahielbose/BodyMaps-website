@@ -6993,24 +6993,36 @@ def _safe_case_id(case_id):
     return int(case_id)
 
 
-def _case_ct_path(case_id, low=False):
-    case_dir = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(_safe_case_id(case_id))}"
-    path = f"{case_dir}/{Constants.MAIN_NIFTI_FILENAME}"
+def _lowres_or_full(subdir, pants_id, filename, low):
+    """Resolve a case volume, preferring the low-res copy when asked for it.
+
+    make_lowres.py writes the low-res copies under LOWRES_ROOT, a writable
+    disk, precisely because the dataset mount is read-only — so looking for
+    them next to the originals under PANTS_PATH finds nothing and silently
+    falls back to full resolution. That fallback is not harmless here: the
+    viewer's volume endpoint reads low-res from LOWRES_ROOT, so the two halves
+    of the feature end up on different voxel grids and the client rejects
+    every proposal with a resolution-mismatch error. Check LOWRES_ROOT first,
+    the dataset mount second (for setups that do colocate them), full res last.
+    """
+    full = f"{Constants.PANTS_PATH}/{subdir}/{pants_id}/{filename}"
     if low:
-        low_path = path.replace('.nii.gz', '_lowres.nii.gz')
-        if os.path.exists(low_path):
-            return low_path
-    return path
+        low_name = filename.replace('.nii.gz', '_lowres.nii.gz')
+        for candidate in (f"{LOWRES_ROOT}/{subdir}/{pants_id}/{low_name}",
+                          f"{Constants.PANTS_PATH}/{subdir}/{pants_id}/{low_name}"):
+            if os.path.exists(candidate):
+                return candidate
+    return full
+
+
+def _case_ct_path(case_id, low=False):
+    return _lowres_or_full("image_only", get_panTS_id(_safe_case_id(case_id)),
+                           Constants.MAIN_NIFTI_FILENAME, low)
 
 
 def _case_mask_path(case_id, low=False):
-    case_dir = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(_safe_case_id(case_id))}"
-    path = f"{case_dir}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
-    if low:
-        low_path = path.replace('.nii.gz', '_lowres.nii.gz')
-        if os.path.exists(low_path):
-            return low_path
-    return path
+    return _lowres_or_full("mask_only", get_panTS_id(_safe_case_id(case_id)),
+                           Constants.COMBINED_LABELS_NIFTI_FILENAME, low)
 
 
 # Single-slot CT cache for interactive_segment(). Without this, every single
