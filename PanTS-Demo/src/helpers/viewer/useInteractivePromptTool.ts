@@ -164,7 +164,7 @@ export function useInteractivePromptTool({
 					refineHintShownRef.current = true;
 					setStatus("success");
 					setStatusMessage(
-						"Applied. The tool stays armed, and each new click refines this same object: left-click adds, right-click (or Alt-click) removes. Switching classes starts a fresh one."
+						"Applied. The tool stays armed, and each new click refines this same object: left-click adds, right-click (or Alt-click) removes. Switching classes starts a fresh one. Powered by nnInteractive (DKFZ); model weights are CC BY-NC-SA 4.0, for non-commercial research use."
 					);
 				} else {
 					// Feedback is the mask itself plus the log line — a modal

@@ -137,15 +137,22 @@ interface AnnotationToolbarProps {
 
 }
 
-const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: typeof IconBrush; description: string }> = [	
+// Shown under the four model-prompt tools' tooltips. The nnInteractive
+// model weights ship under CC BY-NC-SA 4.0, so the attribution and the
+// non-commercial scope belong right where the feature is offered, not
+// buried in a repo file.
+const NNINTERACTIVE_ATTRIBUTION =
+	"Powered by nnInteractive (DKFZ, Isensee et al. 2025). Model weights are CC BY-NC-SA 4.0, for non-commercial research use.";
+
+const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: typeof IconBrush; description: string; attribution?: string }> = [
 	{ id: "paint", label: "Brush", Icon: IconBrush, description: "Paint freehand with a round brush." },
 	{ id: "erase", label: "Erase", Icon: IconEraser, description: "Erase parts of a shape manually." },
 	{ id: "scissors", label: "Scissors", Icon: IconScissors, description: "Lasso tool using anchor points." },
 	{ id: "levelTracing", label: "Level Tracing", Icon: IconRipple, description: "Traces the boundary of similar intensity around cursor." },
-	{ id: "pointSegment", label: "Segment from click", Icon: IconTarget, description: "Click a structure once and the model proposes its full 3D mask." },
-	{ id: "boxSegment", label: "Segment from box", Icon: IconBoxAlignTopLeft, description: "Drag a box around a structure on one slice to get its 3D mask." },
-	{ id: "scribbleSegment", label: "Segment from scribble", Icon: IconScribble, description: "Draw a quick stroke over a structure and the model segments it in 3D." },
-	{ id: "lassoSegment", label: "Segment from lasso", Icon: IconLasso, description: "Circle a structure freehand and the model segments everything inside." },
+	{ id: "pointSegment", label: "Segment from click", Icon: IconTarget, description: "Click a structure once and the model proposes its full 3D mask.", attribution: NNINTERACTIVE_ATTRIBUTION },
+	{ id: "boxSegment", label: "Segment from box", Icon: IconBoxAlignTopLeft, description: "Drag a box around a structure on one slice to get its 3D mask.", attribution: NNINTERACTIVE_ATTRIBUTION },
+	{ id: "scribbleSegment", label: "Segment from scribble", Icon: IconScribble, description: "Draw a quick stroke over a structure and the model segments it in 3D.", attribution: NNINTERACTIVE_ATTRIBUTION },
+	{ id: "lassoSegment", label: "Segment from lasso", Icon: IconLasso, description: "Circle a structure freehand and the model segments everything inside.", attribution: NNINTERACTIVE_ATTRIBUTION },
 	{ id: "margin", label: "Margin", Icon: IconArrowsDiagonal, description: "Grow or shrink by a specified margin size." },
 	{ id: "smoothing", label: "Smoothing", Icon: IconWaveSine, description: "Smooth class boundaries." },
 	{ id: "islands", label: "Islands", Icon: IconDroplet, description: "Edit islands (connected components) in a class." },
@@ -307,10 +314,11 @@ function ScissorsFlyout({ options, onChange, onCloseSettings }: {
 // getBoundingClientRect of the hovered icon, so it's never clipped by the
 // dock's own overflow:hidden/auto rules.
 function IconTooltip({
-	label, description, anchorRect,
+	label, description, attribution, anchorRect,
 }: {
 	label: string;
 	description: string;
+	attribution?: string;
 	anchorRect: DOMRect | null;
 }) {
 	if (!anchorRect) return null;
@@ -350,6 +358,20 @@ function IconTooltip({
 		>
 			<div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 2 }}>{label}</div>
 			<div style={{ fontSize: 11.5, lineHeight: 1.35, color: "#333" }}>{description}</div>
+			{attribution && (
+				<div
+					style={{
+						fontSize: 10,
+						lineHeight: 1.35,
+						color: "#777",
+						marginTop: 5,
+						paddingTop: 5,
+						borderTop: "1px solid #e5e5e5",
+					}}
+				>
+					{attribution}
+				</div>
+			)}
 		</div>,
 		document.body
 	);
@@ -933,7 +955,7 @@ export default function AnnotationToolbar({
 		>
 			<div ref={dockContentRef} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
 			<div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 13}}>
-				{TOOL_DEFS.map(({ id, label, Icon, description }) => {
+				{TOOL_DEFS.map(({ id, label, Icon, description, attribution }) => {
 					// Only equip-and-use tools (paint/erase/scissors/level tracing)
 					// get a settings arrow; other tools open settings on icon click.
 					const hasSettingsArrow =
@@ -984,6 +1006,7 @@ export default function AnnotationToolbar({
 												? `${description}`
 												: description
 									}
+									attribution={attribution}
 									anchorRect={hoveredRect}
 								/>
 							)}
