@@ -49,14 +49,18 @@ trap cleanup INT TERM EXIT
 say()  { printf '\033[1m[demo]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[demo]\033[0m %s\n' "$*" >&2; exit 1; }
 
-port_up() { curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$1$2"; }
+# localhost, not 127.0.0.1: Vite binds IPv6-only ([::1]) on some setups, and
+# an IPv4-only probe would wait forever on a server that is actually up.
+port_up() { curl -s -o /dev/null --max-time 2 "http://localhost:$1$2"; }
 
 wait_port() { # port, path, label, timeout_s
   local waited=0
   until port_up "$1" "$2"; do
     sleep 2; waited=$((waited + 2))
-    [ $((waited % 20)) -eq 0 ] && say "still waiting for $3 (${waited}s)..."
-    [ "$waited" -ge "$4" ] && fail "$3 did not come up within ${4}s — see $LOG_DIR"
+    # NB: plain `[ ... ] && say` here would kill the whole script under
+    # set -e whenever the condition is false (a failing last command).
+    if [ $((waited % 20)) -eq 0 ]; then say "still waiting for $3 (${waited}s)..."; fi
+    if [ "$waited" -ge "$4" ]; then fail "$3 did not come up within ${4}s — see $LOG_DIR"; fi
   done
 }
 
