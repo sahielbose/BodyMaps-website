@@ -2128,6 +2128,35 @@ export interface PromptSessionState {
    *  retracting restores what was actually there (possibly another organ's
    *  label, not 0). */
   priorValues: Map<number, number>;
+  /** Set when the server's session state can no longer be trusted to match
+   *  the labelmap — a redo re-applied voxels the server no longer endorses,
+   *  or a server-side undo sync failed. The owning hook treats a dead
+   *  session as absent: the next prompt starts a fresh session, whose seed
+   *  scan rebuilds the model's context from the labelmap as it stands. */
+  dead?: boolean;
+}
+
+/** Best-effort server half of undoing a session apply: ask the backend to
+ *  pop the newest interaction so the model's context rewinds in lockstep
+ *  with the voxels the local undo entry just restored. Any failure (stale
+ *  token, the server's single-level undo exhausted, session expired,
+ *  network) marks the session dead instead — the next prompt then re-seeds
+ *  from the restored labelmap, so state converges either way. */
+async function _undoPromptOnServer(
+  apiBase: string,
+  caseId: string | number,
+  session: PromptSessionState,
+): Promise<void> {
+  try {
+    const r = await fetch(`${apiBase}/api/interactive-segment/${caseId}/undo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_token: session.token }),
+    });
+    if (!r.ok) session.dead = true;
+  } catch {
+    session.dead = true;
+  }
 }
 
 export interface InteractivePromptResult {
@@ -2382,20 +2411,47 @@ export async function submitInteractiveSegmentPrompt(
     // already use — it doesn't touch representations or actors, so it also
     // doesn't disturb camera position/zoom the way rebuilding did.
     _notifySegmentationChanged();
+  }
 
-    // Own undo/redo entry, same shared stack as smart fill / scissors /
-    // lasso (pushEditHistory below) — a SEPARATE stack from brush strokes
-    // (Cornerstone's own HistoryMemo), so undoing a point/box segment never
-    // also reverts (or gets shadowed by) an unrelated brush stroke; see
-    // undoMaskEdit's recency check for how the two stacks interleave.
+  // Own undo/redo entry, same shared stack as smart fill / scissors /
+  // lasso (pushEditHistory below) — a SEPARATE stack from brush strokes
+  // (Cornerstone's own HistoryMemo), so undoing a point/box segment never
+  // also reverts (or gets shadowed by) an unrelated brush stroke; see
+  // undoMaskEdit's recency check for how the two stacks interleave.
+  //
+  // Pushed for every session apply even when no voxel changed: the server
+  // recorded an interaction either way, and this stack must stay 1:1 with
+  // the server's interaction stack or a later ctrl+z would rewind the
+  // wrong server interaction.
+  if (changed > 0 || sessionActive) {
     const applyAndRefresh = (values: number[]) => {
+      if (touchedIdx.length === 0) return;
       touchedIdx.forEach((idx, i) => { segScalars[idx] = values[i]; });
       (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
       _notifySegmentationChanged();
     };
+    // The session baseline BEFORE this apply — the caller overwrites
+    // prevProposal with this response right after we return, so undo has
+    // to put the older one back for the next prompt's retraction pass.
+    const proposalBefore = session ? session.prevProposal : null;
     pushEditHistory({
-      undo: () => applyAndRefresh(priorValues),
-      redo: () => applyAndRefresh(nextValues),
+      undo: () => {
+        applyAndRefresh(priorValues);
+        if (sessionActive && session) {
+          session.prevProposal = proposalBefore;
+          // Fire-and-forget: the labelmap is already restored above, and
+          // any sync failure marks the session dead, which is consistent
+          // too (the next prompt re-seeds from the restored labelmap).
+          void _undoPromptOnServer(apiBase, caseId, session);
+        }
+      },
+      redo: () => {
+        applyAndRefresh(nextValues);
+        // The model server keeps a single undo snapshot and has no redo,
+        // so the re-applied voxels are context it no longer holds — end
+        // the session; the next prompt re-seeds from the redone labelmap.
+        if (sessionActive && session) session.dead = true;
+      },
     });
   }
 

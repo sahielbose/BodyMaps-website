@@ -116,6 +116,13 @@ export function useInteractivePromptTool({
 		// finds) is decided inside submitInteractiveSegmentPrompt, which
 		// throws a plain-English message — still before any network round
 		// trip — when it doesn't.
+		if (promptSessionRef.current?.dead) {
+			// A redo (or a failed server-side undo sync) invalidated the
+			// model server's context for this session. Start over — the
+			// fresh session's seed scan hands the model the labelmap as it
+			// stands, so nothing the user sees is lost.
+			promptSessionRef.current = null;
+		}
 		if (!promptSessionRef.current) {
 			promptSessionRef.current = {
 				token: crypto.randomUUID(),

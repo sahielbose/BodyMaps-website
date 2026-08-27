@@ -7109,6 +7109,39 @@ def interactive_segment(case_id):
         _ANALYSIS_SLOTS.release()
 
 
+@api_blueprint.route('/interactive-segment/<case_id>/undo', methods=['POST'])
+def interactive_segment_undo(case_id):
+    """Rewind the live prompt session by one interaction, keeping the model
+    server's context in lockstep with a client-side ctrl+z (the client
+    restores the labelmap voxels itself from its own undo entry, so this
+    returns bookkeeping JSON, not a mask).
+
+    Body JSON: { session_token: str }. 200 -> {"undone": true, "remaining": N}
+    (N = prompts still accumulated). 409 -> the session can't be rewound:
+    wrong/stale token, nothing to undo, the server's single-level undo is
+    exhausted, or the session expired. The client treats ANY failure as "end
+    the session" — its next prompt starts fresh and re-seeds from the
+    restored labelmap, so state stays consistent either way.
+    """
+    if not _ANALYSIS_SLOTS.acquire(blocking=False):
+        return jsonify(_ANALYSIS_BUSY_RESPONSE[0]), _ANALYSIS_BUSY_RESPONSE[1]
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        try:
+            from services.nninteractive_predictor import undo_last
+        except ImportError:
+            return jsonify({"error": "The interactive model server integration is not installed."}), 503
+        remaining = undo_last(body.get("session_token"))
+        return jsonify({"undone": True, "remaining": remaining})
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 409
+    except Exception as error:
+        print("[interactive_segment_undo error]", type(error).__name__, error)
+        return jsonify({"error": "Undo failed on the model server."}), 500
+    finally:
+        _ANALYSIS_SLOTS.release()
+
+
 @api_blueprint.route('/vessel-cpr/<case_id>', methods=['POST'])
 def vessel_cpr(case_id):
     """Straightened vessel reformat + tumour-contact metrics for staging.

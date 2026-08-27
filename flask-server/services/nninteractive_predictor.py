@@ -284,6 +284,47 @@ def _rebuild_and_replay(ct: np.ndarray, case_key: str):
     return session
 
 
+def undo_last(session_token) -> int:
+    """Rewind the live prompt session by ONE interaction, on the model server
+    and in _history, so a client-side ctrl+z keeps the model's context in
+    lockstep with the labelmap voxels it just restored. Returns how many
+    prompts the session still holds.
+
+    The model server keeps a single undo snapshot per session (its --help
+    documents undo as single-level), so only the newest interaction can be
+    rewound; a second consecutive undo raises. Callers treat any raise as
+    "end the session client-side" — the next prompt then re-seeds from the
+    restored labelmap, which is this integration's normal recovery path, so
+    deeper undos degrade gracefully instead of desyncing."""
+    global _active_token, _history
+    from nnInteractive.inference.remote.remote_session import SessionExpiredError
+
+    token = _normalize_token(session_token)
+    if token is None or token != _active_token or _session is None:
+        raise ValueError("That prompt session is no longer active.")
+    if not any(e["kind"] != "initial_seg" for e in _history):
+        raise ValueError("Nothing to undo in this prompt session.")
+    if not getattr(_session, "supports_undo", False):
+        raise ValueError("The model server was started without undo support.")
+    try:
+        undone = _session.undo()
+    except SessionExpiredError:
+        # The lease died under us; there is no server state left to rewind.
+        # Drop the session so a stray reuse of this token can't replay a
+        # history the client no longer believes in.
+        _active_token = None
+        _history = []
+        raise ValueError("The prompt session expired on the model server.")
+    if not undone:
+        # Single-level undo exhausted. _history is untouched — the server
+        # didn't pop anything.
+        raise ValueError("The model server can only undo the newest prompt.")
+    # Interactions append [seed?, p1, ..., pN]; with any prompt present the
+    # newest entry is always a prompt, never the seed.
+    _history.pop()
+    return sum(1 for e in _history if e["kind"] != "initial_seg")
+
+
 def predict(
     ct: np.ndarray,
     case_key: str,
