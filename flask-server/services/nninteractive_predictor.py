@@ -22,18 +22,30 @@ on one 2D viewport pane, but has NOT yet been verified against a real
 frontend box-drag; verify this once wired up.
 
 Since api_blueprint.py's `_ANALYSIS_SLOTS` semaphore already serializes all
-calls into `interactive_segment()`, one shared session with no extra locking
-here is safe. Gunicorn is `--workers 1 --threads 8` (single process), so this
-module-level cache is correctly shared across every request thread.
+calls into `interactive_segment()`, no extra locking is needed here.
+Gunicorn is `--workers 1 --threads 8` (single process), so this module-level
+state is correctly shared across every request thread.
 
-Prompt sessions: while the client keeps sending the same `session_token`,
-interactions ACCUMULATE on the model server (no reset between requests), so
-each new click REFINES the same object — the model sees every prior prompt
-as context, exactly how the official Slicer plugin drives it. A different
-token (or none) resets. `_history` mirrors the accumulated interactions so
-that when the model server reaps our idle session (SessionExpiredError, its
-timeout counts only real actions), we can claim a fresh one and replay the
-whole exchange with predictions deferred — the user never notices.
+Prompt sessions are KEYED BY TOKEN: each `session_token` owns its own model
+server lease (volume, accumulated interactions, target buffer), so two
+people prompting at once refine their own objects instead of resetting each
+other's context. While a client keeps sending the same token, interactions
+ACCUMULATE on its session (no reset between requests) and each new click
+REFINES the same object — the model sees every prior prompt as context,
+exactly how the official Slicer plugin drives it. Tokenless requests share
+one anonymous slot that resets per request. Each state's `history` mirrors
+its accumulated interactions so that when the model server reaps an idle
+session (SessionExpiredError, its timeout counts only real actions), we can
+claim a fresh lease and replay the whole exchange with predictions deferred
+— the user never notices.
+
+Capacity: the model server caps concurrent sessions (3 by default), so this
+module holds at most NNINTERACTIVE_MAX_SESSIONS states (default 2, leaving
+one lease for other processes) and reaps states idle beyond
+NNINTERACTIVE_SESSION_IDLE_S (default 600 s, mirroring the server's own
+policy). A new token arriving with every slot busy raises
+PromptCapacityError rather than silently destroying someone's live session
+— the third user waits a moment instead of the first two losing context.
 
 Apple Silicon note: launch the model server with PYTORCH_ENABLE_MPS_FALLBACK=1.
 nnInteractive's autozoom path calls interpolate(mode="area") ->
@@ -65,37 +77,70 @@ Configuration (env vars, both optional):
 from __future__ import annotations
 
 import os
+import time
 
 import numpy as np
 
 SERVER_URL = os.environ.get("NNINTERACTIVE_SERVER_URL", "http://127.0.0.1:1527")
 API_KEY = os.environ.get("NNINTERACTIVE_API_KEY") or None
+# Ceiling on concurrent prompt sessions THIS process holds. The model server
+# itself caps leases (3 by default); staying below that leaves room for a
+# second worker or a dev process against the same server.
+MAX_SESSIONS = max(1, int(os.environ.get("NNINTERACTIVE_MAX_SESSIONS", "2")))
+# Local idle reap, mirroring the model server's own --idle-timeout-seconds
+# default: a state nobody has prompted for this long gives its lease back so
+# a new user is never refused because of an abandoned tab.
+SESSION_IDLE_S = float(os.environ.get("NNINTERACTIVE_SESSION_IDLE_S", "600"))
 
-_session = None
-_cached_case_key: str | None = None
-_cached_ct_shape: tuple | None = None
-_target_buffer: np.ndarray | None = None
 
-# One live prompt session at a time (single worker, one user working one
-# case — same reasoning as the single-slot volume cache above).
-_active_token: str | None = None
-_history: list[dict] = []
+class PromptCapacityError(RuntimeError):
+    """Every prompt-session slot is occupied by a live session. Raised for a
+    NEW token rather than evicting someone's accumulated context — the
+    caller should tell the new user to retry shortly, not destroy an
+    existing user's session."""
+
+
+class _PromptState:
+    """Everything one prompt session owns: its model-server lease, the volume
+    it uploaded, the buffer predictions land in, and the interaction history
+    used to replay after a server-side expiry."""
+
+    __slots__ = ("token", "session", "case_key", "ct_shape", "target_buffer",
+                 "history", "last_used")
+
+    def __init__(self, token: str | None):
+        self.token = token
+        self.session = None
+        self.case_key: str | None = None
+        self.ct_shape: tuple | None = None
+        self.target_buffer: np.ndarray | None = None
+        self.history: list[dict] = []
+        self.last_used = time.monotonic()
+
+
+# token -> state; the anonymous (tokenless, one-shot) slot lives under None.
+_states: dict[str | None, _PromptState] = {}
+
+
+def _close_state(state: _PromptState) -> None:
+    if state.session is not None:
+        try:
+            state.session.close()
+        except Exception:
+            pass
+        state.session = None
 
 
 def _release_on_exit() -> None:
-    """Give the lease back when this process dies. The model server caps
+    """Give every lease back when this process dies. The model server caps
     concurrent sessions (3 by default) and reaps idle ones only after
     --idle-timeout-seconds, so a process that exits without releasing —
     which the werkzeug dev reloader does on EVERY watched-file edit —
-    strands a slot for hours. Three hot-restarts in a dev session were
+    strands slots for hours. Three hot-restarts in a dev session were
     enough to hit 'server is at capacity' on every request after."""
-    global _session
-    if _session is not None:
-        try:
-            _session.close()
-        except Exception:
-            pass
-        _session = None
+    for state in list(_states.values()):
+        _close_state(state)
+    _states.clear()
 
 
 import atexit
@@ -103,30 +148,52 @@ import atexit
 atexit.register(_release_on_exit)
 
 
-def _get_session():
-    global _session
-    if _session is None:
-        from nnInteractive.inference.remote.remote_session import nnInteractiveRemoteInferenceSession
-        _session = nnInteractiveRemoteInferenceSession(server_url=SERVER_URL, api_key=API_KEY)
-        if not _session.ping():
-            raise RuntimeError(
-                f"nninteractive-server not reachable at {SERVER_URL} — "
-                "check it's running (scripts/demo_interactive.sh starts one "
-                "locally; NNINTERACTIVE_SERVER_URL points elsewhere)."
-            )
-    return _session
+def _new_remote_session():
+    from nnInteractive.inference.remote.remote_session import nnInteractiveRemoteInferenceSession
+    session = nnInteractiveRemoteInferenceSession(server_url=SERVER_URL, api_key=API_KEY)
+    if not session.ping():
+        raise RuntimeError(
+            f"nninteractive-server not reachable at {SERVER_URL} — "
+            "check it's running (scripts/demo_interactive.sh starts one "
+            "locally; NNINTERACTIVE_SERVER_URL points elsewhere)."
+        )
+    return session
 
 
-def _ensure_volume_loaded(ct: np.ndarray, case_key: str) -> None:
-    global _cached_case_key, _cached_ct_shape, _target_buffer
-    session = _get_session()
-    if _cached_case_key == case_key and _cached_ct_shape == ct.shape:
+def _reap_idle(now: float) -> None:
+    for key, state in list(_states.items()):
+        if now - state.last_used > SESSION_IDLE_S:
+            _close_state(state)
+            _states.pop(key, None)
+
+
+def _acquire_state(token: str | None) -> _PromptState:
+    """The state for `token`, creating one if a slot is free. Never evicts a
+    live session for a new token — see PromptCapacityError."""
+    now = time.monotonic()
+    _reap_idle(now)
+    state = _states.get(token)
+    if state is None:
+        if len(_states) >= MAX_SESSIONS:
+            raise PromptCapacityError(
+                f"All {MAX_SESSIONS} interactive annotation slots are in use "
+                "right now. Try again in a moment.")
+        state = _PromptState(token)
+        _states[token] = state
+    state.last_used = now
+    return state
+
+
+def _ensure_volume_loaded(state: _PromptState, ct: np.ndarray, case_key: str) -> None:
+    if state.session is None:
+        state.session = _new_remote_session()
+    if state.case_key == case_key and state.ct_shape == ct.shape:
         return
-    session.set_image(ct[None])
-    _target_buffer = np.zeros(ct.shape, dtype=np.uint8)
-    session.set_target_buffer(_target_buffer)
-    _cached_case_key = case_key
-    _cached_ct_shape = ct.shape
+    state.session.set_image(ct[None])
+    state.target_buffer = np.zeros(ct.shape, dtype=np.uint8)
+    state.session.set_target_buffer(state.target_buffer)
+    state.case_key = case_key
+    state.ct_shape = ct.shape
 
 
 def _corners_to_axis_pairs(lo, hi) -> list[list[int]]:
@@ -191,16 +258,19 @@ def _normalize_token(session_token) -> str | None:
 
 
 def session_is_active(session_token) -> bool:
-    """True when `session_token` names the live accumulated prompt session —
+    """True when `session_token` names a live accumulated prompt session —
     i.e. the mask the caller just received is session-scoped (refines one
     object across requests), not a one-shot proposal. False after any
-    failure that fell back to region_grow, since `_history` only records
-    interactions the model actually accepted."""
+    failure that fell back to region_grow, since a state's `history` only
+    records interactions the model actually accepted."""
     token = _normalize_token(session_token)
-    return token is not None and token == _active_token and len(_history) > 0
+    if token is None:
+        return False
+    state = _states.get(token)
+    return state is not None and len(state.history) > 0
 
 
-def _add_interaction(session, entry: dict, run_prediction: bool = True) -> None:
+def _add_interaction(session, entry: dict, ct_shape: tuple, run_prediction: bool = True) -> None:
     if entry["kind"] == "point":
         session.add_point_interaction(
             entry["coords"],
@@ -210,15 +280,15 @@ def _add_interaction(session, entry: dict, run_prediction: bool = True) -> None:
     elif entry["kind"] == "initial_seg":
         # Always prediction-deferred: the seed is context for the prompt that
         # follows in the same request, never a prediction of its own. The
-        # remote client also mirrors the seed into our _target_buffer
+        # remote client also mirrors the seed into the state's target_buffer
         # in-place (buffer[:] = seg), so the module-level ref stays valid.
         session.add_initial_seg_interaction(entry["seg"], run_prediction=False)
     elif entry["kind"] in ("scribble", "lasso"):
         # Rasterized from the stored points at send time (not stored as a
         # volume) so replay-after-expiry re-rasterizes instead of holding a
-        # 30MB+ mask per stroke in _history.
+        # 30MB+ mask per stroke in the history.
         stroke = _rasterize_stroke(
-            entry["points"], _cached_ct_shape, closed=(entry["kind"] == "lasso")
+            entry["points"], ct_shape, closed=(entry["kind"] == "lasso")
         )
         method = (
             session.add_lasso_interaction
@@ -238,9 +308,9 @@ def _add_interaction(session, entry: dict, run_prediction: bool = True) -> None:
         )
 
 
-def _rebuild_and_replay(ct: np.ndarray, case_key: str):
-    """Claim a fresh model-server session after ours expired: re-upload the
-    volume, replay the accumulated interaction history with predictions
+def _rebuild_and_replay(state: _PromptState, ct: np.ndarray, case_key: str):
+    """Claim a fresh model-server lease after this state's expired: re-upload
+    the volume, replay the state's interaction history with predictions
     deferred (cheap — the model runs once, on the next real prompt), and
     hand back the new session. Replaying in one batch instead of
     click-by-click can differ marginally from the original interactive
@@ -255,38 +325,30 @@ def _rebuild_and_replay(ct: np.ndarray, case_key: str):
     would then "retract" every voxel the model grew since, visibly eating
     the object. Seeding with the last known buffer makes the rebuilt state
     exactly what the client believes it is."""
-    global _session, _cached_case_key, _cached_ct_shape
-    latest = None if _target_buffer is None else _target_buffer.copy()
-    old = _session
-    _session = None
-    _cached_case_key = None
-    _cached_ct_shape = None
-    if old is not None:
-        try:
-            old.close()
-        except Exception:
-            pass
-    if _history:
+    latest = None if state.target_buffer is None else state.target_buffer.copy()
+    _close_state(state)
+    state.case_key = None
+    state.ct_shape = None
+    if state.history:
         if latest is not None and latest.shape == ct.shape and latest.any():
             head = {"kind": "initial_seg", "seg": latest}
-            if _history[0]["kind"] == "initial_seg":
-                _history[0] = head
+            if state.history[0]["kind"] == "initial_seg":
+                state.history[0] = head
             else:
-                _history.insert(0, head)
-        elif _history[0]["kind"] == "initial_seg":
+                state.history.insert(0, head)
+        elif state.history[0]["kind"] == "initial_seg":
             # The session's true latest state is empty (or unknown); a stale
             # seed would resurrect voxels the model already gave back.
-            _history.pop(0)
-    session = _get_session()
-    _ensure_volume_loaded(ct, case_key)
-    for past in _history:
-        _add_interaction(session, past, run_prediction=False)
-    return session
+            state.history.pop(0)
+    _ensure_volume_loaded(state, ct, case_key)
+    for past in state.history:
+        _add_interaction(state.session, past, state.ct_shape, run_prediction=False)
+    return state.session
 
 
 def undo_last(session_token) -> int:
     """Rewind the live prompt session by ONE interaction, on the model server
-    and in _history, so a client-side ctrl+z keeps the model's context in
+    and in the state's history, so a client-side ctrl+z keeps the model's context in
     lockstep with the labelmap voxels it just restored. Returns how many
     prompts the session still holds.
 
@@ -296,33 +358,34 @@ def undo_last(session_token) -> int:
     "end the session client-side" — the next prompt then re-seeds from the
     restored labelmap, which is this integration's normal recovery path, so
     deeper undos degrade gracefully instead of desyncing."""
-    global _active_token, _history
     from nnInteractive.inference.remote.remote_session import SessionExpiredError
 
     token = _normalize_token(session_token)
-    if token is None or token != _active_token or _session is None:
+    state = _states.get(token) if token is not None else None
+    if state is None or state.session is None:
         raise ValueError("That prompt session is no longer active.")
-    if not any(e["kind"] != "initial_seg" for e in _history):
+    state.last_used = time.monotonic()
+    if not any(e["kind"] != "initial_seg" for e in state.history):
         raise ValueError("Nothing to undo in this prompt session.")
-    if not getattr(_session, "supports_undo", False):
+    if not getattr(state.session, "supports_undo", False):
         raise ValueError("The model server was started without undo support.")
     try:
-        undone = _session.undo()
+        undone = state.session.undo()
     except SessionExpiredError:
         # The lease died under us; there is no server state left to rewind.
-        # Drop the session so a stray reuse of this token can't replay a
+        # Drop the state so a stray reuse of this token can't replay a
         # history the client no longer believes in.
-        _active_token = None
-        _history = []
+        _close_state(state)
+        _states.pop(token, None)
         raise ValueError("The prompt session expired on the model server.")
     if not undone:
-        # Single-level undo exhausted. _history is untouched — the server
+        # Single-level undo exhausted. The history is untouched — the server
         # didn't pop anything.
         raise ValueError("The model server can only undo the newest prompt.")
     # Interactions append [seed?, p1, ..., pN]; with any prompt present the
     # newest entry is always a prompt, never the seed.
-    _history.pop()
-    return sum(1 for e in _history if e["kind"] != "initial_seg")
+    state.history.pop()
+    return sum(1 for e in state.history if e["kind"] != "initial_seg")
 
 
 def predict(
@@ -344,26 +407,31 @@ def predict(
     `initial_seg` (uint8, ct.shape) seeds a FRESH session with an existing
     mask before the first prompt — nnInteractive's "continue from existing
     segmentation" mode, which is how a shipped organ label becomes refinable
-    instead of the first click starting an empty object. Ignored unless this
-    request starts a fresh session (mid-session requests already carry their
-    context in the accumulated interactions)."""
-    global _active_token, _history
+    instead of the first click starting an empty object. Its presence also
+    MARKS the request as a fresh start: the client only ever sends a seed on
+    a session's first prompt, so an existing state for the same token resets
+    rather than accumulating onto the old object.
+
+    Raises PromptCapacityError when a NEW token arrives while every slot
+    holds someone's live session — deliberately, instead of evicting an
+    active user's context."""
     from nnInteractive.inference.remote.remote_session import SessionExpiredError
 
-    session = _get_session()
-    volume_changed = not (_cached_case_key == case_key and _cached_ct_shape == ct.shape)
+    token = _normalize_token(session_token)
+    state = _acquire_state(token)
+    volume_changed = not (state.case_key == case_key and state.ct_shape == ct.shape)
     if volume_changed:
-        # New volume on the model server invalidates any accumulated
-        # prompt context regardless of what token the client sends.
-        _active_token = None
-        _history = []
+        # A different volume on this state's session invalidates whatever
+        # prompt context it had accumulated.
+        state.history = []
     try:
-        _ensure_volume_loaded(ct, case_key)
+        _ensure_volume_loaded(state, ct, case_key)
     except SessionExpiredError:
-        # Our lease died between requests and the very first server call of
+        # The lease died between requests and the very first server call of
         # this one (the volume upload) tripped over it. History was just
         # cleared, so this "replay" is simply a clean rebuild.
-        session = _rebuild_and_replay(ct, case_key)
+        _rebuild_and_replay(state, ct, case_key)
+    session = state.session
 
     if scribble_ijk is not None:
         entry = {
@@ -385,11 +453,12 @@ def predict(
     else:
         raise ValueError("predict() needs point_ijk, box_ijk, scribble_ijk, or lasso_ijk")
 
-    token = _normalize_token(session_token)
-    starting_fresh = token is None or token != _active_token
+    # Fresh = this request does not continue an accumulated exchange: the
+    # anonymous slot always is, a seed marks a client-side restart, and an
+    # empty history has nothing to continue.
+    starting_fresh = token is None or initial_seg is not None or not state.history
     if starting_fresh:
-        _active_token = token
-        _history = []
+        state.history = []
 
     new_entries = []
     if starting_fresh and initial_seg is not None:
@@ -402,16 +471,16 @@ def predict(
         if starting_fresh:
             session.reset_interactions()
         for pending in new_entries:
-            _add_interaction(session, pending)
+            _add_interaction(session, pending, state.ct_shape)
     except SessionExpiredError:
-        session = _rebuild_and_replay(ct, case_key)
+        session = _rebuild_and_replay(state, ct, case_key)
         for pending in new_entries:
-            _add_interaction(session, pending)
+            _add_interaction(session, pending, state.ct_shape)
 
     if token is not None:
-        _history.extend(new_entries)
+        state.history.extend(new_entries)
 
     bbox = getattr(session, "_last_paste_bbox", None)
     if bbox is not None:
         bbox = [[int(lo), int(hi)] for lo, hi in bbox]
-    return _target_buffer.copy(), bbox
+    return state.target_buffer.copy(), bbox

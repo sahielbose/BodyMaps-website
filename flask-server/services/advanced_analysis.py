@@ -234,10 +234,16 @@ def segment_from_prompt(
             print("[segment_from_prompt] nnInteractive returned empty mask, falling back to region_grow")
         except Exception as e:
             from services import nninteractive_predictor as _predictor
-            if model_only or _predictor.session_is_active(session_token):
-                # No fallback exists for model-only prompts, and a token that
+            if (
+                isinstance(e, _predictor.PromptCapacityError)
+                or model_only
+                or _predictor.session_is_active(session_token)
+            ):
+                # No fallback exists for model-only prompts, a token that
                 # already refined an object across earlier prompts must not
-                # silently switch models mid-session. Fail loudly instead.
+                # silently switch models mid-session, and a capacity refusal
+                # should reach the user as "try again shortly" rather than
+                # silently degrade into a region-grow blob. Fail loudly.
                 raise
             print(f"[segment_from_prompt] nnInteractive failed ({type(e).__name__}: {e}), falling back to region_grow")
 

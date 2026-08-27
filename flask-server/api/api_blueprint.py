@@ -7152,6 +7152,7 @@ def interactive_segment(case_id):
     try:
         import numpy as np
         from services.advanced_analysis import segment_from_prompt
+        from services.nninteractive_predictor import PromptCapacityError
         body = request.get_json(force=True, silent=True) or {}
         low = (body.get("res") or "low").lower() == "low"
         ct_path = _case_ct_path(case_id, low=low)
@@ -7217,6 +7218,10 @@ def interactive_segment(case_id):
             )
         resp.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
         return resp
+    except PromptCapacityError as ce:
+        # Every prompt-session slot is holding someone's live session; the
+        # new user retries rather than an existing user losing context.
+        return jsonify({"error": str(ce)}), 503
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
     except Exception as error:
