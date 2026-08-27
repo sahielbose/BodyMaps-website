@@ -40,17 +40,36 @@ nnInteractive's autozoom path calls interpolate(mode="area") ->
 aten::_adaptive_avg_pool3d, which MPS does not implement — without the
 fallback, any prompt on a structure big enough to trigger zoom-out (liver,
 lungs) 500s inside the model server while small-structure prompts work,
-which looks maddeningly nondeterministic from out here. Also raise
---liveness-timeout-seconds (this integration sends no heartbeats), e.g.:
-  PYTORCH_ENABLE_MPS_FALLBACK=1 nninteractive-server --device mps \
-    --no-torch-compile --idle-timeout-seconds 7200 --liveness-timeout-seconds 7200
+which looks maddeningly nondeterministic from out here:
+  PYTORCH_ENABLE_MPS_FALLBACK=1 nninteractive-server --device mps --no-torch-compile
 CUDA deployments (bdmap1) need neither flag.
+
+The server's DEFAULT timeouts are correct for this integration — do not raise
+them. The remote client auto-heartbeats (a daemon thread at half the liveness
+timeout), so live Flask processes never get liveness-reaped, while a killed or
+hot-restarted Flask stops heartbeating and the server reclaims its slot within
+the 60s default — raising the timeouts is what turned dev-reloader restarts
+into hours-long "server is at capacity" lockups. Idle expiry (600s default,
+counts only real interactions) is recovered transparently by
+_rebuild_and_replay below.
+
+Configuration (env vars, both optional):
+  NNINTERACTIVE_SERVER_URL  where nninteractive-server listens
+                            (default http://127.0.0.1:1527 — a local server
+                            or an SSH tunnel to bdmap1's).
+  NNINTERACTIVE_API_KEY     bearer token, required only when the server was
+                            started with --api-key. The client also honors
+                            its own NN_INTERACTIVE_API_KEY; setting either
+                            works, this one wins.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
-SERVER_URL = "http://127.0.0.1:1527"
+SERVER_URL = os.environ.get("NNINTERACTIVE_SERVER_URL", "http://127.0.0.1:1527")
+API_KEY = os.environ.get("NNINTERACTIVE_API_KEY") or None
 
 _session = None
 _cached_case_key: str | None = None
@@ -88,11 +107,12 @@ def _get_session():
     global _session
     if _session is None:
         from nnInteractive.inference.remote.remote_session import nnInteractiveRemoteInferenceSession
-        _session = nnInteractiveRemoteInferenceSession(server_url=SERVER_URL)
+        _session = nnInteractiveRemoteInferenceSession(server_url=SERVER_URL, api_key=API_KEY)
         if not _session.ping():
             raise RuntimeError(
                 f"nninteractive-server not reachable at {SERVER_URL} — "
-                "check it's running (tmux session 'nninteractive' on bdmap1)."
+                "check it's running (scripts/demo_interactive.sh starts one "
+                "locally; NNINTERACTIVE_SERVER_URL points elsewhere)."
             )
     return _session
 
