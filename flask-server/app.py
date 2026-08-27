@@ -169,7 +169,7 @@ def create_app():
         app,
         resources={r"/*": {"origins": allowed_origins}},
         supports_credentials=True,
-        expose_headers=["X-Prompt-Session", "X-Mask-Voxels"],
+        expose_headers=["X-Prompt-Session", "X-Mask-Voxels", "X-Changed-Bbox"],
     )
 
     return app

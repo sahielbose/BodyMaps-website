@@ -2384,31 +2384,58 @@ export async function submitInteractiveSegmentPrompt(
     sessionActive && sessionBaseline && sessionBaseline.length === proposal.data.length
       ? sessionBaseline
       : null;
+
+  // Changed-region bbox from the model server ("i0,i1,j0,j1,k0,k1", upper
+  // exclusive): the prediction wrote only this slab, so outside it the
+  // proposal equals the session's previous response and neither the add nor
+  // the retraction condition can fire — both passes can skip it, which
+  // turns a ~35M-voxel scan into the patch (typically well under 1M).
+  // Anything missing or malformed falls back to the full volume. Side
+  // effect worth knowing: voxels the user brush-erased outside the slab
+  // between prompts are no longer re-added just because an old response
+  // covered them — the manual edit wins until the model writes there again.
+  const [nx, ny, nz] = proposal.dims;
+  let scan: [number, number, number, number, number, number] = [0, nx, 0, ny, 0, nz];
+  const bboxHeader = httpRes.headers.get("X-Changed-Bbox");
+  if (bboxHeader) {
+    const v = bboxHeader.split(",").map((s) => Number(s));
+    const within = (lo: number, hi: number, dim: number) =>
+      Number.isInteger(lo) && Number.isInteger(hi) && lo >= 0 && lo <= hi && hi <= dim;
+    if (v.length === 6 && within(v[0], v[1], nx) && within(v[2], v[3], ny) && within(v[4], v[5], nz)) {
+      scan = v as typeof scan;
+    }
+  }
+
   const touchedIdx: number[] = [];
   const priorValues: number[] = [];
   const nextValues: number[] = [];
   let added = 0;
   let removed = 0;
-  for (let idx = 0; idx < proposal.data.length; idx++) {
-    if (proposal.data[idx]) {
-      if (segScalars[idx] !== activeSegmentIndex) {
-        if (sessionActive && !session!.priorValues.has(idx)) {
-          session!.priorValues.set(idx, segScalars[idx]);
+  for (let k = scan[4]; k < scan[5]; k++) {
+    for (let j = scan[2]; j < scan[3]; j++) {
+      let idx = scan[0] + nx * (j + ny * k);
+      for (let i = scan[0]; i < scan[1]; i++, idx++) {
+        if (proposal.data[idx]) {
+          if (segScalars[idx] !== activeSegmentIndex) {
+            if (sessionActive && !session!.priorValues.has(idx)) {
+              session!.priorValues.set(idx, segScalars[idx]);
+            }
+            touchedIdx.push(idx);
+            priorValues.push(segScalars[idx]);
+            nextValues.push(activeSegmentIndex);
+            segScalars[idx] = activeSegmentIndex;
+            added++;
+          }
+        } else if (prevProposal && prevProposal[idx] && segScalars[idx] === activeSegmentIndex) {
+          const restore = session!.priorValues.get(idx) ?? 0;
+          if (restore !== activeSegmentIndex) {
+            touchedIdx.push(idx);
+            priorValues.push(segScalars[idx]);
+            nextValues.push(restore);
+            segScalars[idx] = restore;
+            removed++;
+          }
         }
-        touchedIdx.push(idx);
-        priorValues.push(segScalars[idx]);
-        nextValues.push(activeSegmentIndex);
-        segScalars[idx] = activeSegmentIndex;
-        added++;
-      }
-    } else if (prevProposal && prevProposal[idx] && segScalars[idx] === activeSegmentIndex) {
-      const restore = session!.priorValues.get(idx) ?? 0;
-      if (restore !== activeSegmentIndex) {
-        touchedIdx.push(idx);
-        priorValues.push(segScalars[idx]);
-        nextValues.push(restore);
-        segScalars[idx] = restore;
-        removed++;
       }
     }
   }

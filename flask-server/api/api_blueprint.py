@@ -7081,7 +7081,7 @@ def interactive_segment(case_id):
 
         case_key = f"{case_id}:{'low' if low else 'full'}"
         ct_obj, ct = _load_ct_cached(ct_path, case_key)
-        mask = segment_from_prompt(ct, ct_obj.affine, body, case_key=case_key)
+        mask, changed_bbox = segment_from_prompt(ct, ct_obj.affine, body, case_key=case_key)
         from services.nninteractive_predictor import session_is_active
         session_active = session_is_active(body.get("session_token"))
         include = body.get("include")
@@ -7098,6 +7098,14 @@ def interactive_segment(case_id):
         resp.headers['Content-Type'] = 'application/gzip'
         resp.headers['X-Mask-Voxels'] = str(int(mask.sum()))
         resp.headers['X-Prompt-Session'] = 'active' if session_active else 'none'
+        if changed_bbox is not None:
+            # "i0,i1,j0,j1,k0,k1" (upper-exclusive, NIfTI axis order): the
+            # slab the model's prediction actually wrote. The client diffs
+            # only this region against its previous state instead of the
+            # whole volume; absent header = full-volume diff.
+            resp.headers['X-Changed-Bbox'] = ",".join(
+                str(v) for pair in changed_bbox for v in pair
+            )
         resp.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
         return resp
     except ValueError as ve:

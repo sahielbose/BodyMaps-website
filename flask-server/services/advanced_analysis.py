@@ -102,8 +102,16 @@ def region_grow(
 USE_NNINTERACTIVE = True
 
 
-def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_key: str | None = None) -> np.ndarray:
+def segment_from_prompt(
+    ct: np.ndarray, affine: np.ndarray, prompt: dict, case_key: str | None = None
+) -> tuple[np.ndarray, list | None]:
     """Model-agnostic entry point for the click-to-segment tool.
+
+    Returns (mask, changed_bbox): changed_bbox is the [[i0,i1],[j0,j1],
+    [k0,k1]] slab (upper-exclusive) the model's prediction actually wrote —
+    everything outside it is unchanged from the session's previous response —
+    or None when that isn't known (region_grow fallback, older model
+    server), meaning the caller must treat the whole volume as changed.
 
     `case_key` (e.g. "17:full") lets the nnInteractive path cache the
     uploaded volume across requests for the same case+resolution.
@@ -206,7 +214,7 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
     if USE_NNINTERACTIVE:
         try:
             from services.nninteractive_predictor import predict
-            mask = predict(
+            mask, changed_bbox = predict(
                 ct,
                 case_key or "unkeyed",
                 point_ijk=seed if (box_ijk is None and scribble_ijk is None and lasso_ijk is None) else None,
@@ -222,7 +230,7 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
                 # refinement can legitimately shrink the object) — see the
                 # docstring. Only tokenless one-shot prompts keep the empty
                 # -> region_grow fallback.
-                return mask
+                return mask, changed_bbox
             print("[segment_from_prompt] nnInteractive returned empty mask, falling back to region_grow")
         except Exception as e:
             from services import nninteractive_predictor as _predictor
@@ -238,7 +246,7 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
             "That prompt needs the interactive model server, which is not available right now."
         )
     tolerance = min(max(float(prompt.get("tolerance", 80.0)), 1.0), 1000.0)
-    return region_grow(ct, seed, tolerance=tolerance, box_ijk=box_ijk)
+    return region_grow(ct, seed, tolerance=tolerance, box_ijk=box_ijk), None
 
 # --------------------------------------------------------------------------- #
 # 2. Vessel curved-planar analysis

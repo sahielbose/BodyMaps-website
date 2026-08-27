@@ -335,8 +335,13 @@ def predict(
     session_token=None,
     include: bool = True,
     initial_seg: np.ndarray | None = None,
-) -> np.ndarray:
-    """`initial_seg` (uint8, ct.shape) seeds a FRESH session with an existing
+) -> tuple[np.ndarray, list | None]:
+    """Returns (mask, changed_bbox). changed_bbox is the [[i0,i1],[j0,j1],
+    [k0,k1]] region (upper-exclusive, clipped) the prediction actually wrote,
+    mirrored from the model server, or None when unknown — callers can diff
+    just that slab against the previous response instead of the whole volume.
+
+    `initial_seg` (uint8, ct.shape) seeds a FRESH session with an existing
     mask before the first prompt — nnInteractive's "continue from existing
     segmentation" mode, which is how a shipped organ label becomes refinable
     instead of the first click starting an empty object. Ignored unless this
@@ -406,4 +411,7 @@ def predict(
     if token is not None:
         _history.extend(new_entries)
 
-    return _target_buffer.copy()
+    bbox = getattr(session, "_last_paste_bbox", None)
+    if bbox is not None:
+        bbox = [[int(lo), int(hi)] for lo, hi in bbox]
+    return _target_buffer.copy(), bbox
