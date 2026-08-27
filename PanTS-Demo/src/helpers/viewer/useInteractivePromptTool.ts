@@ -18,6 +18,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react
 import {
 	canvasPointToWorld,
 	worldToCanvasPoint,
+	getSegmentationSpacing,
 	submitInteractiveSegmentPrompt,
 	subscribeToSegmentationEdits,
 	type CinePane,
@@ -32,6 +33,12 @@ import {
 type Point3 = [number, number, number];
 
 export type PromptMode = "point" | "box" | "scribble" | "lasso";
+
+// Slice-thickness ratio (max spacing / min spacing) at or above which the
+// arm-time thick-slice notice shows. 3 splits the measured cases cleanly:
+// the 6.4:1 and 9.2:1 scans are where scores collapse and where box prompts
+// start overshooting, while at 2.6:1 the tool still behaves normally.
+export const THICK_SLICE_RATIO = 3;
 
 interface UseInteractivePromptToolArgs {
 	enabled: boolean;
@@ -71,8 +78,33 @@ export function useInteractivePromptTool({
 	// trip (hundreds of ms to a few seconds), so it needs its own feedback,
 	// not just whatever "Interactive segment (N vox)" text happens to scroll
 	// past in the log panel.
-	const [status, setStatus] = useState<"idle" | "applying" | "success" | "error">("idle");
+	const [status, setStatus] = useState<"idle" | "applying" | "success" | "error" | "notice">("idle");
 	const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+	// Thick-slice heads-up, shown once per case when a prompt tool is armed on
+	// a scan whose slices are much thicker than its in-plane pixels. Measured
+	// on real 7.5 mm and 5 mm PanTS cases: soft-tissue scores collapse, some
+	// structures are unreachable by any prompt, and the failure direction
+	// FLIPS by prompt type (a box overshoots on large solid organs there,
+	// while points still work) — so the user should hear it before the first
+	// click, not deduce it from strange results.
+	const thickWarnedCaseRef = useRef<string | number | null>(null);
+	useEffect(() => {
+		if (!enabled || caseId == null || thickWarnedCaseRef.current === caseId) return;
+		const spacing = getSegmentationSpacing();
+		if (!spacing) return;
+		const thickest = Math.max(...spacing);
+		const ratio = thickest / Math.max(Math.min(...spacing), 1e-6);
+		if (ratio < THICK_SLICE_RATIO) return;
+		thickWarnedCaseRef.current = caseId;
+		setStatus("notice");
+		setStatusMessage(
+			`This scan has thick slices (${thickest.toFixed(1)} mm between slices). Interactive segmentation is less reliable here: boundaries will be rougher, and thin structures may be out of reach entirely. On thick scans a box tends to overshoot on large solid organs, so prefer a single click for those, and keep the box and lasso for air-filled structures such as the lungs.`
+		);
+	// mode is in the deps so a tool switch gives the check another chance if
+	// the labelmap had not finished loading at first arm; the ref keeps the
+	// notice at once per case regardless.
+	}, [enabled, caseId, mode]);
 
 	// One refinement session per armed stretch of the tool. Created lazily on
 	// the first submit; torn down whenever the arming context changes (the

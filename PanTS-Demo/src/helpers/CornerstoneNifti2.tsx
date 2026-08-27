@@ -929,6 +929,16 @@ export function hasSegmentation(): boolean {
   return !!cache.getVolume(segmentationId);
 }
 
+// Voxel spacing (mm) of the loaded segmentation grid — the grid interactive
+// prompts land on. Null until a labelmap volume is in the cache. Callers use
+// this to detect thick-slice scans (PanTS spacing ranges from isotropic to
+// 7.5 mm slices) before the user starts prompting.
+export function getSegmentationSpacing(): [number, number, number] | null {
+  const spacing = cache.getVolume(segmentationId)?.spacing as number[] | undefined;
+  if (!spacing || spacing.length < 3) return null;
+  return [spacing[0], spacing[1], spacing[2]];
+}
+
 // Hand the primary button to the brush or eraser, or pass null to release it
 // (the caller then restores measurement/navigation ownership).
 export function setActiveMaskEditTool(toolName: MaskEditToolName | null) {

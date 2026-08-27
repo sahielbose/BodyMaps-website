@@ -5368,7 +5368,13 @@ const aiAvailableOrgans = useMemo(() => {
 				return (
 					<GuidedStepModal
 						title={
-							applying ? "Applying" : active.status === "success" ? "Applied" : "Not applied"
+							applying
+								? "Applying"
+								: active.status === "success"
+									? "Applied"
+									: active.status === "notice"
+										? "Thick slices"
+										: "Not applied"
 						}
 						instruction={
 							applying
