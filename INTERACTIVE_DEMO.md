@@ -75,6 +75,8 @@ pick or add a class first — the toolbar needs an active class).
 |---|---|---|
 | `NNINTERACTIVE_SERVER_URL` | `flask-server/.env` | Model server address (default `http://127.0.0.1:1527`; point at a GPU host / SSH tunnel for deployments) |
 | `NNINTERACTIVE_API_KEY` | `flask-server/.env` | Bearer token, only when the model server runs with `--api-key` |
+| `NNINTERACTIVE_MAX_SESSIONS` | `flask-server/.env` | Concurrent prompt sessions this backend holds (default 2 of the model server's 3 leases); a full house answers 503 rather than resetting someone's live session |
+| `NNINTERACTIVE_SESSION_IDLE_S` | `flask-server/.env` | Idle reap for abandoned prompt sessions (default 600 s, mirroring the model server) |
 | `NNINTERACTIVE_ENV` | launcher | Python env holding `nninteractive-server` |
 | `NNINTERACTIVE_DEVICE` | launcher | `mps` (Apple Silicon default), `cuda`, or `cpu` (last resort — minutes per prompt, has deadlocked on macOS) |
 | `BODYMAPS_DATA` | launcher | Dataset folder (`image_only/`, `mask_only/`) |
