@@ -34,6 +34,17 @@ token (or none) resets. `_history` mirrors the accumulated interactions so
 that when the model server reaps our idle session (SessionExpiredError, its
 timeout counts only real actions), we can claim a fresh one and replay the
 whole exchange with predictions deferred — the user never notices.
+
+Apple Silicon note: launch the model server with PYTORCH_ENABLE_MPS_FALLBACK=1.
+nnInteractive's autozoom path calls interpolate(mode="area") ->
+aten::_adaptive_avg_pool3d, which MPS does not implement — without the
+fallback, any prompt on a structure big enough to trigger zoom-out (liver,
+lungs) 500s inside the model server while small-structure prompts work,
+which looks maddeningly nondeterministic from out here. Also raise
+--liveness-timeout-seconds (this integration sends no heartbeats), e.g.:
+  PYTORCH_ENABLE_MPS_FALLBACK=1 nninteractive-server --device mps \
+    --no-torch-compile --idle-timeout-seconds 7200 --liveness-timeout-seconds 7200
+CUDA deployments (bdmap1) need neither flag.
 """
 from __future__ import annotations
 
