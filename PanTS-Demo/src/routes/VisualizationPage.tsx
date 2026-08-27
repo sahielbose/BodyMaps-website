@@ -4611,6 +4611,7 @@ const aiAvailableOrgans = useMemo(() => {
 							data-label="Axial"
 							ref={axial_ref}
 							onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("axial")(e); }}
+							onContextMenu={(e) => { pointSegment.handleContextMenu("axial")(e); boxSegment.handleContextMenu("axial")(e); }}
 							onDoubleClick={activeDrawTool.handleDoubleClick("axial")}
 							onMouseDown={(e) => {
 								focusedPane.handleMouseDown("axial")();
@@ -4694,6 +4695,7 @@ const aiAvailableOrgans = useMemo(() => {
 						data-label="Sagittal"
 						ref={sagittal_ref}
 						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("sagittal")(e); }}
+						onContextMenu={(e) => { pointSegment.handleContextMenu("sagittal")(e); boxSegment.handleContextMenu("sagittal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("sagittal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("sagittal")();
@@ -4778,6 +4780,7 @@ const aiAvailableOrgans = useMemo(() => {
 						data-label="Coronal"
 						ref={coronal_ref}
 						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("coronal")(e); }}
+						onContextMenu={(e) => { pointSegment.handleContextMenu("coronal")(e); boxSegment.handleContextMenu("coronal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("coronal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("coronal")();

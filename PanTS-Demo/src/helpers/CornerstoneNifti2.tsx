@@ -2088,6 +2088,11 @@ export interface InteractivePrompt {
   pointLps: Point3;
   boxLps?: [Point3, Point3];
   tolerance?: number;
+  /** false = corrective prompt: carve the clicked region OUT of the current
+   *  session's object instead of adding to it. Model-only (the backend
+   *  refuses it when the interactive model is unavailable), and only
+   *  meaningful mid-session — the hook gates it until a first result. */
+  include?: boolean;
 }
 
 /**
@@ -2178,6 +2183,7 @@ export async function submitInteractiveSegmentPrompt(
     ];
   }
   if (prompt.tolerance != null) body.tolerance = prompt.tolerance;
+  if (prompt.include === false) body.include = false;
   if (session) body.session_token = session.token;
 
   const httpRes = await fetch(`${apiBase}/api/interactive-segment/${caseId}`, {

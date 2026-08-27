@@ -7051,15 +7051,17 @@ def interactive_segment(case_id):
     """Click-to-segment: seed prompt -> proposed mask (.nii.gz in CT geometry).
 
     Body JSON: { point_lps:[x,y,z] | point_ijk:[i,j,k], tolerance?, box_lps?,
-                 res?: "low"|"full", session_token?: str }. res should match the
-                 resolution the viewer loaded so the returned mask's voxel grid
-                 aligns with the labelmap. Consecutive requests carrying the same
-                 session_token accumulate on the model server as one prompt
-                 session, so each new prompt refines the same object; the
-                 X-Prompt-Session response header says whether the returned mask
-                 is session-scoped ("active") or a one-shot proposal ("none" —
-                 e.g. the region-grow fallback ran), which the client uses to
-                 pick merge-in vs replace-object apply semantics.
+                 res?: "low"|"full", session_token?: str, include?: bool }.
+    res should match the resolution the viewer loaded so the returned mask's
+    voxel grid aligns with the labelmap. Consecutive requests carrying the same
+    session_token accumulate on the model server as one prompt session, so each
+    new prompt refines the same object; the X-Prompt-Session response header
+    says whether the returned mask is session-scoped ("active") or a one-shot
+    proposal ("none" — e.g. the region-grow fallback ran), which the client
+    uses to pick merge-in vs replace-object apply semantics. include:false
+    marks a corrective prompt (carve the clicked region OUT of the session's
+    object) — model-only, no fallback, and an empty result is then legitimate
+    (the corrections shrank the object to nothing) rather than a 422.
     """
     if not _ANALYSIS_SLOTS.acquire(blocking=False):
         return jsonify(_ANALYSIS_BUSY_RESPONSE[0]), _ANALYSIS_BUSY_RESPONSE[1]
@@ -7077,7 +7079,9 @@ def interactive_segment(case_id):
         mask = segment_from_prompt(ct, ct_obj.affine, body, case_key=case_key)
         from services.nninteractive_predictor import session_is_active
         session_active = session_is_active(body.get("session_token"))
-        if int(mask.sum()) == 0 and not session_active:
+        include = body.get("include")
+        include = True if include is None else bool(include)
+        if int(mask.sum()) == 0 and include and not session_active:
             return jsonify({"error": "Nothing grew from that point — try a different spot or a higher tolerance."}), 422
 
         out = nib.Nifti1Image(mask, ct_obj.affine, ct_obj.header)

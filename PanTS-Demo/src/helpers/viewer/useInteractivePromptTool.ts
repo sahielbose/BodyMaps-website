@@ -84,7 +84,7 @@ export function useInteractivePromptTool({
 		paneRef.current = null;
 	}, []);
 
-	const submit = useCallback(async (_pane: CinePane, pointWorld: Point3, boxWorld?: [Point3, Point3]) => {
+	const submit = useCallback(async (_pane: CinePane, pointWorld: Point3, boxWorld?: [Point3, Point3], include: boolean = true) => {
 		if (busyRef.current) return; // one in-flight request at a time
 		if (activeSegmentIndex == null) {
 			onLog?.("Interactive segment: no target segment selected.");
@@ -92,6 +92,17 @@ export function useInteractivePromptTool({
 		}
 		if (caseId == null) {
 			onLog?.("Interactive segment: no case loaded.");
+			return;
+		}
+		if (!include && !promptSessionRef.current?.hasResult) {
+			// A corrective prompt only means something against an object this
+			// session already produced — the model has nothing to carve from
+			// yet, and the backend would reject it anyway. Explain locally
+			// instead of burning a server round trip.
+			const msg = "Add a positive click first — right-click then removes from that object.";
+			onLog?.(msg);
+			setStatus("error");
+			setStatusMessage(msg);
 			return;
 		}
 		if (!promptSessionRef.current) {
@@ -112,7 +123,7 @@ export function useInteractivePromptTool({
 				apiBase,
 				caseId,
 				activeSegmentIndex,
-				{ pointLps: pointWorld, boxLps: boxWorld, tolerance },
+				{ pointLps: pointWorld, boxLps: boxWorld, tolerance, include },
 				res,
 				session,
 			);
@@ -136,7 +147,7 @@ export function useInteractivePromptTool({
 					refineHintShownRef.current = true;
 					setStatus("success");
 					setStatusMessage(
-						"Applied. The tool stays armed, and each new click refines this same object. Switching tools or classes starts a fresh one."
+						"Applied. The tool stays armed, and each new click refines this same object — left-click adds, right-click (or Alt-click) removes. Switching tools or classes starts a fresh one."
 					);
 				} else {
 					// Feedback is the mask itself plus the log line — a modal
@@ -145,7 +156,9 @@ export function useInteractivePromptTool({
 					setStatusMessage(null);
 				}
 			} else {
-				const msg = "Interactive segment: nothing changed from that prompt — try a different spot.";
+				const msg = include
+					? "Interactive segment: nothing changed from that prompt — try a different spot."
+					: "Nothing to remove there — that click didn't change the object.";
 				onLog?.(msg);
 				setStatus("error");
 				setStatusMessage(msg);
@@ -172,18 +185,44 @@ export function useInteractivePromptTool({
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		const world = canvasPointToWorld(pane, canvasPos);
 		if (!world) return;
-		void submit(pane, world);
+		// Alt+click = corrective (remove) — same polarity gesture in both
+		// modes, and the keyboard-only sibling of right-click for setups
+		// where right-click is spoken for (trackpads, tablet pens).
+		void submit(pane, world, undefined, !e.altKey);
+	};
+
+	// Right-click = corrective prompt at the cursor, in both modes (in box
+	// mode it submits a corrective POINT — a click, not a drag). Only
+	// intercepts the browser menu while the tool is armed; an unarmed pane
+	// keeps its default behavior.
+	const handleContextMenu = (pane: CinePane) => (e: MouseEvent) => {
+		if (!enabled) return;
+		e.preventDefault();
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
+		const world = canvasPointToWorld(pane, canvasPos);
+		if (!world) return;
+		void submit(pane, world, undefined, false);
 	};
 
 	// Box mode: mousedown starts the drag, mousemove updates the live preview
 	// rectangle, mouseup submits both corners. Mirrors the pointer semantics a
 	// user already expects from the scissors' click-drag box operations.
+	// Alt held at mousedown makes the whole drag corrective (remove-box);
+	// polarity is latched at the start so releasing Alt mid-drag doesn't
+	// silently flip what the submit will do.
+	const dragIncludeRef = useRef(true);
 	const handleMouseDown = (pane: CinePane) => (e: MouseEvent) => {
 		if (!enabled || mode !== "box") return;
+		// Left button only — the right button belongs to handleContextMenu's
+		// corrective point, and a right-drag would otherwise strand a live
+		// preview box when the context menu event interrupts it.
+		if (e.button !== 0) return;
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		const world = canvasPointToWorld(pane, canvasPos);
 		if (!world) return;
+		dragIncludeRef.current = !e.altKey;
 		paneRef.current = pane;
 		setDragStartCanvas(canvasPos);
 		setDragStartWorld(world);
@@ -227,9 +266,9 @@ export function useInteractivePromptTool({
 		const dx = Math.abs(canvasPos[0] - (dragStartCanvas?.[0] ?? 0));
 		const dy = Math.abs(canvasPos[1] - (dragStartCanvas?.[1] ?? 0));
 		if (dx < 4 && dy < 4) {
-			void submit(pane, startWorld);
+			void submit(pane, startWorld, undefined, dragIncludeRef.current);
 		} else {
-			void submit(pane, startWorld, [startWorld, endWorld]);
+			void submit(pane, startWorld, [startWorld, endWorld], dragIncludeRef.current);
 		}
 	};
 
@@ -246,6 +285,7 @@ export function useInteractivePromptTool({
 		statusMessage,
 		dismissStatus,
 		handleClick,
+		handleContextMenu,
 		handleMouseDown,
 		handleMouseMove,
 		handleMouseUp,

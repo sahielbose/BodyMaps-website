@@ -116,6 +116,12 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
     instead of falling back to region_grow (bolting a threshold blob onto a
     model-refined mask would corrupt the object), and an empty mask is
     returned as-is rather than triggering the fallback.
+
+    `prompt["include"]: false` marks a corrective prompt — carve the clicked
+    region OUT of the session's object instead of adding to it. Only the
+    interactive model understands that; there is no region-grow equivalent,
+    so corrective prompts never fall back and are refused outright when the
+    model path is unavailable.
     """
     if "point_ijk" in prompt:
         seed = tuple(int(v) for v in prompt["point_ijk"])
@@ -134,6 +140,8 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
         )
 
     session_token = prompt.get("session_token") or None
+    include = prompt.get("include")
+    include = True if include is None else bool(include)
 
     if USE_NNINTERACTIVE:
         try:
@@ -144,6 +152,7 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
                 point_ijk=seed if box_ijk is None else None,
                 box_ijk=box_ijk,
                 session_token=session_token,
+                include=include,
             )
             if session_token is not None or mask.sum() > 0:
                 # In-session responses are authoritative even when empty (a
@@ -154,13 +163,17 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
             print("[segment_from_prompt] nnInteractive returned empty mask, falling back to region_grow")
         except Exception as e:
             from services import nninteractive_predictor as _predictor
-            if _predictor.session_is_active(session_token):
-                # This token already refined an object across earlier
-                # prompts; silently switching models mid-session would
-                # corrupt it. Fail loudly instead.
+            if not include or _predictor.session_is_active(session_token):
+                # A corrective prompt has no fallback, and a token that
+                # already refined an object across earlier prompts must not
+                # silently switch models mid-session. Fail loudly instead.
                 raise
             print(f"[segment_from_prompt] nnInteractive failed ({type(e).__name__}: {e}), falling back to region_grow")
 
+    if not include:
+        raise ValueError(
+            "Corrective clicks need the interactive model server, which is not available right now."
+        )
     tolerance = min(max(float(prompt.get("tolerance", 80.0)), 1.0), 1000.0)
     return region_grow(ct, seed, tolerance=tolerance, box_ijk=box_ijk)
 
