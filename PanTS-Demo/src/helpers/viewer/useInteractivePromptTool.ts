@@ -19,6 +19,7 @@ import {
 	canvasPointToWorld,
 	worldToCanvasPoint,
 	submitInteractiveSegmentPrompt,
+	subscribeToSegmentationEdits,
 	type CinePane,
 	type PromptMarker,
 	type PromptSessionState,
@@ -86,6 +87,15 @@ export function useInteractivePromptTool({
 	useEffect(() => {
 		promptSessionRef.current = null;
 	}, [enabled, activeSegmentIndex, caseId, res]);
+
+	// The marker overlay reads session.markers, which undo/redo closures
+	// mutate from OUTSIDE the React tree (they live in the shared edit
+	// history). Those closures repaint the labelmap through the
+	// segmentation-modified event — a GPU-texture path that never renders
+	// React — so without this bump, an undone prompt's dot lingers on the
+	// pane until some unrelated state change happens to re-render.
+	const [, bumpMarkersVersion] = useState(0);
+	useEffect(() => subscribeToSegmentationEdits(() => bumpMarkersVersion((v) => v + 1)), []);
 
 	const reset = useCallback(() => {
 		setDragStartCanvas(null);
