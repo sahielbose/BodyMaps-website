@@ -159,7 +159,18 @@ def create_app():
         ).split(",")
         if o.strip()
     ]
-    CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)
+    # expose_headers: response headers a cross-origin fetch may READ (the
+    # browser hides everything beyond the CORS safelist otherwise). The
+    # interactive-segment client needs X-Prompt-Session to know whether the
+    # mask it got back is session-scoped; X-Mask-Voxels rides along since
+    # it's the same endpoint's metadata. Only matters for the split-origin
+    # dev setup — production serves same-origin through nginx.
+    CORS(
+        app,
+        resources={r"/*": {"origins": allowed_origins}},
+        supports_credentials=True,
+        expose_headers=["X-Prompt-Session", "X-Mask-Voxels"],
+    )
 
     return app
 

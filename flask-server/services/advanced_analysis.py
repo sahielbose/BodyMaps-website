@@ -107,6 +107,15 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
 
     `case_key` (e.g. "17:full") lets the nnInteractive path cache the
     uploaded volume across requests for the same case+resolution.
+
+    `prompt["session_token"]` (opaque client string) keeps the nnInteractive
+    prompt session open across requests: consecutive prompts carrying the
+    same token accumulate as context on the model server, so each new click
+    REFINES the same object instead of starting over. Session responses are
+    authoritative — once a token has accumulated context, failures raise
+    instead of falling back to region_grow (bolting a threshold blob onto a
+    model-refined mask would corrupt the object), and an empty mask is
+    returned as-is rather than triggering the fallback.
     """
     if "point_ijk" in prompt:
         seed = tuple(int(v) for v in prompt["point_ijk"])
@@ -124,6 +133,8 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
             tuple(max(a, b) + 1 for a, b in zip(c0, c1)),
         )
 
+    session_token = prompt.get("session_token") or None
+
     if USE_NNINTERACTIVE:
         try:
             from services.nninteractive_predictor import predict
@@ -132,11 +143,22 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
                 case_key or "unkeyed",
                 point_ijk=seed if box_ijk is None else None,
                 box_ijk=box_ijk,
+                session_token=session_token,
             )
-            if mask.sum() > 0:
+            if session_token is not None or mask.sum() > 0:
+                # In-session responses are authoritative even when empty (a
+                # refinement can legitimately shrink the object) — see the
+                # docstring. Only tokenless one-shot prompts keep the empty
+                # -> region_grow fallback.
                 return mask
             print("[segment_from_prompt] nnInteractive returned empty mask, falling back to region_grow")
         except Exception as e:
+            from services import nninteractive_predictor as _predictor
+            if _predictor.session_is_active(session_token):
+                # This token already refined an object across earlier
+                # prompts; silently switching models mid-session would
+                # corrupt it. Fail loudly instead.
+                raise
             print(f"[segment_from_prompt] nnInteractive failed ({type(e).__name__}: {e}), falling back to region_grow")
 
     tolerance = min(max(float(prompt.get("tolerance", 80.0)), 1.0), 1000.0)

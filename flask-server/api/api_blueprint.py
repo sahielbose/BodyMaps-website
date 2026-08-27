@@ -7051,8 +7051,15 @@ def interactive_segment(case_id):
     """Click-to-segment: seed prompt -> proposed mask (.nii.gz in CT geometry).
 
     Body JSON: { point_lps:[x,y,z] | point_ijk:[i,j,k], tolerance?, box_lps?,
-                 res?: "low"|"full" }. res should match the resolution the viewer
-                 loaded so the returned mask's voxel grid aligns with the labelmap.
+                 res?: "low"|"full", session_token?: str }. res should match the
+                 resolution the viewer loaded so the returned mask's voxel grid
+                 aligns with the labelmap. Consecutive requests carrying the same
+                 session_token accumulate on the model server as one prompt
+                 session, so each new prompt refines the same object; the
+                 X-Prompt-Session response header says whether the returned mask
+                 is session-scoped ("active") or a one-shot proposal ("none" —
+                 e.g. the region-grow fallback ran), which the client uses to
+                 pick merge-in vs replace-object apply semantics.
     """
     if not _ANALYSIS_SLOTS.acquire(blocking=False):
         return jsonify(_ANALYSIS_BUSY_RESPONSE[0]), _ANALYSIS_BUSY_RESPONSE[1]
@@ -7068,7 +7075,9 @@ def interactive_segment(case_id):
         case_key = f"{case_id}:{'low' if low else 'full'}"
         ct_obj, ct = _load_ct_cached(ct_path, case_key)
         mask = segment_from_prompt(ct, ct_obj.affine, body, case_key=case_key)
-        if int(mask.sum()) == 0:
+        from services.nninteractive_predictor import session_is_active
+        session_active = session_is_active(body.get("session_token"))
+        if int(mask.sum()) == 0 and not session_active:
             return jsonify({"error": "Nothing grew from that point — try a different spot or a higher tolerance."}), 422
 
         out = nib.Nifti1Image(mask, ct_obj.affine, ct_obj.header)
@@ -7079,6 +7088,7 @@ def interactive_segment(case_id):
         resp = make_response(gz)
         resp.headers['Content-Type'] = 'application/gzip'
         resp.headers['X-Mask-Voxels'] = str(int(mask.sum()))
+        resp.headers['X-Prompt-Session'] = 'active' if session_active else 'none'
         resp.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
         return resp
     except ValueError as ve:

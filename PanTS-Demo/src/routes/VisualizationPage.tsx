@@ -1438,32 +1438,30 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// grid the live segmentation volume is actually on right now — same
 	// hdReady logic gating the Annotate button, not a separate guess. Placed
 	// after `enhance` is declared above since both read enhance.state.
-	const [promptToolBusy, setPromptToolBusy] = useState(false);
+	//
+	// Equip-and-use, like the brush: the tool STAYS ARMED after a successful
+	// prompt, because consecutive prompts refine one object through a
+	// persistent model session (see useInteractivePromptTool). No busy gate
+	// on `enabled` — the hook single-flights its own requests, the applying
+	// modal blocks the canvas during the round trip, and toggling `enabled`
+	// mid-flight would tear down the very session being refined.
 	const pointSegment = useInteractivePromptTool({
-		enabled: activeToolbarTool === "pointSegment" && !promptToolBusy,
+		enabled: activeToolbarTool === "pointSegment",
 		mode: "point",
 		apiBase: API_BASE,
 		caseId: pantsCase ?? null,
 		activeSegmentIndex: activeSegment,
 		res: isHd || enhance.state === "done" ? "full" : "low",
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
-		onBusyChange: setPromptToolBusy,
-		// Single-shot tool, not equip-and-use like paint/erase — deselect
-		// (icon loses its active/white-background state) once a click
-		// actually produced a mask, instead of staying armed for repeated
-		// clicks the way the brush does.
-		onComplete: () => setActiveToolbarTool(null),
 	});
 	const boxSegment = useInteractivePromptTool({
-		enabled: activeToolbarTool === "boxSegment" && !promptToolBusy,
+		enabled: activeToolbarTool === "boxSegment",
 		mode: "box",
 		apiBase: API_BASE,
 		caseId: pantsCase ?? null,
 		activeSegmentIndex: activeSegment,
 		res: isHd || enhance.state === "done" ? "full" : "low",
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
-		onBusyChange: setPromptToolBusy,
-		onComplete: () => setActiveToolbarTool(null),
 	});
 
 	const enhanceStartedRef = useRef(false);
@@ -5296,7 +5294,7 @@ const aiAvailableOrgans = useMemo(() => {
 				return (
 					<GuidedStepModal
 						title={
-							applying ? "Applying" : active.status === "success" ? "Success" : "No change"
+							applying ? "Applying" : active.status === "success" ? "Applied" : "Not applied"
 						}
 						instruction={
 							applying

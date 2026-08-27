@@ -2082,14 +2082,48 @@ export async function upgradeSegmentationVolume(fullResSegUrl: string): Promise<
 // same way Annotate is gated — behind hdReady — so "low" vs "full" can't
 // drift out of sync mid-session).
 //
-// NOT YET TESTED end-to-end — this is new scaffolding. Test on a real case
-// before trusting it: submit a point prompt, confirm the proposal lands in
-// the right place on the right slice, and confirm undo/segment-switching
-// still behave normally afterward.
+// Verified end-to-end against the live nninteractive-server on case 1
+// (point and box prompts, both resolutions, undo, segment switching).
 export interface InteractivePrompt {
   pointLps: Point3;
   boxLps?: [Point3, Point3];
   tolerance?: number;
+}
+
+/**
+ * Client half of a persistent prompt session (see useInteractivePromptTool,
+ * which owns one of these per armed tool). While the same `token` is sent,
+ * the backend keeps the nnInteractive session open so every new prompt
+ * REFINES the same object — and the response is then the session's whole
+ * object, not an increment, so applying it means both adding voxels the
+ * model grew and retracting voxels it gave back.
+ */
+export interface PromptSessionState {
+  /** Opaque id identifying this refinement session to the backend. */
+  token: string;
+  /** The mask this session's previous response covered (same grid as the
+   *  segmentation volume), or null before the first response. Retraction is
+   *  restricted to these voxels so labelmap content the session never wrote
+   *  is left untouched. */
+  prevProposal: Uint8Array | null;
+  /** Pre-session labelmap value for every voxel this session overwrote, so
+   *  retracting restores what was actually there (possibly another organ's
+   *  label, not 0). */
+  priorValues: Map<number, number>;
+}
+
+export interface InteractivePromptResult {
+  /** Voxels actually modified this apply (adds + retractions). */
+  changed: number;
+  added: number;
+  removed: number;
+  /** True when the backend confirmed the mask is session-scoped. False means
+   *  a one-shot proposal (e.g. the region-grow fallback ran) that was merged
+   *  additively — the caller must NOT carry replace semantics forward. */
+  sessionActive: boolean;
+  /** The response mask, for the caller to store as the session's
+   *  prevProposal. Null when sessionActive is false. */
+  proposal: Uint8Array | null;
 }
 
 async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
@@ -2111,10 +2145,16 @@ async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
  * module comment above) — pass `isHd ? "full" : "low"` from the caller's own
  * hdReady state, not a guess.
  *
- * Returns the number of voxels actually modified (0 if the proposal was
+ * Returns counts of voxels actually modified (0 if the proposal was
  * empty, or if every proposed voxel already held `activeSegmentIndex`), or
  * throws with a message safe to show the user (the backend already returns
  * plain-English error strings for the common cases — empty grow, no CT, etc).
+ *
+ * With `session` provided AND the backend confirming the session (see
+ * X-Prompt-Session), the apply is two-way: proposal voxels merge in as
+ * `activeSegmentIndex`, and voxels the session previously covered that the
+ * refined proposal no longer does are restored to their pre-session values.
+ * Without a confirmed session it behaves exactly as before — add-only.
  */
 export async function submitInteractiveSegmentPrompt(
   apiBase: string,
@@ -2122,7 +2162,8 @@ export async function submitInteractiveSegmentPrompt(
   activeSegmentIndex: number,
   prompt: InteractivePrompt,
   res: "low" | "full",
-): Promise<number> {
+  session?: PromptSessionState,
+): Promise<InteractivePromptResult> {
   const segVolume = cache.getVolume(segmentationId);
   if (!segVolume) throw new Error("No segmentation loaded for this case.");
 
@@ -2137,6 +2178,7 @@ export async function submitInteractiveSegmentPrompt(
     ];
   }
   if (prompt.tolerance != null) body.tolerance = prompt.tolerance;
+  if (session) body.session_token = session.token;
 
   const httpRes = await fetch(`${apiBase}/api/interactive-segment/${caseId}`, {
     method: "POST",
@@ -2151,6 +2193,12 @@ export async function submitInteractiveSegmentPrompt(
     } catch { /* body wasn't JSON — keep the generic message */ }
     throw new Error(msg);
   }
+
+  // Only trust the backend's word on session scope — if the region-grow
+  // fallback ran (or an older backend ignored the token), the mask is a
+  // one-shot proposal and replace semantics would wrongly retract voxels.
+  const sessionActive =
+    !!session && httpRes.headers.get("X-Prompt-Session") === "active";
 
   const gz = await httpRes.arrayBuffer();
   const niiBytes = await _decompressGzip(gz);
@@ -2191,13 +2239,45 @@ export async function submitInteractiveSegmentPrompt(
   // counted every nonzero proposal voxel, so clicking an already-labeled
   // structure reported "success (N vox)" while nothing changed and no undo
   // entry existed.
+  //
+  // In session mode the proposal is the session's WHOLE object, so besides
+  // the add path there is a retraction path: a voxel the previous response
+  // covered, that this refined response no longer does, and that still
+  // holds activeSegmentIndex, goes back to its pre-session value. Both
+  // paths record prior AND next per voxel, since retractions don't write
+  // activeSegmentIndex.
+  const prevProposal =
+    sessionActive &&
+    session!.prevProposal &&
+    session!.prevProposal.length === proposal.data.length
+      ? session!.prevProposal
+      : null;
   const touchedIdx: number[] = [];
   const priorValues: number[] = [];
+  const nextValues: number[] = [];
+  let added = 0;
+  let removed = 0;
   for (let idx = 0; idx < proposal.data.length; idx++) {
-    if (proposal.data[idx] && segScalars[idx] !== activeSegmentIndex) {
-      touchedIdx.push(idx);
-      priorValues.push(segScalars[idx]);
-      segScalars[idx] = activeSegmentIndex;
+    if (proposal.data[idx]) {
+      if (segScalars[idx] !== activeSegmentIndex) {
+        if (sessionActive && !session!.priorValues.has(idx)) {
+          session!.priorValues.set(idx, segScalars[idx]);
+        }
+        touchedIdx.push(idx);
+        priorValues.push(segScalars[idx]);
+        nextValues.push(activeSegmentIndex);
+        segScalars[idx] = activeSegmentIndex;
+        added++;
+      }
+    } else if (prevProposal && prevProposal[idx] && segScalars[idx] === activeSegmentIndex) {
+      const restore = session!.priorValues.get(idx) ?? 0;
+      if (restore !== activeSegmentIndex) {
+        touchedIdx.push(idx);
+        priorValues.push(segScalars[idx]);
+        nextValues.push(restore);
+        segScalars[idx] = restore;
+        removed++;
+      }
     }
   }
   const changed = touchedIdx.length;
@@ -2225,14 +2305,22 @@ export async function submitInteractiveSegmentPrompt(
       (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
       _notifySegmentationChanged();
     };
-    const redoValues = touchedIdx.map(() => activeSegmentIndex);
     pushEditHistory({
       undo: () => applyAndRefresh(priorValues),
-      redo: () => applyAndRefresh(redoValues),
+      redo: () => applyAndRefresh(nextValues),
     });
   }
 
-  return changed;
+  return {
+    changed,
+    added,
+    removed,
+    sessionActive,
+    // Retaining the response view keeps the whole decompressed .nii buffer
+    // alive — one uint8 volume, same order of cost the app already pays per
+    // loaded mask, and it's dropped when the session ends.
+    proposal: sessionActive ? proposal.data : null,
+  };
 }
 
 /**
