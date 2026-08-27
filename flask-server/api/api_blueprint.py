@@ -7231,6 +7231,25 @@ def interactive_segment(case_id):
         _ANALYSIS_SLOTS.release()
 
 
+@api_blueprint.route('/interactive-capabilities', methods=['GET'])
+def interactive_capabilities():
+    """What the interactive model server says about itself, for the client's
+    attribution line. The licence comes from the RUNNING server (its
+    /capabilities reports it per checkpoint) — a future checkpoint could
+    ship different terms, and a licence hardcoded in the viewer would then
+    silently misattribute it. `available: false` (with a null license)
+    means the server never answered; the client keeps its fallback text."""
+    from services.nninteractive_predictor import get_capabilities
+    caps = get_capabilities() or {}
+    resp = jsonify({
+        "available": bool(caps),
+        "license": caps.get("license"),
+        "model_version": caps.get("inference_session_version"),
+    })
+    resp.headers['Cache-Control'] = 'public, max-age=3600'
+    return resp
+
+
 @api_blueprint.route('/interactive-segment/<case_id>/undo', methods=['POST'])
 def interactive_segment_undo(case_id):
     """Rewind the live prompt session by one interaction, keeping the model

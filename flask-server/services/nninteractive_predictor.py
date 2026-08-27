@@ -148,6 +148,38 @@ import atexit
 atexit.register(_release_on_exit)
 
 
+# /capabilities cache: the payload is static for the lifetime of a model
+# server process (it describes the loaded checkpoint), so an hourly refresh
+# is plenty and keeps the viewer's attribution fetch off the model server.
+_caps_cache: dict | None = None
+_caps_fetched_at = 0.0
+CAPS_TTL_S = 3600.0
+
+
+def get_capabilities() -> dict | None:
+    """The model server's /capabilities payload — licence string, supported
+    interactions, checkpoint version — cached for an hour. Returns the last
+    good payload when the server is unreachable, or None if it never
+    answered; callers fall back to their built-in text."""
+    global _caps_cache, _caps_fetched_at
+    now = time.monotonic()
+    if _caps_cache is not None and now - _caps_fetched_at < CAPS_TTL_S:
+        return _caps_cache
+    try:
+        import requests
+        headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
+        resp = requests.get(f"{SERVER_URL.rstrip('/')}/capabilities",
+                            headers=headers, timeout=3)
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, dict):
+            _caps_cache = payload
+            _caps_fetched_at = now
+    except Exception:
+        pass
+    return _caps_cache
+
+
 def _new_remote_session():
     from nnInteractive.inference.remote.remote_session import nnInteractiveRemoteInferenceSession
     session = nnInteractiveRemoteInferenceSession(server_url=SERVER_URL, api_key=API_KEY)

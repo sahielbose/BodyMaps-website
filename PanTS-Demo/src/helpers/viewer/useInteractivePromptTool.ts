@@ -25,6 +25,7 @@ import {
 	type PromptMarker,
 	type PromptSessionState,
 } from "../CornerstoneNifti2";
+import { interactiveAttribution, primeInteractiveLicense } from "./interactiveAttribution";
 // Avoid importing Point3 from "@cornerstonejs/core/types" directly — Vite's
 // import analysis doesn't reliably resolve that subpath for every file (it
 // works from CornerstoneNifti2.tsx, which Vite already had in its graph, but
@@ -119,6 +120,9 @@ export function useInteractivePromptTool({
 	useEffect(() => {
 		promptSessionRef.current = null;
 	}, [enabled, activeSegmentIndex, caseId, res]);
+	// The hint modal's attribution line reads the licence the running model
+	// server reports; start that fetch before the first result needs it.
+	useEffect(() => primeInteractiveLicense(apiBase), [apiBase]);
 
 	// The marker overlay reads session.markers, which undo/redo closures
 	// mutate from OUTSIDE the React tree (they live in the shared edit
@@ -216,7 +220,7 @@ export function useInteractivePromptTool({
 					refineHintShownRef.current = true;
 					setStatus("success");
 					setStatusMessage(
-						"Applied. The tool stays armed, and each new click refines this same object: left-click adds, right-click (or Alt-click) removes. Switching classes starts a fresh one. Powered by nnInteractive (DKFZ); model weights are CC BY-NC-SA 4.0, for non-commercial research use."
+						`Applied. The tool stays armed, and each new click refines this same object: left-click adds, right-click (or Alt-click) removes. Switching classes starts a fresh one. ${interactiveAttribution()}`
 					);
 				} else {
 					// Feedback is the mask itself plus the log line — a modal
