@@ -1445,18 +1445,18 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// on `enabled` — the hook single-flights its own requests, the applying
 	// modal blocks the canvas during the round trip, and toggling `enabled`
 	// mid-flight would tear down the very session being refined.
-	const pointSegment = useInteractivePromptTool({
-		enabled: activeToolbarTool === "pointSegment",
-		mode: "point",
-		apiBase: API_BASE,
-		caseId: pantsCase ?? null,
-		activeSegmentIndex: activeSegment,
-		res: isHd || enhance.state === "done" ? "full" : "low",
-		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
-	});
-	const boxSegment = useInteractivePromptTool({
-		enabled: activeToolbarTool === "boxSegment",
-		mode: "box",
+	//
+	// ONE hook instance serves every prompt tool, with `mode` following the
+	// armed tool. That is what makes the refinement session survive switching
+	// between the prompt tools (click an organ, then box-prompt the part it
+	// missed — same object, same model context), matching how the official
+	// Slicer plugin behaves. Two instances would each hold their own token
+	// and silently start a new object on every tool switch.
+	const promptToolArmed =
+		activeToolbarTool === "pointSegment" || activeToolbarTool === "boxSegment";
+	const promptSegment = useInteractivePromptTool({
+		enabled: promptToolArmed,
+		mode: activeToolbarTool === "boxSegment" ? "box" : "point",
 		apiBase: API_BASE,
 		caseId: pantsCase ?? null,
 		activeSegmentIndex: activeSegment,
@@ -2264,8 +2264,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		disabled:
 			showReportScreen ||
 			annotateHdLoading ||
-			pointSegment.status !== "idle" ||
-			boxSegment.status !== "idle",
+			promptSegment.status !== "idle",
 		closeAnnotationToolbarIfOpen,
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
@@ -3218,8 +3217,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				<div className={`vp-window-readout${windowReadoutVisible ? " vp-window-readout--visible" : ""}`}>
 					W {Math.round(windowWidth)} · L {Math.round(windowCenter)}
 				</div>
-				{activeToolbarTool === "boxSegment" && boxSegment.pane === pane && boxSegment.liveBox && (() => {
-					const [start, end] = boxSegment.liveBox;
+				{promptSegment.pane === pane && promptSegment.liveBox && (() => {
+					const [start, end] = promptSegment.liveBox;
 					const left = Math.min(start[0], end[0]);
 					const top = Math.min(start[1], end[1]);
 					const width = Math.abs(end[0] - start[0]);
@@ -4605,13 +4604,13 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("axial"), ...paneGridStyle("axial") }}
-						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("axial")(e); }}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("axial")(e); }}>
 						<div
 							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 							data-label="Axial"
 							ref={axial_ref}
-							onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("axial")(e); }}
-							onContextMenu={(e) => { pointSegment.handleContextMenu("axial")(e); boxSegment.handleContextMenu("axial")(e); }}
+							onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("axial")(e); }}
+							onContextMenu={(e) => { promptSegment.handleContextMenu("axial")(e); }}
 							onDoubleClick={activeDrawTool.handleDoubleClick("axial")}
 							onMouseDown={(e) => {
 								focusedPane.handleMouseDown("axial")();
@@ -4619,14 +4618,14 @@ const aiAvailableOrgans = useMemo(() => {
 								morphPicker.handlePaneClick("axial")(e);
 								activeDrawTool.handleClick("axial")(e);
 								levelTracing.handleClick("axial")(e);
-								boxSegment.handleMouseDown("axial")(e);
+								promptSegment.handleMouseDown("axial")(e);
 							}}
 							onMouseMove={(e) => {
 								handlePaneHover("axial")(e);
 								smartFill.handleMouseMove("axial")(e);
 								activeDrawTool.handleMouseMove("axial")(e);
 								levelTracing.handleMouseMove("axial")(e);
-								boxSegment.handleMouseMove("axial")(e);
+								promptSegment.handleMouseMove("axial")(e);
 							}}
 							onMouseLeave={handlePaneHoverLeave("axial")}
 							onWheel={focusedPane.handleWheel("axial")}
@@ -4689,13 +4688,13 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("sagittal"), ...paneGridStyle("sagittal") }}
-						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("sagittal")(e); }}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("sagittal")(e); }}>
 					<div
 						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Sagittal"
 						ref={sagittal_ref}
-						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("sagittal")(e); }}
-						onContextMenu={(e) => { pointSegment.handleContextMenu("sagittal")(e); boxSegment.handleContextMenu("sagittal")(e); }}
+						onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("sagittal")(e); }}
+						onContextMenu={(e) => { promptSegment.handleContextMenu("sagittal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("sagittal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("sagittal")();
@@ -4703,14 +4702,14 @@ const aiAvailableOrgans = useMemo(() => {
 							morphPicker.handlePaneClick("sagittal")(e);
 							activeDrawTool.handleClick("sagittal")(e);
 							levelTracing.handleClick("sagittal")(e);
-							boxSegment.handleMouseDown("sagittal")(e);
+							promptSegment.handleMouseDown("sagittal")(e);
 						}}
 						onMouseMove={(e) => {
 							handlePaneHover("sagittal")(e);
 							smartFill.handleMouseMove("sagittal")(e);
 							activeDrawTool.handleMouseMove("sagittal")(e);
 							levelTracing.handleMouseMove("sagittal")(e);
-							boxSegment.handleMouseMove("sagittal")(e);
+							promptSegment.handleMouseMove("sagittal")(e);
 						}}
 						onMouseLeave={handlePaneHoverLeave("sagittal")}
 						onWheel={focusedPane.handleWheel("sagittal")}
@@ -4774,13 +4773,13 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("coronal"), ...paneGridStyle("coronal") }}
-						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("coronal")(e); }}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("coronal")(e); }}>
 					<div
 						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Coronal"
 						ref={coronal_ref}
-						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("coronal")(e); }}
-						onContextMenu={(e) => { pointSegment.handleContextMenu("coronal")(e); boxSegment.handleContextMenu("coronal")(e); }}
+						onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("coronal")(e); }}
+						onContextMenu={(e) => { promptSegment.handleContextMenu("coronal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("coronal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("coronal")();
@@ -4788,7 +4787,7 @@ const aiAvailableOrgans = useMemo(() => {
 							morphPicker.handlePaneClick("coronal")(e);
 							activeDrawTool.handleClick("coronal")(e);
 							levelTracing.handleClick("coronal")(e);
-							boxSegment.handleMouseDown("coronal")(e);
+							promptSegment.handleMouseDown("coronal")(e);
 
 
 						}}
@@ -4797,7 +4796,7 @@ const aiAvailableOrgans = useMemo(() => {
 							smartFill.handleMouseMove("coronal")(e);
 							activeDrawTool.handleMouseMove("coronal")(e);
 							levelTracing.handleMouseMove("coronal")(e);
-							boxSegment.handleMouseMove("coronal")(e);
+							promptSegment.handleMouseMove("coronal")(e);
 						}}
 						onMouseLeave={handlePaneHoverLeave("coronal")}
 						onWheel={focusedPane.handleWheel("coronal")}
@@ -5291,8 +5290,8 @@ const aiAvailableOrgans = useMemo(() => {
 			    are dropped while busy). Rendered once globally (not per-pane,
 			    since a point-prompt submit doesn't stay anchored to one pane the
 			    way a box-drag does). */}
-			{(pointSegment.status !== "idle" || boxSegment.status !== "idle") && (() => {
-				const active = pointSegment.status !== "idle" ? pointSegment : boxSegment;
+			{promptSegment.status !== "idle" && (() => {
+				const active = promptSegment;
 				const applying = active.status === "applying";
 				return (
 					<GuidedStepModal
