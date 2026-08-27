@@ -4,7 +4,8 @@
 // canvas reprojection) but for the simpler prompt gestures: a single click
 // submits immediately in "point" mode; a click-drag defines two corners and
 // submits on mouseup in "box" mode; a freehand drag collects a polyline and
-// submits it on mouseup in "scribble" mode.
+// submits it on mouseup in "scribble" mode (open stroke over the structure)
+// and "lasso" mode (closed contour around it, filled server-side).
 //
 // The tool is equip-and-use, like the brush: it stays armed after a
 // successful prompt, and consecutive prompts share one PromptSessionState —
@@ -28,7 +29,7 @@ import {
 // everything this file does with it.
 type Point3 = [number, number, number];
 
-export type PromptMode = "point" | "box" | "scribble";
+export type PromptMode = "point" | "box" | "scribble" | "lasso";
 
 interface UseInteractivePromptToolArgs {
 	enabled: boolean;
@@ -98,7 +99,7 @@ export function useInteractivePromptTool({
 	const submit = useCallback(async (
 		_pane: CinePane,
 		pointWorld: Point3,
-		opts: { box?: [Point3, Point3]; scribble?: Point3[]; include?: boolean } = {},
+		opts: { box?: [Point3, Point3]; scribble?: Point3[]; lasso?: Point3[]; include?: boolean } = {},
 	) => {
 		const include = opts.include ?? true;
 		if (busyRef.current) return; // one in-flight request at a time
@@ -132,7 +133,7 @@ export function useInteractivePromptTool({
 				apiBase,
 				caseId,
 				activeSegmentIndex,
-				{ pointLps: pointWorld, boxLps: opts.box, scribbleLps: opts.scribble, tolerance, include },
+				{ pointLps: pointWorld, boxLps: opts.box, scribbleLps: opts.scribble, lassoLps: opts.lasso, tolerance, include },
 				res,
 				session,
 			);
@@ -220,8 +221,9 @@ export function useInteractivePromptTool({
 	// polarity is latched at the start so releasing Alt mid-drag doesn't
 	// silently flip what the submit will do.
 	const dragIncludeRef = useRef(true);
+	const isStrokeMode = mode === "scribble" || mode === "lasso";
 	const handleMouseDown = (pane: CinePane) => (e: MouseEvent) => {
-		if (!enabled || (mode !== "box" && mode !== "scribble")) return;
+		if (!enabled || (mode !== "box" && !isStrokeMode)) return;
 		// Left button only — the right button belongs to handleContextMenu's
 		// corrective point, and a right-drag would otherwise strand a live
 		// preview when the context menu event interrupts it.
@@ -249,7 +251,7 @@ export function useInteractivePromptTool({
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		if (mode === "box") {
 			setLiveBoxCanvas([dragStartCanvas, canvasPos]);
-		} else if (mode === "scribble") {
+		} else if (isStrokeMode) {
 			const pts = strokeCanvasRef.current;
 			const last = pts[pts.length - 1];
 			// ≥2px spacing keeps the point count proportional to path length,
@@ -282,26 +284,31 @@ export function useInteractivePromptTool({
 	}, [dragStartCanvas, reset]);
 
 	const handleMouseUp = (pane: CinePane) => (e: MouseEvent) => {
-		if (!enabled || (mode !== "box" && mode !== "scribble") || paneRef.current !== pane || !dragStartWorld) return;
+		if (!enabled || (mode !== "box" && !isStrokeMode) || paneRef.current !== pane || !dragStartWorld) return;
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		const startWorld = dragStartWorld;
 		const include = dragIncludeRef.current;
 
-		if (mode === "scribble") {
+		if (isStrokeMode) {
 			const worldPts = strokeWorldRef.current;
 			const canvasPts = strokeCanvasRef.current;
 			reset();
 			// Path length, not displacement: a stroke that curls back to its
-			// start is a real scribble, while a jitter-only "click" isn't.
+			// start is a real scribble/lasso, while a jitter-only "click" isn't.
 			let pathLen = 0;
 			for (let i = 1; i < canvasPts.length; i++) {
 				pathLen += Math.hypot(canvasPts[i][0] - canvasPts[i - 1][0], canvasPts[i][1] - canvasPts[i - 1][1]);
 			}
-			if (worldPts.length < 2 || pathLen < 8) {
+			const minPts = mode === "lasso" ? 3 : 2;
+			if (worldPts.length < minPts || pathLen < 8) {
 				// Degenerate stroke -> point prompt, same polarity, mirroring
 				// the degenerate-box behavior below.
 				void submit(pane, startWorld, { include });
+			} else if (mode === "lasso") {
+				// No need to repeat the first point — the rasterizer closes
+				// the polygon itself.
+				void submit(pane, worldPts[0], { lasso: worldPts, include });
 			} else {
 				void submit(pane, worldPts[0], { scribble: worldPts, include });
 			}

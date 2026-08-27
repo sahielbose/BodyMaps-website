@@ -136,6 +136,10 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
     mask on that slice and the model segments the structure under it. Takes
     precedence over point/box when present (point_lps still accompanies it,
     as the stroke's first vertex, for older-server compatibility). Model-only.
+
+    `prompt["lasso_lps"]` (3+ points) is the closed sibling: a freehand
+    contour rasterized as a FILLED polygon on its slice — "everything inside
+    this outline is the object". Same precedence and model-only rules.
     """
     if "point_ijk" in prompt:
         seed = tuple(int(v) for v in prompt["point_ijk"])
@@ -158,6 +162,12 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
         scribble_ijk = [lps_to_ijk(affine, p) for p in prompt["scribble_lps"]]
         if len(scribble_ijk) < 2:
             raise ValueError("A scribble needs at least 2 points.")
+
+    lasso_ijk = None
+    if prompt.get("lasso_lps"):
+        lasso_ijk = [lps_to_ijk(affine, p) for p in prompt["lasso_lps"]]
+        if len(lasso_ijk) < 3:
+            raise ValueError("A lasso needs at least 3 points.")
 
     session_token = prompt.get("session_token") or None
     include = prompt.get("include")
@@ -186,7 +196,12 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
     # mangle the existing label), and stroke-shaped (region_grow takes one
     # seed point — answering a drawn stroke with a blob grown from its first
     # vertex would silently ignore what the user drew).
-    model_only = (not include) or initial_seg is not None or scribble_ijk is not None
+    model_only = (
+        (not include)
+        or initial_seg is not None
+        or scribble_ijk is not None
+        or lasso_ijk is not None
+    )
 
     if USE_NNINTERACTIVE:
         try:
@@ -194,9 +209,10 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
             mask = predict(
                 ct,
                 case_key or "unkeyed",
-                point_ijk=seed if (box_ijk is None and scribble_ijk is None) else None,
-                box_ijk=box_ijk if scribble_ijk is None else None,
+                point_ijk=seed if (box_ijk is None and scribble_ijk is None and lasso_ijk is None) else None,
+                box_ijk=box_ijk if (scribble_ijk is None and lasso_ijk is None) else None,
                 scribble_ijk=scribble_ijk,
+                lasso_ijk=lasso_ijk,
                 session_token=session_token,
                 include=include,
                 initial_seg=initial_seg,

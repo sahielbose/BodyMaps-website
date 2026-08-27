@@ -17,6 +17,7 @@ import {
 	IconTarget,
 	IconBoxAlignTopLeft,
 	IconScribble,
+	IconLasso,
 } from "@tabler/icons-react";
 import "./AnnotationToolbar.css";
 import NumberSliderField from "../NumberSliderField";
@@ -73,7 +74,7 @@ export type PrimaryEditTool =
 	| "paint" | "erase" | "scissors" | "levelTracing"
 	| "margin" | "smoothing" | "islands" | "logicalOperators"
 	| "growFromSeeds" | "fillBetweenSlices" | "copyAcrossSlices" | "hollow"
-	| "pointSegment" | "boxSegment" | "scribbleSegment"
+	| "pointSegment" | "boxSegment" | "scribbleSegment" | "lassoSegment"
 	| null;
 export type ScissorsOperation = "eraseInside" | "eraseOutside" | "fillInside" | "fillOutside";
 export type ScissorsSliceCut = "unlimited" | "positive" | "negative" | "symmetric";
@@ -144,6 +145,7 @@ const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon
 	{ id: "pointSegment", label: "Segment from click", Icon: IconTarget, description: "Click a structure once and the model proposes its full 3D mask." },
 	{ id: "boxSegment", label: "Segment from box", Icon: IconBoxAlignTopLeft, description: "Drag a box around a structure on one slice to get its 3D mask." },
 	{ id: "scribbleSegment", label: "Segment from scribble", Icon: IconScribble, description: "Draw a quick stroke over a structure and the model segments it in 3D." },
+	{ id: "lassoSegment", label: "Segment from lasso", Icon: IconLasso, description: "Circle a structure freehand and the model segments everything inside." },
 	{ id: "margin", label: "Margin", Icon: IconArrowsDiagonal, description: "Grow or shrink by a specified margin size." },
 	{ id: "smoothing", label: "Smoothing", Icon: IconWaveSine, description: "Smooth class boundaries." },
 	{ id: "islands", label: "Islands", Icon: IconDroplet, description: "Edit islands (connected components) in a class." },
@@ -163,11 +165,11 @@ const SCISSORS_OPERATIONS: { value: ScissorsOperation; label: string }[] = [
 
 // Tools that don't have an ApplyButton — they commit directly on pointer
 // interaction, so the rendering dot is the only feedback available.
-const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "scissors", "levelTracing", "pointSegment", "boxSegment", "scribbleSegment"];
+const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "scissors", "levelTracing", "pointSegment", "boxSegment", "scribbleSegment", "lassoSegment"];
 
 // The model-prompt tools: equip-and-use like the brush, but no settings
 // flyout at all — everything they need is the click/drag gesture itself.
-const PROMPT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["pointSegment", "boxSegment", "scribbleSegment"];
+const PROMPT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["pointSegment", "boxSegment", "scribbleSegment", "lassoSegment"];
 
 const MIN_DIAMETER_MM = 2;
 const MAX_DIAMETER_MM = 40;

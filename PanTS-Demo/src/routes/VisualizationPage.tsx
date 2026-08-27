@@ -1455,7 +1455,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const promptToolArmed =
 		activeToolbarTool === "pointSegment" ||
 		activeToolbarTool === "boxSegment" ||
-		activeToolbarTool === "scribbleSegment";
+		activeToolbarTool === "scribbleSegment" ||
+		activeToolbarTool === "lassoSegment";
 	const promptSegment = useInteractivePromptTool({
 		enabled: promptToolArmed,
 		mode:
@@ -1463,7 +1464,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				? "box"
 				: activeToolbarTool === "scribbleSegment"
 					? "scribble"
-					: "point",
+					: activeToolbarTool === "lassoSegment"
+						? "lasso"
+						: "point",
 		apiBase: API_BASE,
 		caseId: pantsCase ?? null,
 		activeSegmentIndex: activeSegment,
@@ -3254,14 +3257,27 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 							zIndex: 40,
 						}}
 					>
-						<polyline
-							points={promptSegment.liveStroke.map(([x, y]) => `${x},${y}`).join(" ")}
-							fill="none"
-							stroke="#6fd3ff"
-							strokeWidth={2.5}
-							strokeLinecap="round"
-							strokeLinejoin="round"
-						/>
+						{activeToolbarTool === "lassoSegment" ? (
+							// Closed preview with a light fill so the user sees the
+							// enclosed region — the rasterizer fills it server-side.
+							<polygon
+								points={promptSegment.liveStroke.map(([x, y]) => `${x},${y}`).join(" ")}
+								fill="rgba(111, 211, 255, 0.12)"
+								stroke="#6fd3ff"
+								strokeWidth={2.5}
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							/>
+						) : (
+							<polyline
+								points={promptSegment.liveStroke.map(([x, y]) => `${x},${y}`).join(" ")}
+								fill="none"
+								stroke="#6fd3ff"
+								strokeWidth={2.5}
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							/>
+						)}
 					</svg>
 				)}
 			</>

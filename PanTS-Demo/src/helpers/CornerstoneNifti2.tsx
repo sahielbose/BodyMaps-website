@@ -2092,6 +2092,10 @@ export interface InteractivePrompt {
    *  model segments the structure under it. pointLps should still carry the
    *  stroke's first vertex. Takes precedence over boxLps server-side. */
   scribbleLps?: Point3[];
+  /** Closed contour prompt: 3+ world points outlining the structure on ONE
+   *  pane. Rasterized server-side as a FILLED polygon — "everything inside
+   *  this outline is the object". Same conventions as scribbleLps. */
+  lassoLps?: Point3[];
   tolerance?: number;
   /** false = corrective prompt: carve the clicked region OUT of the current
    *  session's object instead of adding to it. Model-only (the backend
@@ -2219,6 +2223,9 @@ export async function submitInteractiveSegmentPrompt(
   }
   if (prompt.scribbleLps) {
     body.scribble_lps = prompt.scribbleLps.map((p) => [p[0], p[1], p[2]]);
+  }
+  if (prompt.lassoLps) {
+    body.lasso_lps = prompt.lassoLps.map((p) => [p[0], p[1], p[2]]);
   }
   if (prompt.tolerance != null) body.tolerance = prompt.tolerance;
   if (prompt.include === false) body.include = false;

@@ -7051,8 +7051,8 @@ def interactive_segment(case_id):
     """Click-to-segment: seed prompt -> proposed mask (.nii.gz in CT geometry).
 
     Body JSON: { point_lps:[x,y,z] | point_ijk:[i,j,k], tolerance?, box_lps?,
-                 scribble_lps?: [[x,y,z],...], res?: "low"|"full",
-                 session_token?: str, include?: bool,
+                 scribble_lps?: [[x,y,z],...], lasso_lps?: [[x,y,z],...],
+                 res?: "low"|"full", session_token?: str, include?: bool,
                  initial_seg_gz_b64?: str }.
     res should match the resolution the viewer loaded so the returned mask's
     voxel grid aligns with the labelmap. Consecutive requests carrying the same

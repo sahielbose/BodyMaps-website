@@ -172,12 +172,20 @@ def _add_interaction(session, entry: dict, run_prediction: bool = True) -> None:
         # remote client also mirrors the seed into our _target_buffer
         # in-place (buffer[:] = seg), so the module-level ref stays valid.
         session.add_initial_seg_interaction(entry["seg"], run_prediction=False)
-    elif entry["kind"] == "scribble":
+    elif entry["kind"] in ("scribble", "lasso"):
         # Rasterized from the stored points at send time (not stored as a
         # volume) so replay-after-expiry re-rasterizes instead of holding a
         # 30MB+ mask per stroke in _history.
-        session.add_scribble_interaction(
-            _rasterize_stroke(entry["points"], _cached_ct_shape, closed=False),
+        stroke = _rasterize_stroke(
+            entry["points"], _cached_ct_shape, closed=(entry["kind"] == "lasso")
+        )
+        method = (
+            session.add_lasso_interaction
+            if entry["kind"] == "lasso"
+            else session.add_scribble_interaction
+        )
+        method(
+            stroke,
             include_interaction=entry["include"],
             run_prediction=run_prediction,
         )
@@ -220,6 +228,7 @@ def predict(
     point_ijk=None,
     box_ijk=None,
     scribble_ijk=None,
+    lasso_ijk=None,
     session_token=None,
     include: bool = True,
     initial_seg: np.ndarray | None = None,
@@ -254,13 +263,19 @@ def predict(
             "points": [[int(v) for v in p] for p in scribble_ijk],
             "include": bool(include),
         }
+    elif lasso_ijk is not None:
+        entry = {
+            "kind": "lasso",
+            "points": [[int(v) for v in p] for p in lasso_ijk],
+            "include": bool(include),
+        }
     elif box_ijk is not None:
         lo, hi = box_ijk
         entry = {"kind": "bbox", "axis_pairs": _corners_to_axis_pairs(lo, hi), "include": bool(include)}
     elif point_ijk is not None:
         entry = {"kind": "point", "coords": [int(v) for v in point_ijk], "include": bool(include)}
     else:
-        raise ValueError("predict() needs point_ijk, box_ijk, or scribble_ijk")
+        raise ValueError("predict() needs point_ijk, box_ijk, scribble_ijk, or lasso_ijk")
 
     token = _normalize_token(session_token)
     starting_fresh = token is None or token != _active_token
