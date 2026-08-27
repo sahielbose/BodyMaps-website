@@ -10,6 +10,7 @@ import type { CheckBoxData } from "../../types";
 import "./SegmentsPopup.css";
 import ApplyButton from "../ApplyButton";
 import { GuidedStepModal } from "../segmentation/SliceAnchorPickerUI";
+import { NEW_CLASS_PALETTE } from "../../helpers/constants";
 
 interface SegmentsPopupProps {
 	/** Mirrors AnnotationToolbar's own `open` prop: the component stays
@@ -70,9 +71,14 @@ function toTitleCase(label: string): string {
 }
 
 // Suggested default swatch for the next new class — cycles through the
-// Hopkins palette so a freshly-created class starts on-brand. Can still be
-// repainted via the color input afterward.
-const NEXT_COLOR_POOL = ["#0F172A", "#E76F51", "#2A344A", "#0F172A", "#E76F51", "#2A344A"];
+// bright NEW_CLASS_PALETTE (the same rotation other class-creation paths
+// use), so a fresh class's mask is visible over the CT immediately. An
+// earlier version cycled the brand ink colors here, and a class defaulting
+// to near-black #0F172A rendered invisibly against the scan at mask
+// opacity until manually repainted. Can still be repainted afterward.
+const NEXT_COLOR_POOL = NEW_CLASS_PALETTE.map(
+	([r, g, b]) => "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("").toUpperCase()
+);
 
 // Applies to both the "add segment" and "rename" name fields.
 const MAX_SEGMENT_NAME_LENGTH = 40;
@@ -116,11 +122,14 @@ const EXIT_ANIM_MS = 200;
 
 type PopupTab = "existing" | "custom";
 
-// Small curated swatch set for the color popover — Hopkins palette first,
-// then a handful of common accent colors so classes stay visually distinct.
+// Small curated swatch set for the color popover — the bright new-class
+// rotation first (colors that read over a CT at mask opacity), then two
+// muted accents for deliberate low-key choices. The near-black brand inks
+// that used to lead this grid are gone: a mask that color is invisible
+// against the scan, which reads as "the tool did nothing".
 const SWATCH_PRESETS = [
-	"#0F172A", "#E76F51", "#2A344A", "#E85D5D", "#4CAF7D",
-	"#F2B33D", "#9B6BD6", "#2FB6C4", "#D9645B", "#7C8A9E",
+	...NEXT_COLOR_POOL,
+	"#E76F51", "#7C8A9E",
 ];
 
 interface ColorPickerPopoverProps {
