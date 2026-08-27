@@ -63,6 +63,27 @@ _active_token: str | None = None
 _history: list[dict] = []
 
 
+def _release_on_exit() -> None:
+    """Give the lease back when this process dies. The model server caps
+    concurrent sessions (3 by default) and reaps idle ones only after
+    --idle-timeout-seconds, so a process that exits without releasing —
+    which the werkzeug dev reloader does on EVERY watched-file edit —
+    strands a slot for hours. Three hot-restarts in a dev session were
+    enough to hit 'server is at capacity' on every request after."""
+    global _session
+    if _session is not None:
+        try:
+            _session.close()
+        except Exception:
+            pass
+        _session = None
+
+
+import atexit
+
+atexit.register(_release_on_exit)
+
+
 def _get_session():
     global _session
     if _session is None:
