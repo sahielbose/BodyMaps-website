@@ -7099,7 +7099,7 @@ def interactive_segment(case_id):
         include = body.get("include")
         include = True if include is None else bool(include)
         if int(mask.sum()) == 0 and include and not session_active:
-            return jsonify({"error": "Nothing grew from that point — try a different spot or a higher tolerance."}), 422
+            return jsonify({"error": "Nothing was found at that point. Try a box or lasso around the target, or a different spot."}), 422
 
         out = nib.Nifti1Image(mask, ct_obj.affine, ct_obj.header)
         out.header.set_data_dtype('uint8')

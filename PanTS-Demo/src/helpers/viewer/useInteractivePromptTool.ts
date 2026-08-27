@@ -170,7 +170,17 @@ export function useInteractivePromptTool({
 				if (result.added > 0) parts.push(`+${result.added.toLocaleString()}`);
 				if (result.removed > 0) parts.push(`-${result.removed.toLocaleString()}`);
 				onLog?.(`Interactive segment (${parts.join(" / ")} vox)`);
-				if (result.sessionActive && !refineHintShownRef.current) {
+				if (result.degenerate) {
+					// The request succeeded but the model landed almost no
+					// voxels (a point on a lung returns single digits out of
+					// 1.5M). Logging "+8 vox" as success while nothing visible
+					// appears reads as a broken tool, so say what actually
+					// happened and steer to the prompt types that work there.
+					setStatus("success");
+					setStatusMessage(
+						`Applied, but the model found almost nothing at that click (${result.added.toLocaleString()} voxels). Point prompts work poorly on large or air-filled structures such as the lungs or colon. Draw a box or lasso around the target instead, or keep clicking if the target really is that small.`
+					);
+				} else if (result.sessionActive && !refineHintShownRef.current) {
 					refineHintShownRef.current = true;
 					setStatus("success");
 					setStatusMessage(

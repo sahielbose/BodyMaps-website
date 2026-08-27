@@ -10,6 +10,7 @@ import vtkDataArray from "@kitware/vtk.js/Common/Core/DataArray";
 import vtkImageMarchingCubes from "@kitware/vtk.js/Filters/General/ImageMarchingCubes";
 import type { MaskingArea } from "../components/segmentation/MaskingSelect";
 import { createOperationGeneration } from "./viewer/operationGeneration";
+import { isDegenerateProposal } from "./viewer/promptResult";
 import { rollbackVolumeUpgrade } from "./viewer/volumeUpgrade";
 type viewportIdTypes = 'CT_NIFTI_AXIAL' | 'CT_NIFTI_SAGITTAL' | 'CT_NIFTI_CORONAL';
 
@@ -2183,6 +2184,11 @@ export interface InteractivePromptResult {
    *  a one-shot proposal (e.g. the region-grow fallback ran) that was merged
    *  additively — the caller must NOT carry replace semantics forward. */
   sessionActive: boolean;
+  /** True when a first additive prompt landed so few voxels it failed in
+   *  user terms (a point on a lung returns single digits out of 1.5M) —
+   *  the caller should steer toward a box or lasso instead of reporting
+   *  success. See isDegenerateProposal in viewer/promptResult. */
+  degenerate: boolean;
   /** The response mask, for the caller to store as the session's
    *  prevProposal. Null when sessionActive is false. */
   proposal: Uint8Array | null;
@@ -2515,6 +2521,16 @@ export async function submitInteractiveSegmentPrompt(
     added,
     removed,
     sessionActive,
+    // A "successful" first prompt that landed almost no voxels is a failed
+    // prompt in user terms (the lung point-click case: 8 voxels out of a
+    // 1.5M voxel organ). Flag it so the hook can steer the user to a box or
+    // lasso instead of logging "+8 vox" as a success they can't even see.
+    degenerate: isDegenerateProposal({
+      added,
+      removed,
+      firstPrompt: !sessionBaseline,
+      include: prompt.include !== false,
+    }),
     // Retaining the response view keeps the whole decompressed .nii buffer
     // alive — one uint8 volume, same order of cost the app already pays per
     // loaded mask, and it's dropped when the session ends.
