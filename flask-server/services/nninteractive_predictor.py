@@ -245,8 +245,18 @@ def _rebuild_and_replay(ct: np.ndarray, case_key: str):
     hand back the new session. Replaying in one batch instead of
     click-by-click can differ marginally from the original interactive
     sequence (autozoom state evolves per prediction), which is acceptable
-    for a recovery path."""
+    for a recovery path.
+
+    The history's initial_seg head is refreshed to (or, for sessions that
+    started without a seed, created from) the pre-expiry target buffer.
+    Replayed prompts don't run predictions, so without this the rebuilt
+    buffer would hold only the seed as of session start — or nothing — while
+    the client's retraction baseline is the LATEST response; the next apply
+    would then "retract" every voxel the model grew since, visibly eating
+    the object. Seeding with the last known buffer makes the rebuilt state
+    exactly what the client believes it is."""
     global _session, _cached_case_key, _cached_ct_shape
+    latest = None if _target_buffer is None else _target_buffer.copy()
     old = _session
     _session = None
     _cached_case_key = None
@@ -256,6 +266,17 @@ def _rebuild_and_replay(ct: np.ndarray, case_key: str):
             old.close()
         except Exception:
             pass
+    if _history:
+        if latest is not None and latest.shape == ct.shape and latest.any():
+            head = {"kind": "initial_seg", "seg": latest}
+            if _history[0]["kind"] == "initial_seg":
+                _history[0] = head
+            else:
+                _history.insert(0, head)
+        elif _history[0]["kind"] == "initial_seg":
+            # The session's true latest state is empty (or unknown); a stale
+            # seed would resurrect voxels the model already gave back.
+            _history.pop(0)
     session = _get_session()
     _ensure_volume_loaded(ct, case_key)
     for past in _history:
