@@ -298,6 +298,29 @@ def _normalize_token(session_token) -> str | None:
     return str(session_token)[:64]
 
 
+def release_session(session_token) -> bool:
+    """Drop the state for `session_token` and give its model-server lease back.
+
+    Sessions are per annotation class, and a class is finished the moment the
+    user switches to the next one. Without this the finished class keeps its
+    lease until the idle reaper runs SESSION_IDLE_S later, so annotating a run
+    of structures — every vertebra in a scan, say — refuses at the fourth one
+    with PromptCapacityError while three abandoned sessions sit idle. Returns
+    True when a state was actually released.
+
+    The anonymous slot (token None) is deliberately unreachable here: it is
+    shared and resets per request, so nothing owns it to release.
+    """
+    token = _normalize_token(session_token)
+    if token is None:
+        return False
+    state = _states.pop(token, None)
+    if state is None:
+        return False
+    _close_state(state)
+    return True
+
+
 def session_is_active(session_token) -> bool:
     """True when `session_token` names a live accumulated prompt session —
     i.e. the mask the caller just received is session-scoped (refines one

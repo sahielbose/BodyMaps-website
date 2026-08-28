@@ -7381,6 +7381,34 @@ def interactive_capabilities():
     return resp
 
 
+@api_blueprint.route('/interactive-segment/<case_id>/release', methods=['POST'])
+def interactive_segment_release(case_id):
+    """Give back the model-server lease held by a finished prompt session.
+
+    A session belongs to one annotation class, so it is finished as soon as the
+    user moves to another class. Nothing else frees it before the idle reaper
+    runs, which is what makes annotating a run of structures hit the capacity
+    limit with abandoned sessions holding the slots.
+
+    Body JSON: { session_token: str }. Always 200 -> {"released": bool}: a
+    token that was already reaped, never existed, or expired is not an error,
+    since the caller's goal (that slot is not mine any more) already holds.
+    Deliberately does NOT take an analysis slot - releasing has to succeed
+    while the analysis pool is saturated, which is exactly when it matters.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        from services.nninteractive_predictor import release_session
+    except ImportError:
+        return jsonify({"error": "The interactive model server integration is not installed."}), 503
+    try:
+        released = release_session(body.get("session_token"))
+    except Exception as error:
+        print("[interactive_segment_release error]", type(error).__name__, error)
+        return jsonify({"released": False})
+    return jsonify({"released": bool(released)})
+
+
 @api_blueprint.route('/interactive-segment/<case_id>/undo', methods=['POST'])
 def interactive_segment_undo(case_id):
     """Rewind the live prompt session by one interaction, keeping the model

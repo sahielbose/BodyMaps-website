@@ -21,6 +21,7 @@ import {
 	getSegmentationSpacing,
 	submitInteractiveSegmentPrompt,
 	subscribeToSegmentationEdits,
+	releasePromptSession,
 	type CinePane,
 	type PromptMarker,
 	type PromptSessionState,
@@ -118,7 +119,17 @@ export function useInteractivePromptTool({
 	// on every session — after the first time it's just in the way.
 	const refineHintShownRef = useRef(false);
 	useEffect(() => {
+		// Hand the finished session's lease back before forgetting its token.
+		// Dropping the ref alone leaves the backend holding a model-server slot
+		// for a class nobody is annotating any more, and the server refuses new
+		// sessions rather than evicting, so a run of classes (every vertebra in
+		// a scan) would stall on capacity with only idle sessions in the way.
+		const prev = promptSessionRef.current;
 		promptSessionRef.current = null;
+		if (prev && caseId != null) releasePromptSession(apiBase, caseId, prev.token);
+		// apiBase is intentionally out of the deps: it never changes at runtime,
+		// and listing it would release a live session on an unrelated re-render.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [enabled, activeSegmentIndex, caseId, res]);
 	// The hint modal's attribution line reads the licence the running model
 	// server reports; start that fetch before the first result needs it.

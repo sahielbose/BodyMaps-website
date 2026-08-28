@@ -2185,6 +2185,38 @@ async function _undoPromptOnServer(
   }
 }
 
+/** Tell the backend a prompt session is finished so its model-server lease is
+ *  freed now rather than at the idle reaper. Sessions are per class, so the
+ *  moment the user moves to another class the old one is done; without this,
+ *  annotating several structures in a row exhausts the server's session slots
+ *  while the abandoned sessions sit idle. Fire-and-forget: the caller has
+ *  already dropped the token locally, so a failed release only costs the delay
+ *  until the reaper collects it. */
+export function releasePromptSession(
+  apiBase: string,
+  caseId: string | number,
+  token: string,
+): void {
+  const url = `${apiBase}/api/interactive-segment/${caseId}/release`;
+  const body = JSON.stringify({ session_token: token });
+  // sendBeacon so the release still goes out when this fires during teardown
+  // (class switch on the way to a page navigation), where fetch is cancelled.
+  try {
+    if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+      navigator.sendBeacon(url, new Blob([body], { type: "application/json" }));
+      return;
+    }
+  } catch {
+    // fall through to fetch
+  }
+  void fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  }).catch(() => {});
+}
+
 export interface InteractivePromptResult {
   /** Voxels actually modified this apply (adds + retractions). */
   changed: number;

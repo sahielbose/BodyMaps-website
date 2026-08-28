@@ -180,3 +180,47 @@ def test_process_exit_releases_every_lease():
 
     assert all(f.closed for f in FakeRemote.instances)
     assert predictor._states == {}
+
+
+def test_releasing_a_finished_session_frees_its_slot(monkeypatch):
+    """Annotating one structure after another must not exhaust the pool.
+
+    Each class holds its own session, and the server refuses newcomers rather
+    than evicting residents, so without an explicit release a run of classes
+    stalls at MAX_SESSIONS while every held session sits idle and finished.
+    """
+    monkeypatch.setattr(predictor, "MAX_SESSIONS", 2)
+    predictor.predict(CT, "1:full", point_ijk=[0, 0, 0], session_token="vertebra-1")
+    predictor.predict(CT, "1:full", point_ijk=[1, 1, 1], session_token="vertebra-2")
+    with pytest.raises(predictor.PromptCapacityError):
+        predictor.predict(CT, "1:full", point_ijk=[2, 2, 2], session_token="vertebra-3")
+
+    first = FakeRemote.instances[0]
+    assert predictor.release_session("vertebra-1") is True
+    assert first.closed
+    assert "vertebra-1" not in predictor._states
+
+    # The freed slot is immediately usable, and the untouched session survives.
+    predictor.predict(CT, "1:full", point_ijk=[2, 2, 2], session_token="vertebra-3")
+    assert predictor.session_is_active("vertebra-3")
+    assert predictor.session_is_active("vertebra-2")
+
+
+def test_releasing_an_unknown_token_is_not_an_error():
+    """The client releases fire-and-forget, so a token the server already
+    reaped (or never had) must report "nothing to do", not raise."""
+    assert predictor.release_session("never-existed") is False
+    assert predictor.release_session(None) is False
+    assert predictor.release_session("") is False
+
+
+def test_releasing_one_session_leaves_the_others_contexts_intact():
+    predictor.predict(CT, "1:full", point_ijk=[0, 0, 0], session_token="alice")
+    predictor.predict(CT, "1:full", point_ijk=[1, 1, 1], session_token="bob")
+    alice, bob = FakeRemote.instances
+
+    predictor.release_session("alice")
+
+    assert alice.closed
+    assert not bob.closed
+    assert predictor.session_is_active("bob")
