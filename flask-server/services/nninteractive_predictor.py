@@ -182,7 +182,16 @@ def get_capabilities() -> dict | None:
 
 def _new_remote_session():
     from nnInteractive.inference.remote.remote_session import nnInteractiveRemoteInferenceSession
-    session = nnInteractiveRemoteInferenceSession(server_url=SERVER_URL, api_key=API_KEY)
+    # The client lib's default read_timeout is 60 s, sized for GPU hosts. On
+    # a CPU/MPS host a full-res box or lasso prompt on a large organ runs
+    # 60-120 s of AutoZoom refinement, and a timeout mid-inference gets
+    # swallowed by the caller's fallback — the user silently receives the
+    # region-grow blob instead of the model's mask. Give predictions the
+    # same generous ceiling the volume upload already gets.
+    read_timeout = float(os.environ.get("NNINTERACTIVE_READ_TIMEOUT_S", "300"))
+    session = nnInteractiveRemoteInferenceSession(
+        server_url=SERVER_URL, api_key=API_KEY, read_timeout=read_timeout
+    )
     if not session.ping():
         raise RuntimeError(
             f"nninteractive-server not reachable at {SERVER_URL} — "

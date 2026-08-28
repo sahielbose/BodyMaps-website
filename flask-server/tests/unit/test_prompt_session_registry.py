@@ -23,7 +23,8 @@ class FakeRemote:
 
     instances: list["FakeRemote"] = []
 
-    def __init__(self, server_url=None, api_key=None):
+    def __init__(self, server_url=None, api_key=None, read_timeout=None):
+        self.read_timeout = read_timeout
         self.calls = []
         self.closed = False
         self.buffer = None
