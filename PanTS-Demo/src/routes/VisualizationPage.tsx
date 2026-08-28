@@ -1635,7 +1635,25 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		} else if (editMode === "smartfill" || promptToolArmed) {
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(null);
-			toggleCrosshairTool(false);
+			if (
+				activeToolbarTool === "boxSegment" ||
+				activeToolbarTool === "scribbleSegment" ||
+				activeToolbarTool === "lassoSegment"
+			) {
+				// Drag prompts draw their gesture at the DOM level, like
+				// growFromSeeds' scribbles. toggleCrosshairTool(false) would
+				// leave PanTool active on the primary button, and the shared
+				// left-drag then pans the camera in step with the gesture:
+				// the world point under the cursor never changes, so the box
+				// collapses to a zero-extent prompt at the start corner (and
+				// a scribble's world polyline smears). Nothing may own the
+				// primary button while one of these is armed.
+				releasePrimaryMouseTools();
+			} else {
+				// pointSegment and smartfill are click gestures; pan stays
+				// available for navigating between clicks.
+				toggleCrosshairTool(false);
+			}
 		} else if (activeMeasureTool) {
 			setActiveMaskEditTool(null);
 			setActiveMeasurementTool(activeMeasureTool);
