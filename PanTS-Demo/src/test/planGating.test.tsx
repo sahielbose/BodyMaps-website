@@ -76,8 +76,11 @@ const settled = () =>
     expect(screen.queryByText(/to run inference/)).not.toBeInTheDocument()
   );
 
+// Free plan only includes LesionSegmenter, so that's the picker's default
+// once the plan-aware effect settles (see UploadPage's modelTouchedRef
+// effect) - "None" is only the pre-auth placeholder.
 const openModelMenu = async (user: ReturnType<typeof userEvent.setup>) => {
-  await user.click(screen.getByRole("button", { name: /None \(view scan\)/ }));
+  await user.click(await screen.findByRole("button", { name: /LesionSegmenter/ }));
 };
 
 describe("model access", () => {
@@ -101,8 +104,9 @@ describe("model access", () => {
     await user.click(screen.getByText("ePAI"));
 
     expect(await screen.findByText("ePAI needs Pro")).toBeInTheDocument();
-    // The picker did not change to the model that was refused.
-    expect(screen.getByRole("button", { name: /None \(view scan\)/ })).toBeInTheDocument();
+    // The picker did not change to the model that was refused - still on its
+    // (also unlocked) default.
+    expect(screen.getByRole("button", { name: /LesionSegmenter/ })).toBeInTheDocument();
   });
 
   it("lets the free model through untouched", async () => {
@@ -285,7 +289,10 @@ describe("signed out", () => {
     const user = userEvent.setup();
     renderUpload();
     await screen.findByText(/to run inference\./);
-    await openModelMenu(user);
+    // Signed out: the plan-aware default effect never fires (nothing to gate
+    // against yet), so the picker is still on its pre-auth "None" - not
+    // openModelMenu, which assumes a signed-in default.
+    await user.click(screen.getByRole("button", { name: /None \(view scan\)/ }));
 
     expect(screen.queryByText("Donate")).not.toBeInTheDocument();
   });

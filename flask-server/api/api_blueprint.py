@@ -2142,6 +2142,7 @@ def download_segmentation_zip(id):
         return jsonify({"error": "Internal server error"}), 500
 
 import time
+import math
 
 inference_jobs = {}  # {session_id: {status, model, error, session_path, zip_path}}
 # Guards the read-modify-write in _set_inference_job: background segmentation
@@ -2161,6 +2162,57 @@ def _job_meta_path(session_id):
     # path_safety.py): session_id reaches the filesystem here, so sanitize it
     # at the construction site. Real ids are UUIDs, which pass through intact.
     return os.path.join(SESSIONS_DIR, secure_filename(session_id), "job.json")
+
+
+# Real, measured (model, file size, duration) samples, so the frontend's ETA
+# can eventually be data-driven instead of guessed constants. One JSON-lines
+# file, appended to under a lock; kept deliberately simple (no DB) since this
+# is a bootstrap toward "log now, learn later" - GET /api/inference-duration-
+# estimate below reads it back and reduces to a per-model/size-bucket average.
+_JOB_DURATIONS_PATH = os.path.join(SESSIONS_DIR, "job_durations.jsonl")
+_job_durations_lock = threading.Lock()
+# Trimmed on write so the file can't grow unbounded over the site's lifetime -
+# a few thousand samples is already far more than enough to average over per
+# model/bucket, and old samples are the least representative of current
+# hardware/model-version performance anyway.
+_JOB_DURATIONS_MAX_LINES = 5000
+
+
+def _record_job_duration(model, input_size_bytes, duration_seconds):
+    """Append one real (model, file size, duration) sample. Best-effort."""
+    try:
+        record = {
+            "model": model,
+            "input_size_bytes": input_size_bytes,
+            "duration_seconds": round(duration_seconds, 1),
+            "recorded_at": time.time(),
+        }
+        with _job_durations_lock:
+            lines = []
+            if os.path.exists(_JOB_DURATIONS_PATH):
+                with open(_JOB_DURATIONS_PATH) as f:
+                    lines = f.readlines()
+            lines.append(json.dumps(record) + "\n")
+            if len(lines) > _JOB_DURATIONS_MAX_LINES:
+                lines = lines[-_JOB_DURATIONS_MAX_LINES:]
+            tmp = _JOB_DURATIONS_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(lines)
+            os.replace(tmp, _JOB_DURATIONS_PATH)
+    except Exception as e:
+        print(f"[job duration] {model}: {e}")
+
+
+def _load_job_durations():
+    """Best-effort read of every recorded sample. Empty list on any failure."""
+    try:
+        if not os.path.exists(_JOB_DURATIONS_PATH):
+            return []
+        with open(_JOB_DURATIONS_PATH) as f:
+            return [json.loads(line) for line in f if line.strip()]
+    except Exception as e:
+        print(f"[job duration] read failed: {e}")
+        return []
 
 
 def _persist_inference_job(session_id, snapshot):
@@ -2380,11 +2432,21 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
         job = inference_jobs.get(session_id) or {}
         return (job.get("status") or "").lower()
 
+    # File size is the only real signal an ETA formula has to scale on (see
+    # _record_job_duration) - grabbed once here rather than re-stat'd later,
+    # since the input file may move/get cleaned up by the time the job ends.
+    try:
+        input_size_bytes = os.path.getsize(input_path)
+    except OSError:
+        input_size_bytes = None
+    run_started_at = [None]  # boxed so the closure below can set it
+
     def do_segmentation_and_zip():
         def _on_gpu_slot():
             # User may have cancelled while we sat in the queue.
             if _job_status() == "cancelled":
                 return False
+            run_started_at[0] = time.time()
             _set_inference_job(session_id, status="running")
             return True
 
@@ -2415,6 +2477,16 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
 
             _set_inference_job(session_id, status="completed", error=None,
                                zip_path=zip_path, output_mask_dir=output_mask_dir)
+            # Measured from GPU-slot grant, not from "queued" - queue wait
+            # time is a function of how many other users are running, not of
+            # this model/file, so it would poison an ETA formula that's
+            # trying to predict inference time specifically.
+            if run_started_at[0] is not None:
+                _record_job_duration(
+                    model=model_name,
+                    input_size_bytes=input_size_bytes,
+                    duration_seconds=time.time() - run_started_at[0],
+                )
             print(f"✅ Finished segmentation and zipping for session {session_id}")
         except Exception as e:
             # A killed subprocess surfaces here as CalledProcessError/RuntimeError;
@@ -2564,6 +2636,65 @@ def get_inference_status(session_id):
             except ValueError:
                 pass
     return jsonify(resp), 200
+
+
+@api_blueprint.route('/inference-duration-estimate', methods=['GET'])
+def get_inference_duration_estimate():
+    """Real-history ETA input: median duration for this model, narrowed to
+    similarly-sized files when there's enough data to do that meaningfully.
+
+    Query params: model (required), size_bytes (optional, int).
+
+    Bucketed by size DOUBLING (log2) rather than a fixed byte range - CT file
+    size spans orders of magnitude (a cropped single-organ scan vs. a
+    whole-body one), so a fixed-width bucket would either be meaninglessly
+    wide at the low end or split the high end across dozens of near-empty
+    buckets. Falls back from same-bucket -> whole-model -> nothing (client
+    then falls back to its own static estimate) as each level runs short of
+    samples, so an early-life site with little history still gets whatever
+    real signal it has instead of an all-or-nothing cliff.
+    """
+    model = request.args.get("model", "")
+    if not model:
+        return jsonify({"error": "model is required"}), 400
+    try:
+        size_bytes = int(request.args.get("size_bytes", "") or 0) or None
+    except ValueError:
+        size_bytes = None
+
+    MIN_SAMPLES = 3
+    samples = [
+        r for r in _load_job_durations()
+        if r.get("model") == model and isinstance(r.get("duration_seconds"), (int, float))
+    ]
+
+    def median(vals):
+        s = sorted(vals)
+        n = len(s)
+        mid = n // 2
+        return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+    bucket_samples = None
+    if size_bytes and samples:
+        target_bucket = math.log2(max(size_bytes, 1))
+        same_bucket = [
+            r for r in samples
+            if r.get("input_size_bytes")
+            and abs(math.log2(max(r["input_size_bytes"], 1)) - target_bucket) < 1
+        ]
+        if len(same_bucket) >= MIN_SAMPLES:
+            bucket_samples = same_bucket
+
+    chosen = bucket_samples if bucket_samples is not None else samples
+    if len(chosen) < MIN_SAMPLES:
+        return jsonify({"available": False, "sample_count": len(chosen)}), 200
+
+    return jsonify({
+        "available": True,
+        "median_seconds": round(median([r["duration_seconds"] for r in chosen]), 1),
+        "sample_count": len(chosen),
+        "size_matched": bucket_samples is not None,
+    }), 200
 
 
 @api_blueprint.route('/cancel-inference/<session_id>', methods=['POST'])

@@ -81,6 +81,13 @@
   margin-bottom: 24px;
   position: relative;
 }
+/* Once a file is selected, the box holds a file list instead of the empty-state
+   icon/text - the tall centered padding made sense for that icon, not for a
+   list of rows, so it collapses to match the content instead of leaving a big
+   gap above/below the file-chips list. */
+.dropzone:has(.file-chips) {
+  padding: 20px 24px;
+}
 .dropzone:hover {
   border-color: rgba(0,0,0,.25);
   background: rgba(0,0,0,.03);
@@ -88,6 +95,17 @@
 .dropzone.drag-over {
   border-color: rgba(0,0,0,.4);
   background: rgba(0,0,0,.06);
+}
+/* Every selected NIfTI file has finished its background upload - the whole
+   box goes green so "done" is visible without reading each chip's text. */
+.dropzone--all-done {
+  border-color: rgba(22, 163, 74, .35);
+  border-style: solid;
+  background: rgba(22, 163, 74, .045);
+}
+.dropzone--all-done:hover {
+  border-color: rgba(22, 163, 74, .5);
+  background: rgba(22, 163, 74, .07);
 }
 .dropzone-icon {
   width: 48px;
@@ -159,22 +177,26 @@
 }
 
 /* ── Selected-file cards (was a row of small pills; now matches the
-   icon+name+subtext row treatment used by Completed Uploads below) ── */
+   icon+name+subtext row treatment used by Completed Uploads below) ──
+   White against the dropzone's near-transparent background so the card
+   reads as a distinct object sitting in the box, not a same-gray blob
+   blending into it. */
 .file-chips {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-bottom: 20px;
+  width: 100%;
 }
 .file-chip {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px;
-  background: #f5f5f5;
-  border: 1px solid rgba(0,0,0,.08);
-  border-radius: 6px;
-  transition: border-color 0.15s, background 0.15s;
+  padding: 12px 14px;
+  background: #ffffff;
+  border: 1px solid rgba(0,0,0,.1);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
 }
 .file-chip-icon {
   width: 32px;
@@ -187,6 +209,7 @@
   align-items: center;
   justify-content: center;
   color: #111111;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 .file-chip-text {
   display: flex;
@@ -222,6 +245,51 @@
 .file-chip-remove:hover {
   background: rgba(239,68,68,.15);
   color: #ef4444;
+}
+
+/* ── File chip upload-status variants ── */
+.file-chip--uploading {
+  border-color: rgba(0, 45, 114, .18);
+}
+.file-chip--uploading .file-chip-icon {
+  background: rgba(0, 45, 114, .06);
+  border-color: rgba(0, 45, 114, .16);
+}
+.file-chip--done {
+  border-color: rgba(22, 163, 74, .25);
+  background: rgba(22, 163, 74, .04);
+}
+.file-chip--done .file-chip-icon {
+  background: rgba(22, 163, 74, .12);
+  border-color: rgba(22, 163, 74, .3);
+  color: #16a34a;
+}
+.file-chip--failed {
+  border-color: rgba(239, 68, 68, .25);
+  background: rgba(239, 68, 68, .04);
+}
+.file-chip--failed .file-chip-icon {
+  background: rgba(239, 68, 68, .1);
+  border-color: rgba(239, 68, 68, .28);
+  color: #ef4444;
+}
+.file-chip--failed .file-chip-sub {
+  color: #ef4444;
+}
+
+/* Small spinning ring shown in the icon slot while a file is uploading in
+   the background - the chip itself is the only upload-progress indicator
+   now, so it needs to read as "working" at a glance. */
+.file-chip-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 45, 114, .18);
+  border-top-color: #002d72;
+  animation: file-chip-spin 0.7s linear infinite;
+}
+@keyframes file-chip-spin {
+  to { transform: rotate(360deg); }
 }
 
 /* ── Pipeline row ── */
@@ -700,68 +768,6 @@
   color: #111111;
 }
 
-/* ── Progress bars ── */
-.progress-section {
-  margin-top: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.progress-item {
-  /* wrapper */
-}
-.progress-label {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-.progress-label-text {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #8f8f8f;
-}
-.progress-label-pct {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  font-weight: 600;
-  color: #111111;
-}
-.progress-track {
-  width: 100%;
-  height: 6px;
-  background: rgba(0,0,0,.04);
-  border-radius: 3px;
-  overflow: hidden;
-}
-.progress-fill {
-  height: 100%;
-  width: 0;
-  border-radius: 3px;
-  transition: width 0.4s cubic-bezier(.2,.8,.2,1);
-}
-.progress-fill-upload {
-  background: linear-gradient(90deg, #8f8f8f, #002d72);
-}
-.progress-fill-inference {
-  background: linear-gradient(90deg, #6a6a6a, #002d72);
-}
-
-/* Indeterminate variant: inference has no real percent-complete signal (nnU-Net
-   doesn't report progress mid-run), so a sweeping segment communicates "still
-   working" honestly instead of faking a percentage. */
-.progress-fill--indeterminate {
-  width: 40% !important;
-  background: linear-gradient(90deg, #6a6a6a, #002d72);
-  animation: progress-indeterminate-sweep 1.4s ease-in-out infinite;
-}
-@keyframes progress-indeterminate-sweep {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(250%); }
-}
-
 /* ── Result actions ── */
 .result-section {
   margin-top: 20px;
@@ -921,6 +927,18 @@
 .file-chip--active {
   border-color: rgba(0, 45, 114, .3);
   background: rgba(0, 45, 114, .06);
+}
+
+/* Click-to-rename scan name (Completed Uploads) - underline on hover is the
+   only affordance that the text itself is clickable, no separate pencil icon. */
+.upload-rename-trigger {
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.15s;
+}
+.upload-rename-trigger:hover {
+  text-decoration-color: rgba(0, 0, 0, 0.3);
 }
 
 /* ── Pending CT preview panel ── */

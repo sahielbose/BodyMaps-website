@@ -31,6 +31,16 @@ const makeFile = (name: string) =>
 /** Ordered log of the upload-relevant requests, tagged with their session. */
 let log: { kind: "chunk" | "finalize" | "infer"; sid: string }[] = [];
 
+// Uploads now start the moment a file is picked, not on Run - so with a fixed,
+// short per-chunk delay both files can easily finish uploading before the test
+// even gets to clicking Run, leaving nothing in flight for that click to race
+// against. Gating the SECOND session's chunks behind this (resolved only once
+// the test has clicked Run) makes "scan 1 dispatches while scan 2 is still
+// uploading" a guaranteed scenario instead of a coin flip against real timers.
+let secondSessionGate: Promise<void> | null = null;
+let releaseSecondSession: (() => void) | null = null;
+let firstSid: string | null = null;
+
 const json = (body: unknown) => ({
   ok: true,
   status: 200,
@@ -47,6 +57,11 @@ const sessionOf = (body: unknown): string => {
 
 beforeEach(() => {
   log = [];
+  firstSid = null;
+  releaseSecondSession = null;
+  secondSessionGate = new Promise((res) => {
+    releaseSecondSession = res;
+  });
   global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     const u = String(url);
     const sid = sessionOf(init?.body);
@@ -55,11 +70,12 @@ beforeEach(() => {
     if (u.includes("/api/auth/oauth/providers")) return json({ google: true });
 
     if (u.includes("/api/upload-inference-chunk")) {
+      // The first session to reach a chunk claims that slot; every other
+      // session's chunks wait on the gate below, holding it "in flight" until
+      // the test explicitly releases it (after clicking Run).
+      if (firstSid === null) firstSid = sid;
+      if (sid !== firstSid) await secondSessionGate;
       log.push({ kind: "chunk", sid });
-      // A real chunk takes time on the wire. Yielding here means a concurrent
-      // scheduler would interleave the two files' chunks and fail the test,
-      // rather than passing by accident on instant resolution.
-      await new Promise((r) => setTimeout(r, 5));
       return json({ ok: true });
     }
     if (u.includes("/api/finalize-upload")) {
@@ -97,10 +113,23 @@ const runTwoFiles = async () => {
   const input = container.querySelector<HTMLInputElement>('input[accept=".nii,.gz"]')!;
   await user.upload(input, [makeFile("scan-a.nii.gz"), makeFile("scan-b.nii.gz")]);
 
-  // Default model is "None" (view only, nothing uploads) - pick a real one.
-  await user.click(screen.getByRole("button", { name: /None \(view scan\)/ }));
-  await user.click(screen.getByText("ePAI"));
+  // The first file's upload starts immediately on selection (before a model is
+  // even picked) - wait for it to fully land so scan A is the one holding
+  // firstSid, then let the model-picking clicks happen. Scan B's chunks stay
+  // parked on the gate this whole time, so it's still uploading when Run is
+  // clicked below - the scenario the second test needs.
+  await waitFor(() => expect(log.some((e) => e.kind === "finalize")).toBe(true));
+
+  // Default model becomes "ePAI" once the account's plan is known to allow
+  // it (this test's USER is "pro") - by now auth has long since settled and
+  // an upload round-trip has happened, so no dropdown click is needed before
+  // Run.
   await user.click(screen.getByRole("button", { name: "Run" }));
+
+  // Only now let scan B's upload proceed - mirrors it still being on the wire
+  // at the moment the user clicks Run, which is the realistic case now that
+  // uploads start at selection time instead of waiting for Run.
+  releaseSecondSession?.();
 
   await waitFor(
     () => expect(log.filter((e) => e.kind === "infer")).toHaveLength(2),

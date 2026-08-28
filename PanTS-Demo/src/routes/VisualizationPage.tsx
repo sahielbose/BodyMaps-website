@@ -30,7 +30,6 @@ import {
     IconRotateClockwise,
     IconRuler2,
     IconScanEye,
-    IconSettings,
     IconShare,
     IconSquareDashed,
     IconTrash,
@@ -811,10 +810,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const [dlPct, setDlPct] = useState<number | null>(null);
 	const [dlDone, setDlDone] = useState(false);
 	const dlTotalsRef = useRef<Record<string, number>>({});
-	// The tools live in a top toolbar (PYCAD-style) that sits above the viewports in
-	// normal flow; the gear button shows/hides it. Hidden by default — a single
-	// floating gear reveals it — so the viewer opens clean/full-bleed.
-	const [showToolbar, setShowToolbar] = useState(false);
+	// The tools live in a top toolbar (PYCAD-style) that sits above the viewports
+	// in normal flow, always visible (no show/hide toggle - it was found to be
+	// more trouble than it was worth: the reveal control's placement kept
+	// clashing with the axial pane's own label, and it wasn't worth carrying).
 	const topbarRef = useRef<HTMLDivElement>(null);
 	// Keep --vp-topbar-h in sync with the real toolbar height (it wraps to
 	// multiple rows on narrow screens) so anything docked below it — the
@@ -823,16 +822,13 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	useEffect(() => {
 		const el = topbarRef.current;
 		const root = document.documentElement;
-		if (!showToolbar || !el) {
-			root.style.setProperty("--vp-topbar-h", "0px");
-			return;
-		}
+		if (!el) return;
 		const sync = () => root.style.setProperty("--vp-topbar-h", `${el.getBoundingClientRect().height}px`);
 		sync();
 		const ro = new ResizeObserver(sync);
 		ro.observe(el);
 		return () => ro.disconnect();
-	}, [showToolbar]);
+	}, []);
 	const stageRef = useRef<HTMLDivElement>(null);
 	const [showOrganDetails, setShowOrganDetails] = useState(false);
 	const [loading, setLoading] = useState(true);
@@ -3818,26 +3814,16 @@ const aiAvailableOrgans = useMemo(() => {
 			{quizPractice && <QuizPracticeHeader controller={quizPractice} />}
 		
 			{/* ---- Top toolbar (PYCAD-style). Lives in normal flow, so it sits ABOVE the
-			     viewports and never overlays them. Shown/hidden by the gear button. ---- */}
-			{showToolbar && (
-				<div
-					className="vp-topbar"
-					ref={topbarRef}
-				>
-					{/* Gear (hides the bar) + home, in-flow so there's no dead corner space */}
-					<button
-						className="vp-iconbtn"
-						title="Hide toolbar"
-						aria-label="Toggle toolbar"
-						onClick={() => setShowToolbar(false)}
-					>
-						<IconSettings size={20} color="white" />
-					</button>
-					<button
-						className="vp-iconbtn"
-						title="Back to dashboard"
-						aria-label="Back to dashboard"
-						onClick={() => navBack()}
+			     viewports and never overlays them. Always visible - no show/hide toggle. ---- */}
+			<div
+				className="vp-topbar"
+				ref={topbarRef}
+			>
+				<button
+					className="vp-iconbtn"
+					title="Back to dashboard"
+					aria-label="Back to dashboard"
+					onClick={() => navBack()}
 					>
 						<IconHome size={20} color="white" />
 					</button>
@@ -3878,17 +3864,6 @@ const aiAvailableOrgans = useMemo(() => {
 							</span>
 						)}
 					</div>
-					{!liveRoom && params.caseId && (
-						<button
-							className="vp-tb-mini vp-live-room-button"
-							onClick={() => setShowLiveRoomCreate(true)}
-							aria-label="Start Live Room"
-						>
-							<IconUsersGroup size={17} />
-							<span>Live Room</span>
-						</button>
-					)}
-
 					<span className="vp-tb-divider" />
 
 					{/* Layout ▾ — view mode (MPR/Axial/Sag/Cor/3D) and, while in MPR, the
@@ -4613,21 +4588,19 @@ const aiAvailableOrgans = useMemo(() => {
 													</span>
 												</button>
 											)}
+											{!liveRoom && params.caseId && (
+												<button
+													type="button"
+													className="vp-tool"
+													onClick={() => setShowLiveRoomCreate(true)}
+													aria-label="Start Live Room"
+												>
+													<IconUsersGroup size={17} />
+													<span className="vp-tool__tip">Live Room</span>
+												</button>
+											)}
 										</div>
 				</div>
-			)}
-
-			{/* When the toolbar is hidden, a single floating gear reveals it. */}
-			{!showToolbar && (
-				<button
-					className="vp-floating-gear vp-iconbtn"
-					title="Show toolbar"
-					aria-label="Toggle toolbar"
-					onClick={() => setShowToolbar(true)}
-				>
-					<IconSettings size={20} color="white" />
-				</button>
-			)}
 
 			{/* Body row: left dock (Organs) · stage · right docks (stats/measurements/
 			     edit/AI). Docked panels sit IN FLOW beside the viewports — they push the
@@ -5026,7 +4999,6 @@ const aiAvailableOrgans = useMemo(() => {
 						if (crosshairMm) soloChallenge.setMarker([...crosshairMm]);
 					}}
 					onActivateMeasure={() => {
-						setShowToolbar(true);
 						setCrosshairToolActive(false);
 						setActiveMeasureTool(LENGTH_TOOL);
 					}}

@@ -483,14 +483,6 @@
   opacity: 0.5;
 }
 
-/* Floating gear shown only when the toolbar is hidden. */
-.vp-floating-gear {
-  position: fixed;
-  top: 12px;
-  left: 14px;
-  z-index: 55;
-}
-
 /* Shaded volume-rendering target: Cornerstone owns the canvas inside. */
 .vp-vol3d {
   width: 100%;

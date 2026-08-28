@@ -20,6 +20,10 @@ const LESION_OPTIONS: {
   { id: "colon", label: "Colon lesion", experimental: true },
 ];
 
+// SuPreM, MedFormer, and R-Super are deliberately not offered here - the
+// models themselves are untouched (backend dispatch, existing runs of them
+// in Completed Uploads, etc. all still work), this just hides them from the
+// picker.
 const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "None",
@@ -29,22 +33,7 @@ const MODEL_OPTIONS: { id: string; label: string; desc: string }[] = [
   {
     id: "ePAI",
     label: "ePAI",
-    desc: "For detailed pancreas and tumor analysis",
-  },
-  {
-    id: "SuPreM",
-    label: "SuPreM",
-    desc: "For whole-body scans from lungs to legs",
-  },
-  {
-    id: "MedFormer",
-    label: "MedFormer",
-    desc: "For reliable abdominal segmentation",
-  },
-  {
-    id: "R-Super",
-    label: "R-Super",
-    desc: "For the highest tumor detection accuracy",
+    desc: "Full abdominal organ segmentation, with detailed pancreas and tumor analysis",
   },
   {
     id: "Atlas-Net",
@@ -138,6 +127,51 @@ const formatEta = (seconds: number): string => {
   return `~${Math.round(seconds / 360) / 10} h`;
 };
 
+// Best-effort ETA model: floor + a per-model rate applied to the file size.
+// There's no real per-size history yet (see /api/inference-duration-estimate,
+// which this page prefers once it has enough samples) - this is a stand-in
+// built from the one real measurement on hand (a ~700MB whole-body ePAI scan
+// end-to-end in ~8 min post CUDA-cache-fix) plus the pipeline's own profiled
+// fixed cost (read+preprocess ~ tens of seconds independent of size). A
+// straight line through one real point is still a guess for every other
+// point on it - it's meant to beat "same number for every file" until real
+// history replaces it, not to be precise.
+type EtaProfile = { floorSeconds: number; secondsPerMb: number };
+const ETA_PROFILES: Record<string, EtaProfile> = {
+  // Anchor: ~700MB -> ~480s end-to-end, minus ~60s fixed cost -> ~0.6s/MB.
+  ePAI: { floorSeconds: 60, secondsPerMb: 0.6 },
+  // No measured anchor for these yet - same shape (fixed cost + linear-ish
+  // scaling), scaled down from ePAI's rate as a placeholder, not a measurement.
+  LesionSegmenter: { floorSeconds: 45, secondsPerMb: 0.35 },
+};
+const DEFAULT_ETA_PROFILE: EtaProfile = { floorSeconds: 60, secondsPerMb: 0.45 };
+
+const estimateTypicalSeconds = (model: string, fileSizeBytes?: number): number => {
+  const profile = ETA_PROFILES[model] ?? DEFAULT_ETA_PROFILE;
+  const mb = (fileSizeBytes ?? 0) / (1024 * 1024);
+  return profile.floorSeconds + profile.secondsPerMb * mb;
+};
+
+// "About 3 min left" from how long the run has been going vs. how long a run
+// like this one usually takes. `typicalSecondsOverride` lets the caller swap
+// in a real server-measured median (see fetchDurationEstimate) once one is
+// available, instead of the size-formula fallback above. Once elapsed passes
+// the estimate, there's nothing honest left to say about a remaining
+// duration - "Finishing up…" admits the estimate ran out instead of showing
+// a fake countdown stuck at "<1 min" or, worse, going negative.
+const estimateRemaining = (
+  model: string,
+  startedAt: number,
+  fileSizeBytes?: number,
+  typicalSecondsOverride?: number,
+): string => {
+  const typical = typicalSecondsOverride ?? estimateTypicalSeconds(model, fileSizeBytes);
+  const elapsed = (Date.now() - startedAt) / 1000;
+  const remaining = typical - elapsed;
+  if (remaining < 30) return "Finishing up…";
+  return `About ${formatEta(remaining)} left`;
+};
+
 // A selection is either a single NIfTI file or a picked DICOM folder (the series'
 // raw .dcm slices). Both are previewable individually and runnable through inference.
 type SelectedItem =
@@ -209,13 +243,32 @@ const UploadPage: React.FC = () => {
   const userStartedRef = useRef<Set<string>>(new Set());
 
   const [selectedItems, setSelectedItems] = useState<SelectedItem[]>([]);
+  // Per-item background-upload progress while a file still sits in the
+  // dropzone (pre-Run) - drives the file chip's own uploading/done/failed
+  // styling instead of the page-wide "Uploading…" status line, which used to
+  // show for every background pre-upload even though nothing else on the
+  // page needed to react to it.
+  const [itemUploadStatus, setItemUploadStatus] = useState<
+    Record<string, "uploading" | "done" | "failed">
+  >({});
+  // Server-measured median duration for a session's (model, file size), once
+  // fetched - see fetchDurationEstimate. Keyed by session id so each in-flight
+  // run's card can prefer a real number over the size-formula guess as soon
+  // as one's available; absent (not just undefined) means "haven't checked
+  // yet or the server had too little history", both of which fall back to
+  // estimateTypicalSeconds silently.
+  const [durationEstimates, setDurationEstimates] = useState<
+    Record<string, number>
+  >({});
   // Which selected item's inline preview is open (null = none). One at a time.
   const [previewItemId, setPreviewItemId] = useState<string | null>(null);
   const [message, setMessage] = useState<string>("");
   const [sessionId, setSessionId] = useState<string>("");
-  const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [inferenceCompleted, setInferenceCompleted] = useState<boolean>(false);
+  // Starts "None" until the account's plan is known (auth resolves async, so
+  // there's nothing to gate against yet) - see the effect below that picks
+  // the real default once it is known.
   const [selectedModel, setSelectedModel] = useState<
     | "None"
     | "ePAI"
@@ -227,6 +280,11 @@ const UploadPage: React.FC = () => {
     | "LesionSegmenter"
     | ""
   >("None");
+  // Whether the model picker still holds its untouched starting value - once
+  // the user opens the dropdown and picks anything (including re-picking the
+  // same default), this goes false and the plan-aware default effect below
+  // stops touching selectedModel, so it can never clobber a real choice.
+  const modelTouchedRef = useRef(false);
   const [modelDropOpen, setModelDropOpen] = useState(false);
   // LesionSegmenter computes liver/pancreatic/kidney/colon lesions in one pass;
   // this selects which lesion to feature. Only pancreatic is GT-validated; the
@@ -270,6 +328,40 @@ const UploadPage: React.FC = () => {
   const [queuePositions, setQueuePositions] = useState<Record<string, number>>(
     {},
   );
+  // When each session's phase first became "running" - the ETA estimate needs
+  // this instead of u.timestamp (scan creation) because queue wait time isn't
+  // inference time and shouldn't count against the estimate. A plain ref, not
+  // state: it's read once a second by the ticking clock below rather than
+  // needing its own re-render.
+  const runningStartedAtRef = useRef<Map<string, number>>(new Map());
+  // File size per in-flight session, for the ETA formula's size scaling and
+  // for asking the server for a real historical estimate (see
+  // fetchDurationEstimate) - a plain ref since it's write-once at run start
+  // and only ever read by the ETA display, no re-render needed on its own.
+  const sessionFileSizeRef = useRef<Map<string, number>>(new Map());
+  // Re-renders ProcessingCard once a second while anything is running, purely
+  // so the "About N min left" text advances - nothing else here depends on it.
+  const [, setEtaTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setEtaTick((t) => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Picks the model picker's real default once the account's plan is known:
+  // ePAI for a plan that actually includes it, LesionSegmenter (the one real
+  // model every signed-in account has, including Free) otherwise. Runs once
+  // auth settles and never again after - modelTouchedRef guards against ever
+  // overwriting a choice the user already made, and plan/isAuthenticated
+  // settling a second time (e.g. a slow /me response revising itself) must
+  // not silently swap the model out from under a user who's already looking
+  // at the page. Signed-out visitors are left on "None": defaulting them
+  // into a model would just immediately bounce them into the sign-in prompt.
+  useEffect(() => {
+    if (modelTouchedRef.current || !isAuthenticated) return;
+    modelTouchedRef.current = true;
+    setSelectedModel(isModelLocked(plan, "ePAI") ? "LesionSegmenter" : "ePAI");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, plan]);
   // Drives the "safe to close this tab" line. `active` = bytes still going up
   // (the tab is needed); `eta` = seconds until that stops, or null while
   // throughput is still being measured.
@@ -314,6 +406,12 @@ const UploadPage: React.FC = () => {
     const filteredFiles = Array.from(e.target.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
     );
+    // Reset so picking the SAME file again later still fires a change event.
+    // The native <input> tracks its value by path, not by content - without
+    // this, re-selecting a file you already ran once (e.g. after Run clears
+    // selectedItems back to empty) is a silent no-op: no change event fires,
+    // so nothing here even runs and the picker just quietly does nothing.
+    e.target.value = "";
     if (filteredFiles.length === 0) {
       alert("Please select .nii or .nii.gz files only");
       return;
@@ -368,6 +466,11 @@ const UploadPage: React.FC = () => {
     }
     setSelectedItems((prev) => prev.filter((item) => item.id !== id));
     setPreviewItemId((prev) => (prev === id ? null : prev));
+    setItemUploadStatus((prev) => {
+      if (!(id in prev)) return prev;
+      const { [id]: _dropped, ...rest } = prev;
+      return rest;
+    });
   };
 
   // Pick a DICOM folder to RUN INFERENCE on (distinct from the view-only opener):
@@ -407,6 +510,39 @@ const UploadPage: React.FC = () => {
   const stopAllPolling = () => {
     pollTimersRef.current.forEach((timer) => clearInterval(timer));
     pollTimersRef.current.clear();
+  };
+
+  // Ask the server for a real median duration for this model/file-size, once
+  // a run starts - see /api/inference-duration-estimate. Best-effort: on any
+  // failure (network, server has no history yet) durationEstimates simply
+  // stays without this sid, and estimateRemaining falls back to the
+  // size-formula guess silently. Fire-and-forget by design - this is a nice-
+  // to-have upgrade to the ETA display, not something a run should ever wait
+  // on or fail over.
+  const fetchDurationEstimate = (sid: string, model: string, fileSizeBytes?: number) => {
+    const params = new URLSearchParams({ model });
+    if (fileSizeBytes) params.set("size_bytes", String(fileSizeBytes));
+    fetch(`${API_BASE}/api/inference-duration-estimate?${params}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.available && typeof data.median_seconds === "number") {
+          setDurationEstimates((prev) => ({ ...prev, [sid]: data.median_seconds }));
+        }
+      })
+      .catch(() => {}); // silent - the formula fallback covers this
+  };
+
+  // A run has left the "running" state for good (finished, failed, or
+  // cancelled) - drop everything the ETA display was tracking for it, so a
+  // future session id can't inherit stale timing/size/estimate data.
+  const clearEtaTracking = (sid: string) => {
+    runningStartedAtRef.current.delete(sid);
+    sessionFileSizeRef.current.delete(sid);
+    setDurationEstimates((prev) => {
+      if (!(sid in prev)) return prev;
+      const { [sid]: _dropped, ...rest } = prev;
+      return rest;
+    });
   };
 
   const finishSession = (sid: string, model: string) => {
@@ -453,6 +589,7 @@ const UploadPage: React.FC = () => {
             stopPolling(sid);
             setPhase(sid);
             setQueuePosition(sid);
+            clearEtaTracking(sid);
             setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
             setMessage(
               "Session no longer exists on the server - marked as Failed.",
@@ -467,11 +604,13 @@ const UploadPage: React.FC = () => {
 
         if (status === "completed") {
           setQueuePosition(sid);
+          clearEtaTracking(sid);
           finishSession(sid, model);
         } else if (status === "failed") {
           stopPolling(sid);
           setPhase(sid);
           setQueuePosition(sid);
+          clearEtaTracking(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
           setMessage(`Inference failed${data.error ? `: ${data.error}` : ""}`);
         } else if (status === "cancelled") {
@@ -479,8 +618,13 @@ const UploadPage: React.FC = () => {
           stopPolling(sid);
           setPhase(sid);
           setQueuePosition(sid);
+          clearEtaTracking(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Cancelled"));
         } else if (status === "queued" || status === "running") {
+          if (status === "running" && !runningStartedAtRef.current.has(sid)) {
+            runningStartedAtRef.current.set(sid, Date.now());
+            fetchDurationEstimate(sid, model, sessionFileSizeRef.current.get(sid));
+          }
           setPhase(sid, status);
           setQueuePosition(
             sid,
@@ -506,6 +650,7 @@ const UploadPage: React.FC = () => {
     stopPolling(sid);
     setPhase(sid);
     setQueuePosition(sid);
+    clearEtaTracking(sid);
 
     const controller = uploadAbortRef.current.get(sid);
     if (controller) controller.abort();
@@ -761,11 +906,10 @@ const UploadPage: React.FC = () => {
   // Uploads a single NIfTI file the moment it's selected, before Run is
   // clicked and before a model is even chosen - just the bytes + finalize,
   // no dispatchInference (there's no model yet to dispatch with). Reuses
-  // isUploading/uploadProgress/message, the SAME state the foreground runUpload
-  // path drives: only one upload is ever active at a time (both routes go
-  // through uploadChainRef), so there is exactly one "Upload Progress" bar
-  // for whichever file is currently on the wire, whether or not Run has been
-  // pressed yet. Returns the uploaded filename, or null on failure/abort.
+  // isUploading/message, the SAME state the foreground runUpload path
+  // drives: only one upload is ever active at a time (both routes go
+  // through uploadChainRef). Returns the uploaded filename, or null on
+  // failure/abort.
   const preUploadOnly = async (
     sid: string,
     file: File,
@@ -778,9 +922,6 @@ const UploadPage: React.FC = () => {
     uploadResumableRef.current = false;
     foregroundUploadSidRef.current = sid;
     setIsUploading(true);
-    setUploadProgress(0);
-    setMessage(`Uploading ${file.name}...`);
-    let completedCount = 0;
     try {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
       const CONCURRENCY = 6;
@@ -805,13 +946,11 @@ const UploadPage: React.FC = () => {
           );
         const data = await parseApiResponse(res);
         if (!res.ok) throw new Error(data.error || "Chunk upload failed");
-        completedCount++;
         bytesSentRef.current += chunk.size;
         uploadRemainingRef.current.set(
           sid,
           Math.max(0, (uploadRemainingRef.current.get(sid) ?? 0) - chunk.size),
         );
-        setUploadProgress(Math.round((completedCount / totalChunks) * 100));
       };
       const worker = async () => {
         while (true) {
@@ -854,7 +993,6 @@ const UploadPage: React.FC = () => {
       if (foregroundUploadSidRef.current === sid) {
         foregroundUploadSidRef.current = null;
         setIsUploading(false);
-        setMessage("");
       }
       uploadRemainingRef.current.delete(sid);
       if (uploadAbortRef.current.get(sid) === controller) {
@@ -875,29 +1013,38 @@ const UploadPage: React.FC = () => {
       resolveDone = res;
     });
     itemUploadRef.current.set(item.id, { sid, uploadDone });
+    setItemUploadStatus((prev) => ({ ...prev, [item.id]: "uploading" }));
     const file = item.file;
     enqueueUpload(async () => {
-      const name = await preUploadOnly(sid, file);
-      if (!name) {
-        // Failed (or aborted): forget this attempt so the selection/model
-        // effect can start a fresh one instead of the idempotence check
-        // pinning the item to a dead upload forever. Guarded so a newer
-        // attempt for the same item is never deleted by an older failure.
-        const cur = itemUploadRef.current.get(item.id);
-        if (cur && cur.sid === sid) itemUploadRef.current.delete(item.id);
+      const uploadedName = await preUploadOnly(sid, file);
+      // Only the still-registered attempt may report the chip's status or
+      // clean up - after an abort, or once a newer attempt for the same item
+      // superseded this one, the chip belongs to that attempt, not to this
+      // stale outcome.
+      const cur = itemUploadRef.current.get(item.id);
+      if (cur && cur.sid === sid) {
+        setItemUploadStatus((prev) => ({
+          ...prev,
+          [item.id]: uploadedName ? "done" : "failed",
+        }));
+        // Failed: forget the attempt so the selection/model effect can start
+        // a fresh one instead of the idempotence check pinning the item to a
+        // dead upload forever.
+        if (!uploadedName) itemUploadRef.current.delete(item.id);
       }
-      resolveDone(name);
+      resolveDone(uploadedName);
     });
   };
 
   // Start uploading every selected NIfTI file as soon as there's a model to
-  // run it with, instead of waiting for Run - re-checked whenever a file is
-  // added or the model changes, so picking the file first then the model (or
-  // the other way around) both start the transfer at the earliest point
-  // either is known. "None" (view-only) is excluded on purpose: that mode's
-  // whole promise is the file never leaves the browser. preStartUpload is
-  // idempotent per item id, so this can safely re-run on every render where
-  // any dependency changed.
+  // run it with and a signed-in account to run it under, instead of waiting
+  // for Run - re-checked whenever a file is added, the model changes, or the
+  // user signs in, so whichever of those lands last starts the transfer at
+  // the earliest point all are known, and dispatchInference already has the
+  // bytes waiting when Run is clicked. "None" (view-only) is excluded on
+  // purpose: that mode's whole promise is the file never leaves the browser.
+  // preStartUpload is idempotent per item id, so this can safely re-run on
+  // every render where any dependency changed.
   //
   // Mirrors handleRunEpaiInference's own plan-limit check: a selection that
   // Run would refuse outright must not upload anything first - sending scan
@@ -925,13 +1072,16 @@ const UploadPage: React.FC = () => {
   // Retroactive half of the same gate: if the model returns to "None" (whose
   // promise is "files never leave your browser") or the user signs out, any
   // pre-upload already in flight is aborted and forgotten - switching the
-  // gate off must stop bytes that are mid-transfer, not just future ones.
+  // gate off must stop bytes that are mid-transfer, not just future ones. The
+  // chips' upload badges describe those pre-uploads, so they reset with them:
+  // aborted means back to "not sent", not a spinner that never resolves.
   useEffect(() => {
     if (selectedModel !== "None" && isAuthenticated) return;
     itemUploadRef.current.forEach((pre) => {
       uploadAbortRef.current.get(pre.sid)?.abort();
     });
     itemUploadRef.current.clear();
+    setItemUploadStatus({});
   }, [selectedModel, isAuthenticated]);
 
   // Uploads the file described by `p`, finalizes, then starts inference.
@@ -973,8 +1123,6 @@ const UploadPage: React.FC = () => {
       if (foreground) {
         foregroundUploadSidRef.current = sid;
         setIsUploading(true);
-        setUploadProgress(Math.round((startChunk / totalChunks) * 100));
-        setMessage(`Uploading ${filename}...`);
       }
 
       // Chunks upload with CONCURRENCY in flight at once instead of one at a time --
@@ -1013,7 +1161,6 @@ const UploadPage: React.FC = () => {
       // holds), not p.nextChunk (what this tab last wrote to IndexedDB) - the
       // two differ whenever the staging area was swept or lost.
       let nextIndexToStart = startChunk;
-      let completedCount = startChunk;
       const completedIndices = new Set<number>();
       // The resume cursor must only ever advance over a CONTIGUOUS run of completed
       // chunks -- with parallel uploads, chunk 20 can finish before chunk 15, and
@@ -1062,7 +1209,6 @@ const UploadPage: React.FC = () => {
         const data = await parseApiResponse(res);
         if (!res.ok) throw new Error(data.error || "Chunk upload failed");
 
-        completedCount++;
         completedIndices.add(i);
         bytesSentRef.current += chunk.size;
         uploadRemainingRef.current.set(
@@ -1070,8 +1216,6 @@ const UploadPage: React.FC = () => {
           Math.max(0, (uploadRemainingRef.current.get(sid) ?? 0) - chunk.size),
         );
         await advanceWatermark();
-        if (foreground)
-          setUploadProgress(Math.round((completedCount / totalChunks) * 100));
       };
 
       const worker = async () => {
@@ -1117,7 +1261,6 @@ const UploadPage: React.FC = () => {
       await setPendingUploaded(sid, uploadedName);
       if (foreground) {
         foregroundUploadSidRef.current = null;
-        setUploadProgress(100);
         setIsUploading(false);
       }
 
@@ -1164,8 +1307,6 @@ const UploadPage: React.FC = () => {
     setPhase(sid, "uploading");
     try {
       setIsUploading(true);
-      setUploadProgress(0);
-      setMessage(`Uploading DICOM series (${files.length} slices)...`);
 
       for (let i = 0; i < files.length; i++) {
         const formData = new FormData();
@@ -1190,7 +1331,6 @@ const UploadPage: React.FC = () => {
           sid,
           Math.max(0, (uploadRemainingRef.current.get(sid) ?? 0) - files[i].size),
         );
-        setUploadProgress(Math.round(((i + 1) / files.length) * 100));
       }
 
       setMessage("Converting DICOM series to NIfTI...");
@@ -1205,7 +1345,6 @@ const UploadPage: React.FC = () => {
       const uploadedName = finalizeData.uploaded_filename || "ct.nii.gz";
 
       foregroundUploadSidRef.current = null;
-      setUploadProgress(100);
       setIsUploading(false);
 
       await dispatchInference(sid, model, uploadedName, true);
@@ -1248,6 +1387,11 @@ const UploadPage: React.FC = () => {
     // default (model + date); the user can rename it later.
     const sourceName = (item.kind === "dicom" ? item.label : item.file.name) || undefined;
     const label = friendlyScanName(model, ts);
+    const fileSizeBytes =
+      item.kind === "dicom"
+        ? item.files.reduce((sum, f) => sum + f.size, 0)
+        : item.file.size;
+    sessionFileSizeRef.current.set(sid, fileSizeBytes);
 
     // Started by the user in this visit - allowed to auto-open the viewer.
     userStartedRef.current.add(sid);
@@ -1269,6 +1413,11 @@ const UploadPage: React.FC = () => {
 
     if (pre) {
       itemUploadRef.current.delete(item.id);
+      setItemUploadStatus((prevStatus) => {
+        if (!(item.id in prevStatus)) return prevStatus;
+        const { [item.id]: _dropped, ...rest } = prevStatus;
+        return rest;
+      });
       setPhase(sid, "uploading"); // harmless if the background upload already finished
       (async () => {
         const uploadedName = await pre.uploadDone;
@@ -1517,6 +1666,14 @@ const UploadPage: React.FC = () => {
 
   /* ── Render ── */
   const previewItem = selectedItems.find((i) => i.id === previewItemId) ?? null;
+  // Whole-box "done" state: every selected NIfTI has finished uploading, and
+  // there's at least one NIfTI item (a DICOM-only or empty selection has
+  // nothing to have finished, so it stays neutral rather than reading as a
+  // false "done").
+  const niftiItems = selectedItems.filter((i) => i.kind === "nifti");
+  const allUploadsDone =
+    niftiItems.length > 0 &&
+    niftiItems.every((i) => itemUploadStatus[i.id] === "done");
 
   return (
     <div className="upload-page-wrapper">
@@ -1532,7 +1689,7 @@ const UploadPage: React.FC = () => {
         <div className="upload-card">
           {/* ── Drop zone ── */}
           <div
-            className={`dropzone${isDragOver ? " drag-over" : ""}`}
+            className={`dropzone${isDragOver ? " drag-over" : ""}${allUploadsDone ? " dropzone--all-done" : ""}`}
             onClick={() => fileInputRef.current?.click()}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
@@ -1567,20 +1724,94 @@ const UploadPage: React.FC = () => {
               style={{ display: "none" }}
               onChange={handleDicomInferenceSelect}
             />
-            <svg
-              className="dropzone-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
-            <div className="dropzone-text">Click or drag to upload</div>
+            {selectedItems.length === 0 ? (
+              <>
+                <svg
+                  className="dropzone-icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+                <div className="dropzone-text">Click or drag to upload</div>
+              </>
+            ) : (
+              // ── Selected items: NIfTI files + DICOM series, each individually
+              // previewable ── lives inside the dropzone itself now, so the file's
+              // name/type/size sit in the same box as the picker instead of as a
+              // separate row underneath it. Each chip reflects its own background
+              // upload status: DICOM never pre-uploads (it starts on Run), so it
+              // has no "uploading" state of its own here.
+              <div
+                className="file-chips"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {selectedItems.map((item) => {
+                  const name =
+                    item.kind === "dicom" ? item.label : item.file.name;
+                  const subtext =
+                    item.kind === "dicom"
+                      ? `DICOM series · ${item.files.length} slice${item.files.length === 1 ? "" : "s"}`
+                      : `NIfTI · ${formatBytes(item.file.size)}`;
+                  const isOpen = previewItemId === item.id;
+                  const uploadStatus =
+                    item.kind === "nifti" ? itemUploadStatus[item.id] : undefined;
+                  return (
+                    <div
+                      key={item.id}
+                      className={`file-chip${isOpen ? " file-chip--active" : ""}${uploadStatus ? ` file-chip--${uploadStatus}` : ""}`}
+                    >
+                      <span className="file-chip-icon" aria-hidden="true">
+                        {uploadStatus === "uploading" ? (
+                          <span className="file-chip-spinner" />
+                        ) : uploadStatus === "done" ? (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M20 6L9 17l-5-5" />
+                          </svg>
+                        ) : (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                            <polyline points="14 2 14 8 20 8" />
+                          </svg>
+                        )}
+                      </span>
+                      <span className="file-chip-text">
+                        <span className="file-chip-name">{name}</span>
+                        <span className="file-chip-sub">
+                          {subtext}
+                          {uploadStatus === "uploading" && " · uploading…"}
+                          {uploadStatus === "done" && " · ready"}
+                          {uploadStatus === "failed" && " · upload failed"}
+                        </span>
+                      </span>
+                      <button
+                        className="file-chip-preview"
+                        onClick={() =>
+                          setPreviewItemId((prev) =>
+                            prev === item.id ? null : item.id,
+                          )
+                        }
+                      >
+                        {isOpen ? "Hide" : "Preview"}
+                      </button>
+                      <button
+                        className="file-chip-remove"
+                        onClick={() => removeItem(item.id)}
+                        aria-label={`Remove ${name}`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
               <button
                 type="button"
@@ -1604,58 +1835,6 @@ const UploadPage: React.FC = () => {
               </button>
             </div>
           </div>
-
-          {/* ── Selected items: NIfTI files + DICOM series, each individually previewable ──
-              Card rows (matching the Completed Uploads treatment below) instead of small
-              inline pills, so a selected file reads as clearly as everything else on the
-              page rather than looking like a stray tag. */}
-          {selectedItems.length > 0 && (
-            <div className="file-chips">
-              {selectedItems.map((item) => {
-                const name =
-                  item.kind === "dicom" ? item.label : item.file.name;
-                const subtext =
-                  item.kind === "dicom"
-                    ? `DICOM series · ${item.files.length} slice${item.files.length === 1 ? "" : "s"}`
-                    : `NIfTI · ${formatBytes(item.file.size)}`;
-                const isOpen = previewItemId === item.id;
-                return (
-                  <div
-                    key={item.id}
-                    className={`file-chip${isOpen ? " file-chip--active" : ""}`}
-                  >
-                    <span className="file-chip-icon" aria-hidden="true">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                        <polyline points="14 2 14 8 20 8" />
-                      </svg>
-                    </span>
-                    <span className="file-chip-text">
-                      <span className="file-chip-name">{name}</span>
-                      <span className="file-chip-sub">{subtext}</span>
-                    </span>
-                    <button
-                      className="file-chip-preview"
-                      onClick={() =>
-                        setPreviewItemId((prev) =>
-                          prev === item.id ? null : item.id,
-                        )
-                      }
-                    >
-                      {isOpen ? "Hide" : "Preview"}
-                    </button>
-                    <button
-                      className="file-chip-remove"
-                      onClick={() => removeItem(item.id)}
-                      aria-label={`Remove ${name}`}
-                    >
-                      ×
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
 
           {/* ── Pre-inference preview: inspect the selected scan before running a model ── */}
           {previewItem && !isUploading && (
@@ -1844,6 +2023,7 @@ const UploadPage: React.FC = () => {
                             return;
                           }
                           track("upload_select_model");
+                          modelTouchedRef.current = true;
                           setSelectedModel(m.id as typeof selectedModel);
                           setModelDropOpen(false);
                         }}
@@ -1904,6 +2084,7 @@ const UploadPage: React.FC = () => {
                                 className={`model-submenu-item${lesionTarget === l.id ? " selected" : ""}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
+                                  modelTouchedRef.current = true;
                                   setSelectedModel("LesionSegmenter");
                                   setLesionTarget(l.id);
                                   setModelDropOpen(false);
@@ -2066,25 +2247,12 @@ const UploadPage: React.FC = () => {
           </div>
 
           {/* Check Status removed (auto-polling covers it); Download now lives on
-              completed entries in Completed Uploads, not as an always-on button. */}
-
-          {/* ── Progress (upload phase only - running inference shows in Active below) ── */}
-          {isUploading && (
-            <div className="progress-section">
-              <div className="progress-item">
-                <div className="progress-label">
-                  <span className="progress-label-text">Upload Progress</span>
-                  <span className="progress-label-pct">{uploadProgress}%</span>
-                </div>
-                <div className="progress-track">
-                  <div
-                    className="progress-fill progress-fill-upload"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
+              completed entries in Completed Uploads, not as an always-on button.
+              The old "Upload Progress" bar is gone too - uploads now start at
+              selection time and finish well before Run is usually clicked, so a
+              dedicated progress bar here was rarely seen and added a layout jump
+              when it briefly appeared. The Active card below still reflects
+              "Uploading…" phase for anyone who clicks Run while it's in flight. */}
 
           {/* ── Results ── */}
           {inferenceCompleted && sessionId && (
@@ -2284,14 +2452,20 @@ const UploadPage: React.FC = () => {
                     <button className="active-cancel-btn" onClick={() => cancelRun(u)}>Cancel</button>
                   </div>
                 </div>
-                {/* No real percent-complete exists for inference, so this is an
-                    indeterminate sweep — honest motion, not a fabricated number.
-                    Suppressed during waiting/uploading: the real Upload Progress
-                    bar above already covers this scan, so both at once was two
-                    progress bars for one event. */}
-                {phase !== "waiting" && phase !== "uploading" && (
-                  <div className="progress-track">
-                    <div className="progress-fill progress-fill--indeterminate" />
+                {/* No real percent-complete exists for inference (nnU-Net doesn't
+                    report progress mid-run), so instead of an indeterminate sweep
+                    that told the user nothing, this shows how long the run has
+                    left based on how this model's runs typically take. Only shown
+                    once actually running: during "queued" there's no dispatch-time
+                    signal to build an estimate from. */}
+                {phase === "running" && (
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a" }}>
+                    {estimateRemaining(
+                      u.model || "",
+                      runningStartedAtRef.current.get(u.sessionId) ?? Date.now(),
+                      sessionFileSizeRef.current.get(u.sessionId),
+                      durationEstimates[u.sessionId],
+                    )}
                   </div>
                 )}
               </div>
@@ -2318,16 +2492,19 @@ const UploadPage: React.FC = () => {
                       style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", border: "1px solid rgba(0, 45, 114, 0.3)", borderRadius: "6px", padding: "2px 6px", width: "100%", maxWidth: "260px" }}
                     />
                   ) : (
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
-                      <span title={u.sourceName || undefined} style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.label}</span>
-                      <button
-                        title="Rename scan"
-                        onClick={(e) => { e.stopPropagation(); startRename(u); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", padding: "2px", color: "#6a6a6a", flexShrink: 0, lineHeight: 0 }}
-                      >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
-                      </button>
-                    </div>
+                    // Click the name itself to rename it - no separate pencil
+                    // icon needed (matches how Claude's own chat titles work).
+                    // Underline-on-hover is the only affordance that this text
+                    // is interactive; the tooltip keeps surfacing the original
+                    // filename once it's been renamed away from it.
+                    <span
+                      title={u.sourceName || "Click to rename"}
+                      onClick={(e) => { e.stopPropagation(); startRename(u); }}
+                      className="upload-rename-trigger"
+                      style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block", cursor: "text", maxWidth: "260px" }}
+                    >
+                      {u.label}
+                    </span>
                   )}
                   <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
                     {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}

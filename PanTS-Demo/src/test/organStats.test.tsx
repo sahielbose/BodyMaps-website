@@ -160,9 +160,8 @@ describe("Organ Statistics — population percentiles", () => {
 	it("shows each organ's volume percentile vs the dataset for the case's sex/age", async () => {
 		renderViewer();
 
-		// The toolbar is hidden by default; reveal it, then open Organ statistics
-		// (grouped under the "Panels" dropdown alongside Organs/Case metadata/Measurements).
-		fireEvent.click(screen.getByLabelText("Toggle toolbar"));
+		// The toolbar is visible by default; open Organ statistics (grouped under
+		// the "Panels" dropdown alongside Organs/Case metadata/Measurements).
 		fireEvent.click(screen.getByLabelText("Panels"));
 		fireEvent.click(screen.getByRole("menuitem", { name: "Organ stats" }));
 
@@ -187,9 +186,8 @@ describe("Organ Statistics — population percentiles", () => {
 
 	it("falls back to an em dash when an organ has no reference or an invalid volume", async () => {
 		renderViewer();
-		// The toolbar is hidden by default; reveal it, then open Organ statistics
-		// (grouped under the "Panels" dropdown alongside Organs/Case metadata/Measurements).
-		fireEvent.click(screen.getByLabelText("Toggle toolbar"));
+		// The toolbar is visible by default; open Organ statistics (grouped under
+		// the "Panels" dropdown alongside Organs/Case metadata/Measurements).
 		fireEvent.click(screen.getByLabelText("Panels"));
 		fireEvent.click(screen.getByRole("menuitem", { name: "Organ stats" }));
 		await screen.findByText("%ile");
