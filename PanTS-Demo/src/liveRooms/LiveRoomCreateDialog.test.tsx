@@ -30,7 +30,6 @@ describe("Live Room mode menu", () => {
 		expect(solo).toBeEnabled();
 		const race = screen.getByRole("button", { name: /Individual Race/i });
 		expect(race).toBeEnabled();
-			expect(screen.getByRole("button", { name: /Quiz practice/i })).toBeEnabled();
 		fireEvent.click(race);
 		expect(screen.getByRole("heading", { name: "Start an individual race" })).toBeInTheDocument();
 		expect(screen.getByRole("radio", { name: "30 seconds" })).toBeChecked();
@@ -127,5 +126,59 @@ describe("Live Room mode menu", () => {
 		} finally {
 			storage.mockRestore();
 		}
+	});
+});
+
+describe("Quiz practice card", () => {
+	afterEach(() => vi.unstubAllGlobals());
+
+	// Answers the case's pack lookup from `packs` (case id -> pack id) and every other GET with no playlists.
+	function stubCatalog(packs: Record<string, string>) {
+		const fetchMock = vi.fn((input: RequestInfo | URL) => {
+			const url = new URL(String(input), "http://localhost");
+			if (url.pathname.endsWith("/api/education/quiz-packs")) {
+				const packId = packs[url.searchParams.get("case_id") || ""];
+				return Promise.resolve(new Response(JSON.stringify({ pack: packId ? { pack_id: packId, case_id: url.searchParams.get("case_id"), title: "Quiz", difficulty: "hard" } : null }), { status: 200 }));
+			}
+			return Promise.resolve(new Response(JSON.stringify({ playlists: [] }), { status: 200 }));
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		return fetchMock;
+	}
+
+	it("opens the reviewed case 35 pack on case 35", async () => {
+		stubCatalog({ "35": "radworld-case-35-v1" });
+		renderDialog("35");
+		const card = screen.getByRole("button", { name: /Quiz practice/i });
+		await waitFor(() => expect(card).toBeEnabled());
+		fireEvent.click(card);
+		expect(screen.getByLabelText("Current route")).toHaveTextContent("/learn/quiz/radworld-case-35-v1");
+	});
+
+	it("opens the pack the catalog has for any other case", async () => {
+		const fetchMock = stubCatalog({ "35": "radworld-case-35-v1", "3849": "pants-case-00003849-v2" });
+		renderDialog("3849");
+		const card = screen.getByRole("button", { name: /Quiz practice/i });
+		await waitFor(() => expect(card).toBeEnabled());
+		expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/education/quiz-packs?case_id=3849"))).toBe(true);
+		fireEvent.click(card);
+		expect(screen.getByLabelText("Current route")).toHaveTextContent("/learn/quiz/pants-case-00003849-v2");
+	});
+
+	it("stays off, and says why, when no pack covers the case", async () => {
+		stubCatalog({ "35": "radworld-case-35-v1" });
+		renderDialog("34");
+		const card = screen.getByRole("button", { name: /Quiz practice/i });
+		await waitFor(() => expect(card).toHaveTextContent("No quiz pack covers this case yet."));
+		expect(card).toBeDisabled();
+	});
+
+	it("stays off while the lookup runs and when it fails", async () => {
+		vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("offline"))));
+		renderDialog("35");
+		const card = screen.getByRole("button", { name: /Quiz practice/i });
+		expect(card).toBeDisabled();
+		await waitFor(() => expect(card).toHaveTextContent("No quiz pack covers this case yet."));
+		expect(card).toBeDisabled();
 	});
 });

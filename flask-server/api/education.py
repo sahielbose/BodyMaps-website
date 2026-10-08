@@ -107,6 +107,23 @@ def select_quiz_playlist_pack(playlist_id: str):
     return jsonify({"pack": public_pack(pack, choice_seed=f"select:{body.get('seed', 'default')}")})
 
 
+@education_blueprint.get("/education/quiz-packs")
+def find_quiz_pack():
+    """The quiz pack for one case (?case_id=35), so a case page can offer practice on it."""
+    case_id = request.args.get("case_id", "").strip()
+    if not case_id:
+        raise QuizPackError("case_id is required")
+    pack = get_registry().pack_for_case(case_id)
+    if pack is None:
+        return jsonify({"pack": None})
+    return jsonify({"pack": {
+        "pack_id": pack["pack_id"],
+        "case_id": pack["case_id"],
+        "title": pack["title"],
+        "difficulty": pack["difficulty"],
+    }})
+
+
 @education_blueprint.get("/education/quiz-packs/<pack_id>")
 def get_quiz_pack(pack_id: str):
     return jsonify(public_pack(get_registry().get(pack_id), choice_seed=f"preview:{pack_id}"))

@@ -268,6 +268,13 @@ class QuizPackRegistry:
             values = [item for item in values if item["approval"]["status"] in self.available_statuses]
         return sorted(values, key=lambda item: (int(item["case_id"]), item["pack_id"]))
 
+    def pack_for_case(self, case_id: str) -> dict[str, Any] | None:
+        """The served pack for one case, or None. A catalog holds at most one pack per case."""
+        wanted = str(case_id).strip()
+        if wanted.isdigit():
+            wanted = str(int(wanted))
+        return next((pack for pack in self.packs() if pack["case_id"] == wanted), None)
+
     def public_playlists(self) -> list[dict[str, Any]]:
         packs = self.packs()
         output: list[dict[str, Any]] = []

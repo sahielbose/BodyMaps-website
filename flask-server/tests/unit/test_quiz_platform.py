@@ -297,6 +297,34 @@ def test_unreviewed_registry_mode_exposes_pending_packs_only_when_explicitly_ena
     assert development_registry.public_playlists()[0]["pack_count"] == 1
 
 
+def test_registry_finds_the_served_pack_for_a_case():
+    catalog = catalog_with(2)
+    catalog["packs"][1]["approval"] = {"status": "pending"}
+    registry = QuizPackRegistry(catalog)
+    assert registry.pack_for_case("100")["pack_id"] == "test-pack-0-v1"
+    assert registry.pack_for_case("0100")["pack_id"] == "test-pack-0-v1"
+    assert registry.pack_for_case("999") is None
+    # A pending pack is found only when the registry serves unreviewed packs.
+    assert registry.pack_for_case("101") is None
+    assert QuizPackRegistry(catalog, allow_unreviewed=True).pack_for_case("101")["pack_id"] == "test-pack-1-v1"
+
+
+def test_quiz_pack_lookup_by_case_names_the_pack_without_its_answers(monkeypatch):
+    monkeypatch.setattr("services.live_quiz._DEFAULT_REGISTRY", QuizPackRegistry(catalog_with(1)))
+    app = Flask(__name__)
+    app.register_blueprint(education_api.education_blueprint, url_prefix="/api")
+    client = app.test_client()
+
+    found = client.get("/api/education/quiz-packs?case_id=100")
+    assert found.status_code == 200
+    pack = found.get_json()["pack"]
+    assert set(pack) == {"pack_id", "case_id", "title", "difficulty"}
+    assert (pack["pack_id"], pack["case_id"], pack["difficulty"]) == ("test-pack-0-v1", "100", "easy")
+    assert "correct_choice_id" not in found.get_data(as_text=True)
+    assert client.get("/api/education/quiz-packs?case_id=7").get_json() == {"pack": None}
+    assert client.get("/api/education/quiz-packs").status_code == 400
+
+
 def test_generator_positive_normal_multiple_lesion_and_failures(tmp_path: Path):
     root = tmp_path / "dataset"
     write_case(root, 1, lesion=True, multiple=True)

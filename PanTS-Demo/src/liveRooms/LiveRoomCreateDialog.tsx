@@ -84,6 +84,20 @@ export default function LiveRoomCreateDialog({ caseId, open, onClose }: Props) {
 		if (open && mode === "choose") firstModeRef.current?.focus({ preventScroll: true });
 	}, [mode, open]);
 
+	// The catalog's quiz pack for this case, which Quiz practice opens: undefined
+	// while the lookup runs, null when the catalog has none for this case.
+	const [quizPack, setQuizPack] = useState<{ caseId: string; packId: string | null } | null>(null);
+	const quizPackId = quizPack?.caseId === caseId ? quizPack.packId : undefined;
+	useEffect(() => {
+		if (!open) return;
+		let active = true;
+		fetch(`${API_BASE}/api/education/quiz-packs?case_id=${encodeURIComponent(caseId)}`)
+			.then((response) => response.ok ? response.json() : Promise.reject(new Error("Quiz pack lookup failed")))
+			.then((body) => { if (active) setQuizPack({ caseId, packId: typeof body?.pack?.pack_id === "string" ? body.pack.pack_id : null }); })
+			.catch(() => { if (active) setQuizPack({ caseId, packId: null }); });
+		return () => { active = false; };
+	}, [caseId, open]);
+
 	useEffect(() => {
 		if (!open) return;
 		let active = true;
@@ -116,8 +130,8 @@ export default function LiveRoomCreateDialog({ caseId, open, onClose }: Props) {
 						<button type="button" className="lr-mode-card" onClick={() => { setError(null); setMode("quiz"); }}>
 							<span><IconBolt size={21} /></span><strong>Individual race</strong><small>Live linked-question race with private answers.</small>
 						</button>
-						<button type="button" className="lr-mode-card lr-mode-card--quiz" disabled={!educationAvailable} onClick={() => navigate("/learn/quiz/radworld-case-35-v1")}>
-							<span><IconClipboardCheck size={21} /></span><strong>Quiz practice</strong><small>{educationAvailable ? "Untimed linked-question pack with answer review." : "This pack uses case 35."}</small>
+						<button type="button" className="lr-mode-card lr-mode-card--quiz" disabled={!quizPackId} onClick={() => { if (quizPackId) navigate(`/learn/quiz/${encodeURIComponent(quizPackId)}`); }}>
+							<span><IconClipboardCheck size={21} /></span><strong>Quiz practice</strong><small>{quizPackId === null ? "No quiz pack covers this case yet." : "Untimed linked-question pack with answer review."}</small>
 						</button>
 					</div>
 				</section>
