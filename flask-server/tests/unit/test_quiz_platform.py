@@ -93,7 +93,7 @@ def v2_pack(base: dict, *, with_report_question: bool) -> dict:
     if with_report_question:
         pack["questions"].insert(3, {
             "id": "report_finding",
-            "prompt": "How is pancreatic-tail lesion described relative to pancreas?",
+            "prompt": "How does the report describe the pancreatic-tail lesion relative to the pancreas?",
             "choices": [
                 {"id": "hyperattenuating", "label": "hyperattenuating", "claims": {}},
                 {"id": "isoattenuating", "label": "isoattenuating", "claims": {}},

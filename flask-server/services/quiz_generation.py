@@ -309,15 +309,15 @@ def report_finding_for(
                     attenuation = str(lesion["attenuation"])
                     question = {
                         "id": "report_finding",
-                        "prompt": f"How is pancreatic-{region} lesion described relative to pancreas?",
+                        "prompt": f"How does the report describe the pancreatic-{region} lesion relative to the pancreas?",
                         "choices": [
-                            {"id": "hyperattenuating", "label": "hyperattenuating", "claims": {}},
-                            {"id": "isoattenuating", "label": "isoattenuating", "claims": {}},
-                            {"id": "hypoattenuating", "label": "hypoattenuating", "claims": {}},
-                            {"id": "not_described", "label": "not described", "claims": {}},
+                            {"id": "hyperattenuating", "label": "Hyperattenuating", "claims": {}},
+                            {"id": "isoattenuating", "label": "Isoattenuating", "claims": {}},
+                            {"id": "hypoattenuating", "label": "Hypoattenuating", "claims": {}},
+                            {"id": "not_described", "label": "Not described", "claims": {}},
                         ],
                         "correct_choice_id": attenuation,
-                        "explanation": f"Structured report describes pancreatic-{region} lesion as {attenuation} relative to pancreas.",
+                        "explanation": f"The structured report describes the pancreatic-{region} lesion as {attenuation} relative to the pancreas.",
                         "source_label": "Structured report finding",
                         "viewer_cue": viewer_cue,
                     }

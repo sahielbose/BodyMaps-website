@@ -69,15 +69,15 @@ def v2_pack(*, with_report_question: bool = True) -> dict:
     if with_report_question:
         question = {
             "id": "report_finding",
-            "prompt": "How is pancreatic-tail lesion described relative to pancreas?",
+            "prompt": "How does the report describe the pancreatic-tail lesion relative to the pancreas?",
             "choices": [
-                {"id": "hyperattenuating", "label": "hyperattenuating", "claims": {}},
-                {"id": "isoattenuating", "label": "isoattenuating", "claims": {}},
-                {"id": "hypoattenuating", "label": "hypoattenuating", "claims": {}},
-                {"id": "not_described", "label": "not described", "claims": {}},
+                {"id": "hyperattenuating", "label": "Hyperattenuating", "claims": {}},
+                {"id": "isoattenuating", "label": "Isoattenuating", "claims": {}},
+                {"id": "hypoattenuating", "label": "Hypoattenuating", "claims": {}},
+                {"id": "not_described", "label": "Not described", "claims": {}},
             ],
             "correct_choice_id": "hyperattenuating",
-            "explanation": "Structured report describes pancreatic-tail lesion as hyperattenuating relative to pancreas.",
+            "explanation": "The structured report describes the pancreatic-tail lesion as hyperattenuating relative to the pancreas.",
             "source_label": "Structured report finding",
             "viewer_cue": copy.deepcopy(pack["questions"][0]["viewer_cue"]),
         }
@@ -135,7 +135,7 @@ def test_lesion_hierarchy_uses_largest_matching_report_lesion():
         raw, lesion_present=True, region="tail", diameter_mm=23.0, viewer_cue={"clear_overlays": True}
     )
     assert question and question["correct_choice_id"] == "hyperattenuating"
-    assert question["prompt"] == "How is pancreatic-tail lesion described relative to pancreas?"
+    assert question["prompt"] == "How does the report describe the pancreatic-tail lesion relative to the pancreas?"
     assert truth["selected_field"] == "lesion_attenuation"
     assert truth["report_sha256"] and len(truth["report_sha256"]) == 64
     assert warnings == []
