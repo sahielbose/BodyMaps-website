@@ -12,6 +12,7 @@ import argparse
 
 from constants import Constants
 from services.label_scheme import SCHEME as LABEL_SCHEME, VIEWER_LABELS, viewer_labelmap_path
+from services.mesh_generation import smooth_organ_surface
 from utils import *
 
 dotenv.load_dotenv()
@@ -141,9 +142,10 @@ def export_organ_mesh(
     mesh.update_faces(mesh.nondegenerate_faces())
     mesh.remove_unreferenced_vertices()
     mesh.merge_vertices()
+    smooth_organ_surface(mesh)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    mesh.export(out_path)
+    mesh.export(out_path, include_normals=True)
 
     return {
         "vertices": int(len(mesh.vertices)),

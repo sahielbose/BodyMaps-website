@@ -25,6 +25,34 @@ LABELS = VIEWER_LABELS
 
 _mesh_generation_lock = threading.Lock()
 
+# Marching cubes over a 0/1 mask leaves a step on every voxel edge, which reads
+# as blocky on small structures such as a 2 mL lesion or a vessel.
+SURFACE_SMOOTHING_ITERATIONS = 10
+
+
+def smooth_organ_surface(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Take the voxel staircase off a marching-cubes surface, in place, keeping its volume.
+
+    Taubin smoothing alone still pulls a small structure inward (a ball eight voxels
+    across loses a third of its volume), so the surface is then moved along its
+    normals by the one distance that gives back the volume it had. That distance is
+    capped at the mesh's mean edge length: smoothing shrinks a label of a voxel or
+    two to almost nothing, and an uncapped push would blow it up to metres.
+    """
+    target = abs(mesh.volume)
+    max_offset = float(mesh.edges_unique_length.mean()) if len(mesh.edges_unique) else 0.0
+    trimesh.smoothing.filter_taubin(
+        mesh, lamb=0.5, nu=-0.53, iterations=SURFACE_SMOOTHING_ITERATIONS
+    )
+    for _ in range(2):
+        volume = mesh.volume
+        if not mesh.area > 0:
+            break
+        offset = np.clip((target - abs(volume)) / mesh.area, -max_offset, max_offset)
+        # The winding, and so the normals' direction, depends on the affine.
+        mesh.vertices = mesh.vertices + np.sign(volume) * offset * mesh.vertex_normals
+    return mesh
+
 
 def safe_filename(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_\\-]+", "_", s).lower()
@@ -229,7 +257,8 @@ def load_clean_label_data(label_nifti_path: str):
 
 
 def mesh_to_glb_bytes(mesh: trimesh.Trimesh) -> bytes:
-    exported = mesh.export(file_type="glb")
+    # Without vertex normals three.js shades every triangle flat.
+    exported = mesh.export(file_type="glb", include_normals=True)
 
     if isinstance(exported, bytes):
         return exported
@@ -287,7 +316,7 @@ def _build_organ_mesh(
     mesh.remove_unreferenced_vertices()
     mesh.merge_vertices()
 
-    return mesh
+    return smooth_organ_surface(mesh)
 
 
 def generate_organ_glb_bytes(
