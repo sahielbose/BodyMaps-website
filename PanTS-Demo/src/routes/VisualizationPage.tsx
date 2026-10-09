@@ -83,7 +83,7 @@ import {
   applyMargin, getActualMarginMm, getActualHollowMm,
   applyIslandsOperation, applyLogicalOperator, applySmoothing,
   deleteSegmentEverywhere, getSegmentAtVoxel, getActiveEditSegment, type LogicalOperation,
-  type LevelTraceOperation
+  type LevelTraceOperation, projectPromptMarker
 } from "../helpers/CornerstoneNifti2";
 import {
     API_BASE,
@@ -1607,35 +1607,32 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// grid the live segmentation volume is actually on right now — same
 	// hdReady logic gating the Annotate button, not a separate guess. Placed
 	// after `enhance` is declared above since both read enhance.state.
-	const [promptToolBusy, setPromptToolBusy] = useState(false);
+	//
+	// Equip-and-use, like the brush: the tool STAYS ARMED after a successful
+	// prompt, because consecutive prompts refine one object through a
+	// persistent model session (see useInteractivePromptTool). No busy gate
+	// on `enabled` — the hook single-flights its own requests, the applying
+	// modal blocks the canvas during the round trip, and toggling `enabled`
+	// mid-flight would tear down the very session being refined.
+	//
+	// ONE hook instance serves every prompt tool, with `mode` following the
+	// armed tool. That is what makes the refinement session survive switching
+	// between the prompt tools (click an organ, then box-prompt the part it
+	// missed — same object, same model context), matching how the official
+	// Slicer plugin behaves. Two instances would each hold their own token
+	// and silently start a new object on every tool switch.
+	const fullRes = isHd || enhance.state === "done";
 	const promptToolArmed =
 		activeToolbarTool === "pointSegment" ||
 		activeToolbarTool === "boxSegment";
-	const pointSegment = useInteractivePromptTool({
-		enabled: activeToolbarTool === "pointSegment" && !promptToolBusy,
-		mode: "point",
+	const promptSegment = useInteractivePromptTool({
+		enabled: promptToolArmed,
+		mode: activeToolbarTool === "boxSegment" ? "box" : "point",
 		apiBase: API_BASE,
 		caseId: pantsCase ?? null,
 		activeSegmentIndex: activeSegment,
-		res: isHd || enhance.state === "done" ? "full" : "low",
+		res: fullRes ? "full" : "low",
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
-		onBusyChange: setPromptToolBusy,
-		// Single-shot tool, not equip-and-use like paint/erase — deselect
-		// (icon loses its active/white-background state) once a click
-		// actually produced a mask, instead of staying armed for repeated
-		// clicks the way the brush does.
-		onComplete: () => setActiveToolbarTool(null),
-	});
-	const boxSegment = useInteractivePromptTool({
-		enabled: activeToolbarTool === "boxSegment" && !promptToolBusy,
-		mode: "box",
-		apiBase: API_BASE,
-		caseId: pantsCase ?? null,
-		activeSegmentIndex: activeSegment,
-		res: isHd || enhance.state === "done" ? "full" : "low",
-		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
-		onBusyChange: setPromptToolBusy,
-		onComplete: () => setActiveToolbarTool(null),
 	});
 	// What the Crosshair button shows and what a click on it does
 	// (see helpers/viewer/crosshairMode).
@@ -1867,10 +1864,24 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		if (editMode === "brush" || editMode === "eraser") {
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(editMode === "brush" ? EDIT_BRUSH : EDIT_ERASER);
-		} else if (editMode === "smartfill" || activeToolbarTool === "pointSegment" || activeToolbarTool === "boxSegment") {
+		} else if (editMode === "smartfill" || promptToolArmed) {
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(null);
-			toggleCrosshairTool(false);
+			if (activeToolbarTool === "boxSegment") {
+				// Drag prompts draw their gesture at the DOM level, like
+				// growFromSeeds' scribbles. toggleCrosshairTool(false) would
+				// leave PanTool active on the primary button, and the shared
+				// left-drag then pans the camera in step with the gesture:
+				// the world point under the cursor never changes, so the box
+				// collapses to a zero-extent prompt at the start corner.
+				// Nothing may own the primary button while one of these is
+				// armed.
+				releasePrimaryMouseTools();
+			} else {
+				// pointSegment and smartfill are click gestures; pan stays
+				// available for navigating between clicks.
+				toggleCrosshairTool(false);
+			}
 		} else if (activeMeasureTool) {
 			setActiveMaskEditTool(null);
 			setActiveMeasurementTool(activeMeasureTool);
@@ -2499,6 +2510,14 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		}
 	}, [cinePlaying, focusedPane.getFocusedPane, cineFps, viewerReady, viewMode]);
 
+	// A room undo is a server request, so the local edit-history entry that
+	// resets the prompt session never runs; end the session here instead, so
+	// the next click cannot bring the undone object back.
+	const requestRoomUndo = () => {
+		promptSegment.invalidateSession();
+		liveRoom?.requestUndo();
+	};
+
 	// Escape that nothing else used (no flyout, dialog, popover or half-drawn
 	// shape took it) disarms a measure tool or an nnInteractive prompt tool.
 	// A measure tool hands the mouse back to crosshair navigation, as the
@@ -2535,11 +2554,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		onDiameterChange: handleDiameterChange,
 		collaborationConnected: liveRoom?.connectionState === "connected",
 		collaborationLocked: liveRoom?.collaborationLocked,
-		onCollaborationUndo: liveRoom?.requestUndo,
+		onCollaborationUndo: liveRoom ? requestRoomUndo : undefined,
 		onUndo: handleUndo,
 		// Suspended while any full-screen layer owns the keyboard: the report
-		// walkthrough and the HD-loading overlay — otherwise S still snapshots
-		// the hidden panes, V starts cine,
+		// walkthrough, the HD-loading overlay, and the point/box prompt status
+		// modal — otherwise S still snapshots the hidden panes, V starts cine,
 		// and [ / ] scroll slices invisibly underneath them. The session summary
 		// counts too: a click on its backdrop drops focus to <body>, which the
 		// dialog guard in the handler no longer recognises, and so does a click on
@@ -2553,10 +2572,13 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			showReportScreen ||
 			sessionResult !== null ||
 			showLiveRoomCreate ||
-			annotateHdLoading,
+			annotateHdLoading ||
+			promptSegment.status !== "idle",
 		closeAnnotationToolbarIfOpen,
 		onEscape: disarmOnEscape,
-		cancelDrawing: () => cancelMeasurementInProgress(),
+		// A drag of the box tool counts as drawing too, so the first Escape
+		// drops just that gesture and the second disarms the tool.
+		cancelDrawing: () => cancelMeasurementInProgress() || promptSegment.cancelGesture(),
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
 	// the new speed rather than waiting for the next stop/start.
@@ -3635,8 +3657,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					<span className="vp-window-readout__w">W {Math.round(windowWidth)} ·</span>
 					<span className="vp-window-readout__l">L {Math.round(windowCenter)}</span>
 				</div>
-				{activeToolbarTool === "boxSegment" && boxSegment.pane === pane && boxSegment.liveBox && (() => {
-					const [start, end] = boxSegment.liveBox;
+				{promptSegment.pane === pane && promptSegment.liveBox && (() => {
+					const [start, end] = promptSegment.liveBox;
 					const left = Math.min(start[0], end[0]);
 					const top = Math.min(start[1], end[1]);
 					const width = Math.abs(end[0] - start[0]);
@@ -3654,6 +3676,34 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						/>
 					);
 				})()}
+				{/* Landed prompts of the live refinement session: green = add,
+				    red = remove. Rendered on EVERY pane (a 3D point belongs to
+				    one slice per orientation); projectPromptMarker hides those
+				    not on this pane's current slice. */}
+				{promptSegment.promptMarkers.map((m, i) => {
+					const at = projectPromptMarker(pane, m.world);
+					if (!at) return null;
+					return (
+						<div
+							key={`prompt-marker-${i}`}
+							style={{
+								position: "absolute",
+								left: at[0],
+								top: at[1],
+								width: 9,
+								height: 9,
+								marginLeft: -4.5,
+								marginTop: -4.5,
+								borderRadius: "50%",
+								background: m.include ? "#4ade80" : "#f87171",
+								border: "1.5px solid rgba(255, 255, 255, 0.9)",
+								boxShadow: "0 0 3px rgba(0, 0, 0, 0.6)",
+								pointerEvents: "none",
+								zIndex: 39,
+							}}
+						/>
+					);
+				})}
 			</>
 		);
 	};
@@ -4619,7 +4669,7 @@ const aiAvailableOrgans = useMemo(() => {
 											<div ref={undoRedoGroupRef} style={{ display: "contents" }}>
 												<button
 													className="vp-tool vp-tool--history"
-												onClick={() => liveRoom ? liveRoom.requestUndo() : handleUndo()}
+												onClick={() => liveRoom ? requestRoomUndo() : handleUndo()}
 												disabled={collaborationDisabled || !canUndo}
 													aria-label="Undo"
 												>
@@ -4998,12 +5048,13 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("axial"), ...paneGridStyle("axial") }}
-						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("axial")(e); }}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("axial")(e); }}>
 						<div
 							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 							data-label="Axial"
 							ref={axial_ref}
-							onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("axial")(e); }}
+							onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("axial")(e); }}
+							onContextMenu={(e) => { promptSegment.handleContextMenu("axial")(e); }}
 							onDoubleClick={activeDrawTool.handleDoubleClick("axial")}
 							onMouseDown={(e) => {
 								focusedPane.handleMouseDown("axial")();
@@ -5011,14 +5062,14 @@ const aiAvailableOrgans = useMemo(() => {
 								morphPicker.handlePaneClick("axial")(e);
 								activeDrawTool.handleClick("axial")(e);
 								levelTracing.handleClick("axial")(e);
-								boxSegment.handleMouseDown("axial")(e);
+								promptSegment.handleMouseDown("axial")(e);
 							}}
 							onMouseMove={(e) => {
 								handlePaneHover("axial")(e);
 								smartFill.handleMouseMove("axial")(e);
 								activeDrawTool.handleMouseMove("axial")(e);
 								levelTracing.handleMouseMove("axial")(e);
-								boxSegment.handleMouseMove("axial")(e);
+								promptSegment.handleMouseMove("axial")(e);
 							}}
 							onMouseLeave={() => { handlePaneHoverLeave("axial")(); levelTracing.clearPreview(); }}
 							onWheel={focusedPane.handleWheel("axial")}
@@ -5081,12 +5132,13 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("sagittal"), ...paneGridStyle("sagittal") }}
-						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("sagittal")(e); }}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("sagittal")(e); }}>
 					<div
 						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Sagittal"
 						ref={sagittal_ref}
-						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("sagittal")(e); }}
+						onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("sagittal")(e); }}
+						onContextMenu={(e) => { promptSegment.handleContextMenu("sagittal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("sagittal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("sagittal")();
@@ -5094,14 +5146,14 @@ const aiAvailableOrgans = useMemo(() => {
 							morphPicker.handlePaneClick("sagittal")(e);
 							activeDrawTool.handleClick("sagittal")(e);
 							levelTracing.handleClick("sagittal")(e);
-							boxSegment.handleMouseDown("sagittal")(e);
+							promptSegment.handleMouseDown("sagittal")(e);
 						}}
 						onMouseMove={(e) => {
 							handlePaneHover("sagittal")(e);
 							smartFill.handleMouseMove("sagittal")(e);
 							activeDrawTool.handleMouseMove("sagittal")(e);
 							levelTracing.handleMouseMove("sagittal")(e);
-							boxSegment.handleMouseMove("sagittal")(e);
+							promptSegment.handleMouseMove("sagittal")(e);
 						}}
 						onMouseLeave={() => { handlePaneHoverLeave("sagittal")(); levelTracing.clearPreview(); }}
 						onWheel={focusedPane.handleWheel("sagittal")}
@@ -5165,12 +5217,13 @@ const aiAvailableOrgans = useMemo(() => {
 					<div
 						className="vp-pane-wrap"
 						style={{ ...panelStyle("coronal"), ...paneGridStyle("coronal") }}
-						onMouseUp={(e) => { smartFill.handleMouseUp(); boxSegment.handleMouseUp("coronal")(e); }}>
+						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("coronal")(e); }}>
 					<div
 						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Coronal"
 						ref={coronal_ref}
-						onClick={(e) => { handleMouseClick(e); pointSegment.handleClick("coronal")(e); }}
+						onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("coronal")(e); }}
+						onContextMenu={(e) => { promptSegment.handleContextMenu("coronal")(e); }}
 						onDoubleClick={activeDrawTool.handleDoubleClick("coronal")}
 						onMouseDown={(e) => {
 							focusedPane.handleMouseDown("coronal")();
@@ -5178,7 +5231,7 @@ const aiAvailableOrgans = useMemo(() => {
 							morphPicker.handlePaneClick("coronal")(e);
 							activeDrawTool.handleClick("coronal")(e);
 							levelTracing.handleClick("coronal")(e);
-							boxSegment.handleMouseDown("coronal")(e);
+							promptSegment.handleMouseDown("coronal")(e);
 
 
 						}}
@@ -5187,7 +5240,7 @@ const aiAvailableOrgans = useMemo(() => {
 							smartFill.handleMouseMove("coronal")(e);
 							activeDrawTool.handleMouseMove("coronal")(e);
 							levelTracing.handleMouseMove("coronal")(e);
-							boxSegment.handleMouseMove("coronal")(e);
+							promptSegment.handleMouseMove("coronal")(e);
 						}}
 						onMouseLeave={() => { handlePaneHoverLeave("coronal")(); levelTracing.clearPreview(); }}
 						onWheel={focusedPane.handleWheel("coronal")}
@@ -5655,25 +5708,43 @@ const aiAvailableOrgans = useMemo(() => {
 				popupRef={annotationPopupRef}
 				sliceJumpRef={sliceJumpWrapRef}
 			/>
-			{/* Point/box-segment SUCCESS/ERROR overlay. Reuses the exact same centered
-			    GuidedStepModal (blurred backdrop + "Got it") that Copy across
-			    slices/Fill between slices use for their own success step,
-			    rather than a small bottom-of-screen pill — consistent with
-			    every other guided-flow tool's confirmation. Rendered once
-			    globally (not per-pane, since a point-prompt submit doesn't
-			    stay anchored to one pane the way a box-drag does). */}
-			{(pointSegment.status === "success" || pointSegment.status === "error" ||
-			  boxSegment.status === "success" || boxSegment.status === "error") && (() => {
-				const active =
-					pointSegment.status === "success" || pointSegment.status === "error"
-						? pointSegment
-						: boxSegment;
+			{/* Point/box-segment APPLYING/SUCCESS/ERROR overlay. Reuses the exact
+			    same centered GuidedStepModal (blurred backdrop + "Got it") that
+			    Copy across slices/Fill between slices use for their own success
+			    step, rather than a small bottom-of-screen pill — consistent with
+			    every other guided-flow tool's confirmation. The applying branch
+			    covers the server round trip, which takes seconds; without it the
+			    prompt click looks dead (the tool is disabled and repeat clicks
+			    are dropped while busy). Rendered once globally (not per-pane,
+			    since a point-prompt submit doesn't stay anchored to one pane the
+			    way a box-drag does). */}
+			{promptSegment.status !== "idle" && (() => {
+				const active = promptSegment;
+				const applying = active.status === "applying";
 				return (
 					<GuidedStepModal
-						title={active.status === "success" ? "Success" : "No change"}
-						instruction={active.statusMessage ?? ""}
-						primaryLabel="Got it"
-						onPrimary={active.dismissStatus}
+						title={
+							applying
+								? "Applying"
+								: active.status === "success"
+									? "Applied"
+									: active.status === "notice"
+										? "Thick slices"
+										: "Not applied"
+						}
+						instruction={
+							applying
+								? "Segmenting from your prompt. This can take a few seconds."
+								: active.statusMessage ?? ""
+						}
+						primaryLabel={applying ? "Working" : "Got it"}
+						onPrimary={applying ? () => {} : active.dismissStatus}
+						// A stalled model server must not hold this card (and the
+						// viewer under it) until the backend gives up.
+						secondaryLabel={applying ? "Cancel" : undefined}
+						onSecondary={applying ? active.cancelPrompt : undefined}
+						onEscape={applying ? active.cancelPrompt : active.dismissStatus}
+						busy={applying}
 					/>
 				);
 			})()}

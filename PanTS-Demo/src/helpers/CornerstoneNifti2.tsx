@@ -10,6 +10,7 @@ import vtkDataArray from "@kitware/vtk.js/Common/Core/DataArray";
 import vtkImageMarchingCubes from "@kitware/vtk.js/Filters/General/ImageMarchingCubes";
 import type { MaskingArea } from "../components/segmentation/MaskingSelect";
 import { createOperationGeneration } from "./viewer/operationGeneration";
+import { isDegenerateProposal } from "./viewer/promptResult";
 import { rollbackVolumeUpgrade } from "./viewer/volumeUpgrade";
 import { SeatedEllipticalROITool, SeatedRectangleROITool } from "./viewer/measurementTextBox";
 import { addLabelmapActors } from "./viewer/labelmapActors";
@@ -1016,6 +1017,16 @@ let _activeEditSegment = 1;
 
 export function hasSegmentation(): boolean {
   return !!cache.getVolume(segmentationId);
+}
+
+// Voxel spacing (mm) of the loaded segmentation grid — the grid interactive
+// prompts land on. Null until a labelmap volume is in the cache. Callers use
+// this to detect thick-slice scans (PanTS spacing ranges from isotropic to
+// 7.5 mm slices) before the user starts prompting.
+export function getSegmentationSpacing(): [number, number, number] | null {
+  const spacing = cache.getVolume(segmentationId)?.spacing as number[] | undefined;
+  if (!spacing || spacing.length < 3) return null;
+  return [spacing[0], spacing[1], spacing[2]];
 }
 
 // Hand the primary button to the brush or eraser, or pass null to release it
@@ -2412,14 +2423,193 @@ export async function upgradeSegmentationVolume(fullResSegUrl: string): Promise<
 // same way Annotate is gated — behind hdReady — so "low" vs "full" can't
 // drift out of sync mid-session).
 //
-// NOT YET TESTED end-to-end — this is new scaffolding. Test on a real case
-// before trusting it: submit a point prompt, confirm the proposal lands in
-// the right place on the right slice, and confirm undo/segment-switching
-// still behave normally afterward.
+// Verified end-to-end against the live nninteractive-server on case 1
+// (point and box prompts, both resolutions, undo, segment switching).
 export interface InteractivePrompt {
   pointLps: Point3;
   boxLps?: [Point3, Point3];
   tolerance?: number;
+  /** false = corrective prompt: carve the clicked region OUT of the current
+   *  session's object instead of adding to it. Model-only (the backend
+   *  refuses it when the interactive model is unavailable), and needs an
+   *  object to carve from — a prior session result or a seedable existing
+   *  label; submitInteractiveSegmentPrompt throws a plain-English message
+   *  (before any network round trip) when neither exists. */
+  include?: boolean;
+}
+
+/**
+ * Client half of a persistent prompt session (see useInteractivePromptTool,
+ * which owns one of these per armed tool). While the same `token` is sent,
+ * the backend keeps the nnInteractive session open so every new prompt
+ * REFINES the same object — and the response is then the session's whole
+ * object, not an increment, so applying it means both adding voxels the
+ * model grew and retracting voxels it gave back.
+ */
+export interface PromptSessionState {
+  /** Opaque id identifying this refinement session to the backend. */
+  token: string;
+  /** The mask this session's previous response covered (same grid as the
+   *  segmentation volume), or null before the first response. Retraction is
+   *  restricted to these voxels so labelmap content the session never wrote
+   *  is left untouched. Doubles as the "has this session sent anything yet"
+   *  flag: while null, the next submit runs the seed-from-mask scan (see
+   *  submitInteractiveSegmentPrompt). */
+  prevProposal: Uint8Array | null;
+  /** Pre-session labelmap value for every voxel this session overwrote, so
+   *  retracting restores what was actually there (possibly another organ's
+   *  label, not 0). */
+  priorValues: Map<number, number>;
+  /** Set when the server's session state can no longer be trusted to match
+   *  the labelmap — a redo re-applied voxels the server no longer endorses,
+   *  or a server-side undo sync failed. The owning hook treats a dead
+   *  session as absent: the next prompt starts a fresh session, whose seed
+   *  scan rebuilds the model's context from the labelmap as it stands. */
+  dead?: boolean;
+  /** Whether the server can still rewind this session's newest interaction.
+   *  Its undo is single-level, so this is set by each apply and cleared by
+   *  the undo that uses it: a second undo in a row ends the session locally
+   *  instead of sending a request that is bound to fail with a 409. */
+  serverUndoReady?: boolean;
+  /** The retraction baseline the session's NEWEST apply must put back when
+   *  undone (the response before it, one full volume). Only the newest apply
+   *  can still rewind on the server; any older undo ends the session and
+   *  re-seeds from the labelmap, so each apply releases the previous slot
+   *  instead of every undo entry pinning its own volume. */
+  undoBaseline?: { before: Uint8Array | null; released?: boolean };
+  /** Where this session's prompts landed, oldest first, for the pane
+   *  overlays — so mid-refinement the user can see which clicks the model
+   *  is already honoring. Kept 1:1 with the server's accumulated prompts:
+   *  pushed per apply, popped by that apply's undo entry, and gone with the
+   *  session itself (marker lifetime IS session lifetime). */
+  markers: PromptMarker[];
+}
+
+/** One landed prompt for the pane overlays. */
+export interface PromptMarker {
+  /** World (LPS) anchor: the click itself for point prompts, the gesture's
+   *  first vertex for boxes and strokes. */
+  world: [number, number, number];
+  /** false = corrective (remove) prompt — drawn in the remove color. */
+  include: boolean;
+}
+
+/** Best-effort server half of undoing a session apply: ask the backend to
+ *  pop the newest interaction so the model's context rewinds in lockstep
+ *  with the voxels the local undo entry just restored. Any failure (stale
+ *  token, the server's single-level undo exhausted, session expired,
+ *  network) marks the session dead instead — the next prompt then re-seeds
+ *  from the restored labelmap, so state converges either way. */
+async function _undoPromptOnServer(
+  apiBase: string,
+  caseId: string | number,
+  session: PromptSessionState,
+): Promise<void> {
+  try {
+    const r = await fetch(`${apiBase}/api/interactive-segment/${caseId}/undo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_token: session.token }),
+    });
+    if (!r.ok) session.dead = true;
+  } catch {
+    session.dead = true;
+  }
+}
+
+/** Drop the full-volume buffers an ended session still holds. Every undo
+ *  entry of the session captures the session object, so after the class
+ *  changes or the tool is disarmed the history would keep the last response
+ *  and the newest undo baseline alive until it evicts them: two volumes per
+ *  ended session, which adds up walking through many classes. An undo after
+ *  this finds the baseline released and just leaves the session dead, and the
+ *  per-voxel priorValues stay because a replacement session carries them. */
+export function endPromptSession(session: PromptSessionState): void {
+  session.dead = true;
+  session.prevProposal = null;
+  if (session.undoBaseline) {
+    session.undoBaseline.before = null;
+    session.undoBaseline.released = true;
+  }
+}
+
+/** Tell the backend a prompt session is finished so its model-server lease is
+ *  freed now rather than at the idle reaper. Sessions are per class, so the
+ *  moment the user moves to another class the old one is done; without this,
+ *  annotating several structures in a row exhausts the server's session slots
+ *  while the abandoned sessions sit idle. Fire-and-forget: the caller has
+ *  already dropped the token locally, so a failed release only costs the delay
+ *  until the reaper collects it. */
+export function releasePromptSession(
+  apiBase: string,
+  caseId: string | number,
+  token: string,
+): void {
+  const url = `${apiBase}/api/interactive-segment/${caseId}/release`;
+  const body = JSON.stringify({ session_token: token });
+  // sendBeacon so the release still goes out when this fires during teardown
+  // (tab close, navigation away), where an ordinary fetch is cancelled. The
+  // body goes as text/plain, a CORS-simple type, because a cross-origin
+  // beacon typed application/json needs a preflight that browsers don't send
+  // for beacons, so it would silently never arrive; the backend parses the
+  // body as JSON whatever its type. sendBeacon returns false when the
+  // browser refuses to queue it, and keepalive fetch is the fallback then.
+  try {
+    if (
+      typeof navigator !== "undefined" &&
+      typeof navigator.sendBeacon === "function" &&
+      navigator.sendBeacon(url, new Blob([body], { type: "text/plain;charset=UTF-8" }))
+    ) {
+      return;
+    }
+  } catch {
+    // fall through to fetch
+  }
+  if (typeof fetch !== "function") return;
+  void fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    body,
+    keepalive: true,
+  }).catch(() => {});
+}
+
+/** The backend no longer holds the object this session was refining (its idle
+ *  reaper took it, or the server restarted). Thrown instead of applying the
+ *  answer a fresh server session would give, which is a one-prompt object
+ *  that the retraction pass would read as the old object shrinking. The
+ *  session is finished: a new one seeded from the labelmap carries on. */
+export class PromptSessionLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PromptSessionLostError";
+  }
+}
+
+export interface InteractivePromptResult {
+  /** Voxels actually modified this apply (adds + retractions). */
+  changed: number;
+  added: number;
+  removed: number;
+  /** True when the backend confirmed the mask is session-scoped. False means
+   *  a one-shot proposal (e.g. the region-grow fallback ran) that was merged
+   *  additively — the caller must NOT carry replace semantics forward. */
+  sessionActive: boolean;
+  /** True when a first additive prompt landed so few voxels it failed in
+   *  user terms (a point on a lung returns single digits out of 1.5M) —
+   *  the caller should steer toward a box or lasso instead of reporting
+   *  success. See isDegenerateProposal in viewer/promptResult. */
+  degenerate: boolean;
+  /** True when a session was sent but the answer came back one-shot: the
+   *  backend's region-grow fallback answered because the model didn't (it
+   *  was down, restarting, or failed on this prompt). Every session prompt
+   *  that the model accepts comes back session-scoped, so this is the one
+   *  way the fallback shows. The caller must say so; the mask is an
+   *  intensity fill, not the model's. */
+  modelFallback: boolean;
+  /** The response mask, for the caller to store as the session's
+   *  prevProposal. Null when sessionActive is false. */
+  proposal: Uint8Array | null;
 }
 
 async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
@@ -2429,6 +2619,27 @@ async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
   const ds = new (window as any).DecompressionStream("gzip");
   const stream = new Blob([buf]).stream().pipeThrough(ds);
   return await new Response(stream).arrayBuffer();
+}
+
+async function _compressGzip(bytes: Uint8Array): Promise<ArrayBuffer> {
+  // Same browser floor as _decompressGzip — CompressionStream and
+  // DecompressionStream shipped together everywhere that matters.
+  const cs = new (window as any).CompressionStream("gzip");
+  const stream = new Blob([bytes]).stream().pipeThrough(cs);
+  return await new Response(stream).arrayBuffer();
+}
+
+function _toBase64(buf: ArrayBuffer): string {
+  // btoa needs a binary string; build it in chunks because
+  // String.fromCharCode(...) has an argument-count ceiling far below a
+  // full-volume mask's gzip size.
+  const bytes = new Uint8Array(buf);
+  const CHUNK = 0x8000;
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
 }
 
 /**
@@ -2441,9 +2652,21 @@ async function _decompressGzip(buf: ArrayBuffer): Promise<ArrayBuffer> {
  * module comment above) — pass `isHd ? "full" : "low"` from the caller's own
  * hdReady state, not a guess.
  *
- * Returns the number of voxels changed (0 if the proposal was empty), or
+ * Returns counts of voxels actually modified (0 if the proposal was
+ * empty, or if every proposed voxel already held `activeSegmentIndex`), or
  * throws with a message safe to show the user (the backend already returns
  * plain-English error strings for the common cases — empty grow, no CT, etc).
+ *
+ * With `session` provided AND the backend confirming the session (see
+ * X-Prompt-Session), the apply is two-way: proposal voxels merge in as
+ * `activeSegmentIndex`, and voxels the session previously covered that the
+ * refined proposal no longer does are restored to their pre-session values.
+ * Without a confirmed session it behaves exactly as before — add-only.
+ *
+ * On a session's first request, voxels the target class already holds are
+ * shipped up as an initial segmentation (seed-from-mask), so the model
+ * refines the existing label instead of starting an empty object — see the
+ * inline comment at the seed scan below.
  */
 export async function submitInteractiveSegmentPrompt(
   apiBase: string,
@@ -2451,7 +2674,9 @@ export async function submitInteractiveSegmentPrompt(
   activeSegmentIndex: number,
   prompt: InteractivePrompt,
   res: "low" | "full",
-): Promise<number> {
+  session?: PromptSessionState,
+  signal?: AbortSignal,
+): Promise<InteractivePromptResult> {
   const segVolume = cache.getVolume(segmentationId);
   if (!segVolume) throw new Error("No segmentation loaded for this case.");
 
@@ -2466,23 +2691,86 @@ export async function submitInteractiveSegmentPrompt(
     ];
   }
   if (prompt.tolerance != null) body.tolerance = prompt.tolerance;
+  if (prompt.include === false) body.include = false;
+  if (session) body.session_token = session.token;
+  // Once this session holds an object, the server must still hold it too:
+  // answering from a brand-new session would come back as a one-prompt object
+  // and the retraction pass below would erase the rest (see
+  // PromptSessionLostError).
+  if (session?.prevProposal) body.expect_session = true;
+
+  // Seed-from-mask: on a session's FIRST request (no response yet — after one,
+  // prevProposal is non-null even for an empty result), any voxels the target
+  // class already holds are shipped up as an initial segmentation, so the
+  // model REFINES the existing label (nnInteractive's continue-from-seg mode)
+  // instead of starting an empty object next to it. This is what makes a
+  // shipped organ label correctable: arm the tool on "liver", right-click the
+  // overshoot, and the model carves it out of the real liver mask. The seed
+  // doubles as the retraction baseline for this first response, so seeded
+  // voxels the model rejects are cleared rather than orphaned.
+  let seedMask: Uint8Array | null = null;
+  if (session && session.prevProposal === null) {
+    const scalars = (segVolume as any)?.voxelManager?.getCompleteScalarDataArray?.()
+      ?? (segVolume as any)?.scalarData;
+    if (scalars) {
+      const seed = new Uint8Array(scalars.length);
+      let count = 0;
+      for (let idx = 0; idx < scalars.length; idx++) {
+        if (scalars[idx] === activeSegmentIndex) {
+          seed[idx] = 1;
+          count++;
+        }
+      }
+      if (count > 0) {
+        seedMask = seed;
+        body.initial_seg_gz_b64 = _toBase64(await _compressGzip(seed));
+      }
+    }
+  }
+  if (prompt.include === false && !session?.prevProposal && !seedMask) {
+    // A corrective prompt needs something to carve from — either an object
+    // this session already produced, or an existing label to seed with.
+    // Explain locally instead of burning a server round trip.
+    throw new Error("Add something to the object first. Removing then works on that object.");
+  }
 
   const httpRes = await fetch(`${apiBase}/api/interactive-segment/${caseId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
   if (!httpRes.ok) {
     let msg = `Interactive segmentation failed (${httpRes.status}).`;
+    let code: unknown = null;
     try {
       const j = await httpRes.json();
       if (j?.error) msg = j.error;
+      code = j?.code;
     } catch { /* body wasn't JSON — keep the generic message */ }
+    if (httpRes.status === 409 && code === "session_lost") throw new PromptSessionLostError(msg);
     throw new Error(msg);
   }
 
+  // Only trust the backend's word on session scope — if the region-grow
+  // fallback ran (or an older backend ignored the token), the mask is a
+  // one-shot proposal and replace semantics would wrongly retract voxels.
+  const sessionActive =
+    !!session && httpRes.headers.get("X-Prompt-Session") === "active";
+
   const gz = await httpRes.arrayBuffer();
   const niiBytes = await _decompressGzip(gz);
+  // A cancel that lands while the answer is being unpacked still wins: past
+  // this line the apply is synchronous, so the labelmap is either untouched
+  // or fully updated with its undo entry, never half of either.
+  if (signal?.aborted) throw new DOMException("The prompt was cancelled.", "AbortError");
+  // The viewer closed or reloaded its labelmap while the model was working:
+  // the volume this answer was meant for is gone, and applying it would
+  // write into a released volume and push an undo entry onto whatever case
+  // is open now.
+  if (cache.getVolume(segmentationId) !== segVolume) {
+    throw new DOMException("The labelmap changed while the prompt was running.", "AbortError");
+  }
 
   // Parse the proposal mask's voxel data directly from the raw NIfTI bytes,
   // instead of routing it through Cornerstone's volume loader. An earlier
@@ -2508,31 +2796,94 @@ export async function submitInteractiveSegmentPrompt(
     // Grid mismatch — almost certainly `res` didn't match the segmentation
     // volume's current resolution. Refuse rather than silently misapply.
     throw new Error(
-      "The proposal's resolution doesn't match the loaded segmentation — try again once loading finishes."
+      "The proposal's resolution doesn't match the loaded segmentation. Try again once loading finishes."
     );
   }
 
-  let changed = 0;
   // Sparse before/after capture for undo — only voxels this proposal
   // actually touches AND actually changes (skips a no-op write where the
   // voxel already held activeSegmentIndex), so undo/redo stay cheap even
-  // though `proposal.data` spans the whole volume.
-  const touchedIdx: number[] = [];
-  const priorValues: number[] = [];
-  for (let idx = 0; idx < proposal.data.length; idx++) {
-    if (proposal.data[idx]) {
-      if (segScalars[idx] !== activeSegmentIndex) {
-        touchedIdx.push(idx);
-        priorValues.push(segScalars[idx]);
-      }
-      segScalars[idx] = activeSegmentIndex;
-      changed++;
+  // though `proposal.data` spans the whole volume. `changed` is the count of
+  // REAL modifications, not raw proposal coverage — an earlier version
+  // counted every nonzero proposal voxel, so clicking an already-labeled
+  // structure reported "success (N vox)" while nothing changed and no undo
+  // entry existed.
+  //
+  // In session mode the proposal is the session's WHOLE object, so besides
+  // the add path there is a retraction path: a voxel the previous response
+  // covered, that this refined response no longer does, and that still
+  // holds activeSegmentIndex, goes back to its pre-session value. Both
+  // paths record prior AND next per voxel, since retractions don't write
+  // activeSegmentIndex.
+  // The retraction baseline: the previous session response, or — on a seeded
+  // first response — the seed itself, so voxels of the pre-existing label
+  // that the model's refinement dropped are retracted right away.
+  const sessionBaseline = session?.prevProposal ?? seedMask;
+  const prevProposal =
+    sessionActive && sessionBaseline && sessionBaseline.length === proposal.data.length
+      ? sessionBaseline
+      : null;
+
+  // Changed-region bbox from the model server ("i0,i1,j0,j1,k0,k1", upper
+  // exclusive): the prediction wrote only this slab, so outside it the
+  // proposal equals the session's previous response and neither the add nor
+  // the retraction condition can fire — both passes can skip it, which
+  // turns a ~35M-voxel scan into the patch (typically well under 1M).
+  // Anything missing or malformed falls back to the full volume. Side
+  // effect worth knowing: voxels the user brush-erased outside the slab
+  // between prompts are no longer re-added just because an old response
+  // covered them — the manual edit wins until the model writes there again.
+  const [nx, ny, nz] = proposal.dims;
+  let scan: [number, number, number, number, number, number] = [0, nx, 0, ny, 0, nz];
+  const bboxHeader = httpRes.headers.get("X-Changed-Bbox");
+  if (bboxHeader) {
+    const v = bboxHeader.split(",").map((s) => Number(s));
+    const within = (lo: number, hi: number, dim: number) =>
+      Number.isInteger(lo) && Number.isInteger(hi) && lo >= 0 && lo <= hi && hi <= dim;
+    if (v.length === 6 && within(v[0], v[1], nx) && within(v[2], v[3], ny) && within(v[4], v[5], nz)) {
+      scan = v as typeof scan;
     }
   }
+
+  const touchedIdx: number[] = [];
+  const priorValues: number[] = [];
+  const nextValues: number[] = [];
+  let added = 0;
+  let removed = 0;
+  for (let k = scan[4]; k < scan[5]; k++) {
+    for (let j = scan[2]; j < scan[3]; j++) {
+      let idx = scan[0] + nx * (j + ny * k);
+      for (let i = scan[0]; i < scan[1]; i++, idx++) {
+        if (proposal.data[idx]) {
+          if (segScalars[idx] !== activeSegmentIndex) {
+            if (sessionActive && !session!.priorValues.has(idx)) {
+              session!.priorValues.set(idx, segScalars[idx]);
+            }
+            touchedIdx.push(idx);
+            priorValues.push(segScalars[idx]);
+            nextValues.push(activeSegmentIndex);
+            segScalars[idx] = activeSegmentIndex;
+            added++;
+          }
+        } else if (prevProposal && prevProposal[idx] && segScalars[idx] === activeSegmentIndex) {
+          const restore = session!.priorValues.get(idx) ?? 0;
+          if (restore !== activeSegmentIndex) {
+            touchedIdx.push(idx);
+            priorValues.push(segScalars[idx]);
+            nextValues.push(restore);
+            segScalars[idx] = restore;
+            removed++;
+          }
+        }
+      }
+    }
+  }
+  const changed = touchedIdx.length;
   // The class this apply and its undo and redo report. A prompt can take voxels from
-  // another class, and that class's mesh is stale too, so then the event names no class.
+  // another class (and a retraction can hand them back), and that class's mesh is stale
+  // too, so then the event names no class.
   let seg = _foldSegment(0, activeSegmentIndex);
-  for (let n = 0; n < touchedIdx.length && seg !== -1; n++) seg = _foldSegment(seg, priorValues[n]);
+  for (let n = 0; n < changed && seg !== -1; n++) seg = _foldSegment(_foldSegment(seg, priorValues[n]), nextValues[n]);
   const editedSegment = seg > 0 ? seg : null;
   if (changed > 0) {
     (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
@@ -2547,27 +2898,112 @@ export async function submitInteractiveSegmentPrompt(
     // already use — it doesn't touch representations or actors, so it also
     // doesn't disturb camera position/zoom the way rebuilding did.
     _notifySegmentationChanged(editedSegment);
-
-    // Own undo/redo entry, same shared stack as smart fill / scissors /
-    // lasso (pushEditHistory below) — a SEPARATE stack from brush strokes
-    // (Cornerstone's own HistoryMemo), so undoing a point/box segment never
-    // also reverts (or gets shadowed by) an unrelated brush stroke; see
-    // undoMaskEdit's recency check for how the two stacks interleave.
-    if (touchedIdx.length > 0) {
-      const applyAndRefresh = (values: number[]) => {
-        touchedIdx.forEach((idx, i) => { segScalars[idx] = values[i]; });
-        (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
-        _notifySegmentationChanged(editedSegment);
-      };
-      const redoValues = touchedIdx.map(() => activeSegmentIndex);
-      pushEditHistory({
-        undo: () => applyAndRefresh(priorValues),
-        redo: () => applyAndRefresh(redoValues),
-      });
-    }
   }
 
-  return changed;
+  // Own undo/redo entry, same shared stack as smart fill / scissors /
+  // lasso (pushEditHistory below) — a SEPARATE stack from brush strokes
+  // (Cornerstone's own HistoryMemo), so undoing a point/box segment never
+  // also reverts (or gets shadowed by) an unrelated brush stroke; see
+  // undoMaskEdit's recency check for how the two stacks interleave.
+  //
+  // Pushed for every session apply even when no voxel changed: the server
+  // recorded an interaction either way, and this stack must stay 1:1 with
+  // the server's interaction stack or a later ctrl+z would rewind the
+  // wrong server interaction.
+  if (changed > 0 || sessionActive) {
+    const applyAndRefresh = (values: number[]) => {
+      if (touchedIdx.length === 0) return;
+      touchedIdx.forEach((idx, i) => { segScalars[idx] = values[i]; });
+      (segVolume as any)?.voxelManager?.setCompleteScalarDataArray?.(segScalars);
+      _notifySegmentationChanged(editedSegment);
+    };
+    // The session baseline BEFORE this apply — the caller overwrites
+    // prevProposal with this response right after we return, so undo has
+    // to put the older one back for the next prompt's retraction pass.
+    // Held in a slot on the session, not the closure: once a newer apply
+    // lands this entry can no longer rewind the server, so the slot is
+    // emptied and its undo ends the session instead of restoring it.
+    const baseline = { before: session ? session.prevProposal : null, released: false };
+    if (sessionActive && session) {
+      if (session.undoBaseline) {
+        session.undoBaseline.before = null;
+        session.undoBaseline.released = true;
+      }
+      session.undoBaseline = baseline;
+    }
+    const marker: PromptMarker | null =
+      sessionActive && session
+        ? {
+            world: [prompt.pointLps[0], prompt.pointLps[1], prompt.pointLps[2]],
+            include: prompt.include !== false,
+          }
+        : null;
+    if (marker) session!.markers.push(marker);
+    // The server recorded this interaction and holds one undo snapshot for
+    // it.
+    if (sessionActive && session) session.serverUndoReady = true;
+    pushEditHistory({
+      undo: () => {
+        applyAndRefresh(priorValues);
+        if (sessionActive && session) {
+          if (baseline.released) session.dead = true;
+          else session.prevProposal = baseline.before;
+          if (marker) {
+            const at = session.markers.lastIndexOf(marker);
+            if (at >= 0) session.markers.splice(at, 1);
+          }
+          // Fire-and-forget: the labelmap is already restored above, and
+          // any sync failure marks the session dead, which is consistent
+          // too (the next prompt re-seeds from the restored labelmap).
+          // There is no server context left to rewind after a redo (dead)
+          // or once the server's one undo snapshot is used up; those end
+          // the session here rather than asking for an undo that can only
+          // come back 409.
+          if (!session.dead) {
+            if (session.serverUndoReady) {
+              session.serverUndoReady = false;
+              void _undoPromptOnServer(apiBase, caseId, session);
+            } else {
+              session.dead = true;
+            }
+          }
+        }
+      },
+      redo: () => {
+        applyAndRefresh(nextValues);
+        // The model server keeps a single undo snapshot and has no redo,
+        // so the re-applied voxels are context it no longer holds — end
+        // the session; the next prompt re-seeds from the redone labelmap.
+        if (sessionActive && session) {
+          if (marker) session.markers.push(marker);
+          session.dead = true;
+          session.serverUndoReady = false;
+        }
+      },
+    });
+  }
+
+  return {
+    changed,
+    added,
+    removed,
+    sessionActive,
+    // A "successful" first prompt that landed almost no voxels is a failed
+    // prompt in user terms (the lung point-click case: 8 voxels out of a
+    // 1.5M voxel organ). Flag it so the hook can steer the user to a box or
+    // lasso instead of logging "+8 vox" as a success they can't even see.
+    degenerate: isDegenerateProposal({
+      added,
+      removed,
+      firstPrompt: !sessionBaseline,
+      include: prompt.include !== false,
+    }),
+    modelFallback: !!session && !sessionActive,
+    // Retaining the response view keeps the whole decompressed .nii buffer
+    // alive — one uint8 volume, same order of cost the app already pays per
+    // loaded mask, and it's dropped when the session ends.
+    proposal: sessionActive ? proposal.data : null,
+  };
 }
 
 /**
@@ -4304,6 +4740,40 @@ export function worldToCanvasPoint(pane: CinePane, world: Point3): [number, numb
   if (!viewport) return null;
   try {
     const [x, y] = viewport.worldToCanvas(world) as Point2;
+    return [x, y];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Canvas position for a prompt marker on `pane`, or null when the marker's
+ * world point isn't on the pane's CURRENT slice (within half a voxel along
+ * the view normal) or projects outside the canvas. worldToCanvas projects
+ * onto the view plane regardless of depth, so without the slab check a
+ * marker placed on axial slice 80 would float over every axial slice.
+ */
+export function projectPromptMarker(pane: CinePane, world: Point3): [number, number] | null {
+  const engine = getRenderingEngine(renderingEngineId);
+  if (!engine) return null;
+  const viewport = engine.getViewport(CINE_VIEWPORT_BY_PANE[pane]) as any;
+  if (!viewport) return null;
+  try {
+    const cam = viewport.getCamera?.();
+    const n = cam?.viewPlaneNormal;
+    const f = cam?.focalPoint;
+    if (!n || !f) return null;
+    const dist = Math.abs(
+      (world[0] - f[0]) * n[0] + (world[1] - f[1]) * n[1] + (world[2] - f[2]) * n[2]
+    );
+    const spacing = viewport.getImageData?.()?.spacing ?? [1, 1, 1];
+    const halfSlab =
+      (Math.abs(n[0]) * spacing[0] + Math.abs(n[1]) * spacing[1] + Math.abs(n[2]) * spacing[2]) / 2 +
+      1e-3;
+    if (dist > halfSlab) return null;
+    const [x, y] = viewport.worldToCanvas(world) as Point2;
+    const el = viewport.canvas as HTMLCanvasElement | undefined;
+    if (el && (x < 0 || y < 0 || x > el.clientWidth || y > el.clientHeight)) return null;
     return [x, y];
   } catch {
     return null;
