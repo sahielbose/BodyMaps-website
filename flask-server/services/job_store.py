@@ -12,7 +12,7 @@ that step additive.
 import json
 import os
 import shutil
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -155,6 +155,190 @@ def delete_jobs_for_user(user_id: str) -> dict:
 
     removed = sum(1 for p in paths if _remove_artifact(p, root))
     return {"jobs": job_count, "files": removed}
+
+
+# Where the in-process inference path keeps each run: <repo>/tmp/<session>/,
+# holding the CT copy, the masks, auto_masks.zip and job.json, which names the
+# owner. api_blueprint.SESSIONS_DIR is this same folder.
+RUNS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tmp"))
+
+
+def _read_text(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def delete_run_folders_for_user(
+    user_id: str,
+    is_active=lambda _session_id: False,
+    runs_root: str | None = None,
+    uploads_root: str | None = None,
+) -> list[str]:
+    """Delete the folders the in-process inference path keeps for a user.
+
+    That path, the one the Upload page uses, never writes the job table, so
+    delete_jobs_for_user can't see its runs. A run names its owner in
+    <runs_root>/<session>/job.json; a CT uploaded ahead of Run names it in
+    <uploads_root>/<session>/.owner. A session ``is_active`` reports as still
+    queued or running is left for its worker. Folders with no owner record
+    can't be attributed and are left alone. Returns the session ids removed;
+    never raises.
+    """
+    runs_root = runs_root or RUNS_DIR
+    uploads_root = uploads_root or os.path.join(Constants.SESSIONS_DIR_NAME, "inference")
+
+    def folders(root: str) -> list[tuple[str, str]]:
+        try:
+            return [(name, os.path.join(root, name)) for name in os.listdir(root)]
+        except OSError:
+            return []
+
+    removed: set[str] = set()
+    for name, path in folders(runs_root):
+        raw = _read_text(os.path.join(path, "job.json"))
+        try:
+            job = json.loads(raw) if raw else None
+        except ValueError:
+            job = None
+        if not isinstance(job, dict) or job.get("user_id") != user_id or is_active(name):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed.add(name)
+
+    for name, path in folders(uploads_root):
+        owner = _read_text(os.path.join(path, ".owner"))
+        if owner is None or owner.strip() != user_id or is_active(name):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed.add(name)
+    return sorted(removed)
+
+
+# What GET /api/me/runs sends at most, and how many of the newest run folders
+# it will read to find them. A run's folder is touched on every status change,
+# so the newest folders are where a user's recent runs are; the cap keeps the
+# listing cheap on a server that has kept a great many runs.
+RUN_LIST_LIMIT = 50
+_RUN_SCAN_LIMIT = 2000
+_RUN_STATUSES = frozenset({"queued", "running", "completed", "failed", "cancelled"})
+
+
+def list_run_records_for_user(
+    user_id: str,
+    live_job=lambda _session_id: None,
+    runs_root: str | None = None,
+    limit: int = RUN_LIST_LIMIT,
+) -> list[dict]:
+    """A user's runs from the Upload page's in-process path, newest first.
+
+    Reads what delete_run_folders_for_user reads, <runs_root>/<session>/job.json,
+    and only ever returns a record that names ``user_id`` as its owner: one with
+    no owner, or another one, is not theirs to see. Each entry carries the
+    session id, model, status and creation time (ISO 8601, UTC) and nothing
+    else, so no server paths or file names leave with it. ``live_job`` gives
+    the in-memory record for a session this process is running; a record still
+    "queued" or "running" on disk with no such record belonged to a process that
+    has since gone, so it reads as failed, as get_inference_status reports it.
+    Never raises.
+    """
+    runs_root = runs_root or RUNS_DIR
+    try:
+        names = os.listdir(runs_root)
+    except OSError:
+        return []
+
+    stamped = []
+    for name in names:
+        try:
+            stamped.append((os.stat(os.path.join(runs_root, name, "job.json")).st_mtime, name))
+        except OSError:
+            continue  # not a run folder (job_durations.jsonl, an upload with no run yet)
+    stamped.sort(reverse=True)
+
+    runs = []
+    for touched, name in stamped[:_RUN_SCAN_LIMIT]:
+        raw = _read_text(os.path.join(runs_root, name, "job.json"))
+        try:
+            record = json.loads(raw) if raw else None
+        except ValueError:
+            record = None
+        if not isinstance(record, dict) or record.get("user_id") != user_id:
+            continue
+        live = live_job(name)
+        status = str((live or record).get("status") or "").lower()
+        if status in ("queued", "running") and not live:
+            status = "failed"
+        if status not in _RUN_STATUSES:
+            continue
+        created = record.get("created_at")
+        if not isinstance(created, (int, float)) or isinstance(created, bool):
+            created = touched  # runs from before the start time was kept
+        try:
+            created_at = datetime.fromtimestamp(created, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            created, created_at = touched, datetime.fromtimestamp(touched, timezone.utc).isoformat()
+        runs.append({
+            "session_id": name,
+            "model": str(record.get("model") or ""),
+            "status": status,
+            "created_at": created_at,
+            "_created": created,
+        })
+    runs.sort(key=lambda run: run["_created"], reverse=True)
+    return [{k: v for k, v in run.items() if k != "_created"} for run in runs[:limit]]
+
+
+# The most session ids one ownership check takes (the Upload page keeps 200).
+OWNED_CHECK_LIMIT = 500
+
+
+def owned_run_sessions(
+    user_id: str,
+    session_ids,
+    live_job=lambda _session_id: None,
+    runs_root: str | None = None,
+    uploads_root: str | None = None,
+) -> list[str]:
+    """Which of these session ids belong to ``user_id``, in the order given.
+
+    Goes by the records delete_run_folders_for_user goes by (a run's job.json,
+    a CT uploaded ahead of Run and its .owner), plus the in-memory job of a run
+    this process is working on, so it names exactly the sessions that deleting
+    the account's history would remove, whatever the listing's cap leaves out.
+    An id is only ever looked up by name in those folders, never joined into a
+    path unless it is a plain id. Ids that are not plain ids, that repeat, or
+    that are past OWNED_CHECK_LIMIT are ignored, and only the caller's own are
+    returned: nothing is said about anyone else's. Never raises.
+    """
+    from api.path_safety import is_safe_id
+
+    runs_root = runs_root or RUNS_DIR
+    uploads_root = uploads_root or os.path.join(Constants.SESSIONS_DIR_NAME, "inference")
+    owned: list[str] = []
+    seen: set[str] = set()
+    for session_id in list(session_ids)[:OWNED_CHECK_LIMIT]:
+        if not is_safe_id(session_id) or session_id in seen:
+            continue
+        seen.add(session_id)
+        live = live_job(session_id)
+        if isinstance(live, dict) and live.get("user_id") == user_id:
+            owned.append(session_id)
+            continue
+        raw = _read_text(os.path.join(runs_root, session_id, "job.json"))
+        try:
+            record = json.loads(raw) if raw else None
+        except ValueError:
+            record = None
+        if isinstance(record, dict) and record.get("user_id") == user_id:
+            owned.append(session_id)
+            continue
+        marker = _read_text(os.path.join(uploads_root, session_id, ".owner"))
+        if marker is not None and marker.strip() == user_id:
+            owned.append(session_id)
+    return owned
 
 
 def update_job(session_id: str, **fields) -> dict | None:

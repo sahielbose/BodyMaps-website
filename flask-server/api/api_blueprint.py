@@ -36,6 +36,7 @@ from services.ollama_client import (
     resolve_vision_model,
 )
 from services import ai_reasoning
+from services import job_store
 from services import lesion_grounding
 from services.segmentation_metrics import calculate_session_metrics
 from services.search_ranking import rank_quality_results, select_balanced_tumor_results
@@ -145,7 +146,11 @@ import threading
 # path-construction site.
 from .path_safety import is_safe_id as _is_safe_id
 from .auth import current_user, require_auth, require_role
-from .chunk_store import first_missing_chunk, received_chunks, sweep_stale_uploads
+from .chunk_store import (
+    DISCARD_NOTE, FinalizeHeartbeat, acquire_finalize_lock, finalize_running,
+    first_missing_chunk, received_chunks, sweep_discarded_uploads, sweep_stale_uploads,
+    takeover_in_progress,
+)
 from services import plan_store, role_store
 
 
@@ -399,7 +404,7 @@ from collections import OrderedDict, defaultdict
 from openpyxl import load_workbook
 
 
-SESSIONS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "tmp")
+SESSIONS_DIR = job_store.RUNS_DIR
 PDF_DIR = f"{Constants.PERMISSIONS_DIR}/pdf"
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 try:
@@ -2265,6 +2270,21 @@ except (TypeError, ValueError):
     _INFERENCE_MAX_PENDING = 3 + max_parallel_jobs()
 _INFERENCE_PENDING_SLOTS = threading.BoundedSemaphore(_INFERENCE_MAX_PENDING)
 
+# A run request goes on after its client gives up: it copies and checks the CT
+# for seconds before it makes the job, so a Cancel in that time finds no job to
+# stop. The cancel is remembered here (session -> (account, when)), and the
+# request stops when it next looks; see _cancelled_since. Held in memory, like
+# the jobs it cancels (cancel_session only reaches this process's subprocesses).
+# Keyed by (session, account) so one account's cancel can never replace
+# another's: a cancel is noted before the access check (there is no job to
+# check yet), and a single slot per session let a second account that held the
+# id wipe the owner's. Bounded, so no account can grow it without limit or push
+# other accounts' entries out.
+_early_cancels = {}
+_EARLY_CANCEL_TTL_SECONDS = 60 * 60
+_EARLY_CANCEL_MAX_PER_ACCOUNT = 256
+_EARLY_CANCEL_MAX_TOTAL = 8192
+
 
 def _job_meta_path(session_id):
     # secure_filename is the CodeQL-recognised path-injection barrier (see
@@ -2384,6 +2404,32 @@ def _set_inference_job(session_id, **kwargs):
             print(f"[usage finish] {session_id}: {e}")
 
 
+def _note_cancel(session_id, user_id):
+    now = time.time()
+    with _inference_jobs_lock:
+        for stale in [key for key, at in _early_cancels.items() if now - at > _EARLY_CANCEL_TTL_SECONDS]:
+            del _early_cancels[stale]
+        _early_cancels[(session_id, user_id)] = now
+        # The account's own oldest go first, so a flood from one account only
+        # ever costs that account its own remembered cancels.
+        mine = [key for key in _early_cancels if key[1] == user_id]
+        for key in sorted(mine, key=_early_cancels.get)[: max(0, len(mine) - _EARLY_CANCEL_MAX_PER_ACCOUNT)]:
+            del _early_cancels[key]
+        for key in sorted(_early_cancels, key=_early_cancels.get)[: max(0, len(_early_cancels) - _EARLY_CANCEL_MAX_TOTAL)]:
+            del _early_cancels[key]
+
+
+def _cancelled_since(session_id, user_id, since):
+    """Whether this account cancelled the session after ``since`` (a run request's start).
+
+    Only cancels that came in while the request was running count, so a run
+    started again under the same session id afterwards is not stopped by it.
+    """
+    with _inference_jobs_lock:
+        at = _early_cancels.get((session_id, user_id))
+    return at is not None and at >= since
+
+
 def _get_inference_job(session_id):
     """Look up a job, falling back to its on-disk copy after a restart.
 
@@ -2401,11 +2447,19 @@ def _get_inference_job(session_id):
         if os.path.exists(path):
             with open(path) as f:
                 disk = json.load(f)
-            if (disk.get("status") or "").lower() in ("running", "queued"):
+            interrupted = (disk.get("status") or "").lower() in ("running", "queued")
+            if interrupted:
                 disk["status"] = "failed"
                 disk["error"] = disk.get("error") or "Interrupted by server restart"
             with _inference_jobs_lock:
                 inference_jobs.setdefault(session_id, disk)
+            if interrupted:
+                # Free the plan's concurrent slot too, or the dead run keeps
+                # blocking new scans. Best-effort, like _set_inference_job.
+                try:
+                    plan_store.finish_inference(session_id)
+                except Exception as e:
+                    print(f"[usage finish] {session_id}: {e}")
             return inference_jobs.get(session_id)
     except Exception as e:
         print(f"[job rehydrate] {session_id}: {e}")
@@ -2429,6 +2483,41 @@ def _job_for_current_user(session_id):
     if not user or (owner_id != user["id"] and not is_admin):
         return None, (jsonify({"error": "You don't have access to this session."}), 403)
     return job, None
+
+
+def delete_inference_runs_for_user(user_id):
+    """Delete a user's in-process runs and pre-uploads, and forget them here.
+
+    Runs still queued or running are left for their worker (see
+    job_store.delete_run_folders_for_user). Returns how many were removed.
+    """
+    def is_active(session_id):
+        job = inference_jobs.get(session_id) or {}
+        return (job.get("status") or "").lower() in ("queued", "running")
+
+    removed = job_store.delete_run_folders_for_user(user_id, is_active, runs_root=SESSIONS_DIR)
+    with _inference_jobs_lock:
+        for session_id in removed:
+            inference_jobs.pop(session_id, None)
+    return len(removed)
+
+
+def list_inference_runs_for_user(user_id):
+    """The user's in-process runs, newest first, for GET /api/me/runs.
+
+    A record found only on disk that says queued or running belongs to an
+    earlier process and reads as failed (see job_store.list_run_records_for_user).
+    """
+    return job_store.list_run_records_for_user(
+        user_id, live_job=inference_jobs.get, runs_root=SESSIONS_DIR,
+    )
+
+
+def owned_inference_sessions_for_user(user_id, session_ids):
+    """Which of these sessions are the user's, for POST /api/me/runs/owned."""
+    return job_store.owned_run_sessions(
+        user_id, session_ids, live_job=inference_jobs.get, runs_root=SESSIONS_DIR,
+    )
 
 
 def _uploaded_file_candidate(session_id, uploaded_filename):
@@ -2487,6 +2576,98 @@ def _read_owner_marker(session_id):
         return None
 
 
+def _finalized_owner_refuses(session_id, user):
+    """Whether this session's finalized upload belongs to an account the caller is not.
+
+    A session id is not a claim on a folder: someone who holds another
+    account's id must not stage chunks under it or discard it.
+    """
+    owner_id = _read_owner_marker(session_id)
+    return (
+        owner_id is not None
+        and owner_id != user["id"]
+        and not role_store.has_role(user["id"], role_store.ROLE_ADMIN)
+    )
+
+
+_DISCARD_FILENAME = DISCARD_NOTE
+
+
+def _discard_marker_path(session_id):
+    return os.path.join(
+        Constants.SESSIONS_DIR_NAME, "inference", secure_filename(session_id),
+        _DISCARD_FILENAME,
+    )
+
+
+def _mark_discarded(session_id):
+    """Leave word that this session's upload was taken back while being finalized."""
+    path = _discard_marker_path(session_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8"):
+        pass
+
+
+def _discard_requested(session_id):
+    return os.path.exists(_discard_marker_path(session_id))
+
+
+class _HeldFinalizeLock:
+    """A staging folder's finalize lock, and the heartbeat that keeps it fresh."""
+
+    def __init__(self, path):
+        self.path = path
+        self.heartbeat = FinalizeHeartbeat(path)
+
+
+def _take_finalize_lock(staging):
+    """Take the finalize lock of a staging folder: (held lock, None) or (None, refusal).
+
+    Shared by both finalizes (chunks and DICOM) so they, discard and the sweep
+    all go by the one lock and the one rule for a dead one (see chunk_store).
+    """
+    lock_path = os.path.join(staging, ".finalizing")
+    try:
+        locked = acquire_finalize_lock(lock_path)
+    except FileNotFoundError:
+        return None, (jsonify({"error": "Upload session not found"}), 404)
+    if not locked:
+        # Someone else's lock: only the request that took it may release it.
+        return None, (jsonify({"error": "Upload is already being finalized"}), 409)
+    try:
+        return _HeldFinalizeLock(lock_path), None
+    except BaseException:
+        # The heartbeat could not start (no thread to be had): nothing will
+        # touch the lock and the caller has no handle to release it by, so
+        # it would refuse every retry until it went stale.
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+        raise
+
+
+def _release_finalize_lock(held, session_id):
+    """Give the lock back, and finish a discard that came in while it was held.
+
+    A discard that saw the lock was told this request would do its deleting;
+    if the request failed, the chunks are still staged and the file may be too.
+    """
+    if held is None:
+        return
+    held.heartbeat.stop()
+    try:
+        os.remove(held.path)
+    except OSError:
+        pass
+    if _discard_requested(session_id):
+        _remove_staging_session(session_id)
+        # A finalize refused for ownership has no say over a folder that is not its own.
+        owner_id = _read_owner_marker(session_id)
+        if owner_id is None or owner_id == current_user()["id"]:
+            _remove_finalized_upload(session_id)
+
+
 def _write_owner_marker(session_id, user_id):
     """Persist upload ownership atomically before exposing its finalized path."""
     path = _owner_marker_path(session_id)
@@ -2500,7 +2681,92 @@ def _write_owner_marker(session_id, user_id):
     return True
 
 
-def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None):
+# Sessions whose run request is between its ownership check and the moment its
+# job exists (or it is refused), and the account that made the request. That
+# stretch copies and checks the CT, which takes seconds, and two requests for
+# one session (a tab's replay after a reload, two tabs, a double click) used to
+# both get through it: both copied, both went on to start a worker. While it
+# lasts the owner's status check answers "starting" and a discard is held back
+# for the request (see _hold_discard_while_reserved).
+# Held in memory like the job table it guards, which is how the app runs (one
+# worker process; see deploy/).
+_dispatching = {}
+
+
+def _cancelled_before_running(job):
+    """Whether this job was cancelled before it got the GPU, so nothing ever ran on the upload."""
+    return (job.get("status") or "").lower() == "cancelled" and not job.get("started_at")
+
+
+def _dispatch_reserved(session_id):
+    with _inference_jobs_lock:
+        return session_id in _dispatching
+
+
+def _reserve_dispatch(session_id, user_id):
+    """Take the right to start a run for this session; False when one is already going.
+
+    Refused while another request holds it, and while the session has a job
+    that is queued or running, so a second request is never started next to a
+    run in progress. A finished job does not stop a run being started again.
+    """
+    with _inference_jobs_lock:
+        job = inference_jobs.get(session_id) or {}
+        if session_id in _dispatching or (job.get("status") or "").lower() in ("queued", "running"):
+            return False
+        _dispatching[session_id] = user_id
+        return True
+
+
+# Sessions whose owner asked for the upload to be discarded while the run
+# request holding the session was still copying it. Kept here and not as a note
+# beside the file: the discard note in the upload's folder means "delete this
+# folder now" to the finalize and to the periodic sweep, and a sweep that met
+# one while the request was copying would delete the CT from under it.
+_held_discards = set()
+
+
+def _release_dispatch(session_id):
+    """Let go of the session; returns whether a discard was held back for it."""
+    with _inference_jobs_lock:
+        _dispatching.pop(session_id, None)
+        held = session_id in _held_discards
+        _held_discards.discard(session_id)
+        return held
+
+
+def _hold_discard_while_reserved(session_id, user_id):
+    """Keep the discard for the run request that holds this session, if this account's does.
+
+    The request is copying the finalized CT, so deleting it now would pull the
+    file out from under it. Its owner's discard is remembered instead, and the
+    request carries it out when it ends without a run (see
+    _carry_out_held_discard). Taken under the same lock as the release, so a
+    discard is either seen by that request when it ends or refused here because
+    it has already let go: never left unread. Returns whether the session is
+    reserved by this account.
+    """
+    with _inference_jobs_lock:
+        if _dispatching.get(session_id) != user_id:
+            return False
+        _held_discards.add(session_id)
+        return True
+
+
+def _carry_out_held_discard(session_id, held, started):
+    """Act on a discard that came in while this session's run request was going.
+
+    A run that started works from its own copy and the upload is the run's now,
+    so the discard is dropped. A request that ended without one (cancelled,
+    refused, failed) is the last thing that could have used the upload, so the
+    discard it was holding back is carried out here.
+    """
+    if held and not started:
+        _remove_finalized_upload(session_id)
+
+
+def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_path=None, received_at=None):
+    received_at = time.time() if received_at is None else received_at
     safe_session_id = secure_filename(session_id or "")
     if not _is_safe_id(session_id) or safe_session_id != session_id:
         return jsonify({"error": "Invalid session ID"}), 400
@@ -2521,6 +2787,33 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
     )
     if ownership_conflict and not role_store.has_role(user["id"], role_store.ROLE_ADMIN):
         return jsonify({"error": "You don't have access to this session."}), 403
+    # Before the plan check and everything that costs something: a request for a
+    # session that is already being started is not metered, and answers with a
+    # code the page follows as "the job exists" instead of failing the run.
+    if not _reserve_dispatch(session_id, user["id"]):
+        return jsonify({
+            "error": "A run for this session is already going.",
+            "code": "run_in_progress",
+        }), 409
+    started = False
+    try:
+        result = _start_reserved_segmentation(
+            session_id, safe_session_id, model_name, user, ct_file, server_input_path, received_at,
+        )
+        started = isinstance(result, tuple) and result[1] == 200
+        return result
+    finally:
+        # Every way out: the job exists by now (and holds the session), or the
+        # request was refused or failed and nothing is left to protect.
+        held = _release_dispatch(session_id)
+        # A discard that came in before the release is seen here; one after it
+        # is answered as an ordinary one (see _hold_discard_while_reserved).
+        _carry_out_held_discard(session_id, held, started)
+
+
+def _start_reserved_segmentation(
+    session_id, safe_session_id, model_name, user, ct_file, server_input_path, received_at,
+):
     blocked = plan_store.check_inference(user["id"], model_name)
     if blocked is not None:
         # 402 Payment Required: the request is well-formed and the user is
@@ -2596,6 +2889,16 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
                 ),
             }), 400
 
+    # The user may have cancelled while the file was being copied and checked:
+    # no job existed for that Cancel to stop. Stopped here it costs no scan.
+    if _cancelled_since(session_id, user["id"], received_at):
+        try:
+            if input_path and os.path.isfile(input_path):
+                os.remove(input_path)
+        except OSError:
+            pass
+        return jsonify({"error": "This run was cancelled.", "code": "cancelled"}), 409
+
     # Metered only once the run is definitely going ahead — every early return
     # above is a request that never reached the queue and mustn't cost a scan.
     # Admission control covers both the running job and jobs waiting behind
@@ -2634,13 +2937,25 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
             status="queued",
             model=model_name,
             error=None,
+            # Set when the run gets the GPU (see _cancelled_before_running); a
+            # run of this session before this one must not leave its mark.
+            started_at=None,
             ct_path=input_path,
             session_path=session_path,
             zip_path=os.path.join(session_path, "auto_masks.zip"),
+            # Kept for GET /api/me/runs, which lists a user's runs newest first.
+            created_at=time.time(),
         )
     except Exception:
         _INFERENCE_PENDING_SLOTS.release()
         raise
+
+    # A Cancel that came in after the look above but before the job existed
+    # found nothing to stop (cancel_inference_session notes it before looking).
+    if _cancelled_since(session_id, user["id"], received_at):
+        _set_inference_job(session_id, status="cancelled", error="Cancelled by user")
+        _INFERENCE_PENDING_SLOTS.release()
+        return jsonify({"error": "This run was cancelled.", "code": "cancelled"}), 409
 
     def _job_status():
         job = inference_jobs.get(session_id) or {}
@@ -2673,7 +2988,7 @@ def _start_auto_segmentation(session_id, model_name, ct_file=None, server_input_
             if _job_status() == "cancelled":
                 return False
             run_started_at[0] = time.time()
-            _set_inference_job(session_id, status="running")
+            _set_inference_job(session_id, status="running", started_at=run_started_at[0])
             return True
 
         try:
@@ -2787,6 +3102,7 @@ def run_epai_inference():
       - session_id
       - uploaded_filename (used with chunked upload output in sessions/inference/<session_id>/)
     """
+    received_at = time.time()
     payload = _json_payload()
 
     def _pick_text(*keys):
@@ -2892,12 +3208,21 @@ def run_epai_inference():
         model_name=model_name,
         ct_file=ct_file,
         server_input_path=input_server_path,
+        received_at=received_at,
     )
 
 
 @api_blueprint.route('/inference-status/<session_id>', methods=['GET'])
 @require_auth
 def get_inference_status(session_id):
+    # A run request of this account's is still copying and checking the CT: no
+    # job yet, but not "not found" either (a page that follows the run must not
+    # give up on it). Only the account that made the request is told.
+    user = current_user()
+    with _inference_jobs_lock:
+        starting = bool(user) and _dispatching.get(session_id) == user["id"]
+    if starting:
+        return jsonify({"status": "starting", "session_id": session_id}), 200
     job, access_error = _job_for_current_user(session_id)
     if access_error:
         if access_error[1] == 404:
@@ -2986,6 +3311,10 @@ def cancel_inference_session(session_id):
     try:
         if not _is_safe_id(session_id):
             return jsonify({"error": "Invalid session ID"}), 400
+        # Before looking for the job: a run request that has yet to make it
+        # stops itself when it sees this (see _cancelled_since), and one that
+        # makes it first is found below.
+        _note_cancel(session_id, current_user()["id"])
         job, access_error = _job_for_current_user(session_id)
         if access_error:
             return access_error
@@ -3418,25 +3747,32 @@ _last_upload_sweep = 0.0
 
 
 def _maybe_sweep_uploads():
-    """Reclaim abandoned staging dirs at most once every five minutes."""
+    """Reclaim abandoned staging dirs and discarded uploads at most once every five minutes."""
     global _last_upload_sweep
     now = time.monotonic()
     with _upload_sweep_lock:
         if now - _last_upload_sweep < 300:
             return
         _last_upload_sweep = now
+    sweep_discarded_uploads(os.path.join(Constants.SESSIONS_DIR_NAME, "inference"), CHUNK_DIR)
     sweep_stale_uploads(CHUNK_DIR)
 
 
 def _staging_for_current_user(session_id, create=False):
-    """Return the staging directory if it belongs to the signed-in caller."""
+    """Return the staging directory if it belongs to the signed-in caller.
+
+    Refused as well when a finalized upload already under this session id
+    belongs to another account.
+    """
     session_folder = os.path.join(CHUNK_DIR, secure_filename(session_id))
+    user = current_user()
+    if _finalized_owner_refuses(session_id, user):
+        return None, (jsonify({"error": "You don't have access to this upload."}), 403)
     if not os.path.isdir(session_folder):
         if not create:
             return session_folder, None
         os.makedirs(session_folder, exist_ok=True)
 
-    user = current_user()
     marker_path = os.path.join(session_folder, _UPLOAD_OWNER_FILE)
     try:
         with open(marker_path, encoding="utf-8") as marker:
@@ -3546,9 +3882,11 @@ def upload_inference_chunk():
         os.utime(session_folder, None)
 
         return jsonify({"status": "ok", "chunk_index": chunk_number})
-    except Exception as e:
-        print(f"❌ Chunk upload error: {e}")
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        # The exception text carries server paths (an OSError names the file);
+        # it goes to the log, and the client gets a plain message.
+        current_app.logger.exception("Chunk upload failed")
+        return jsonify({"error": "Could not save the upload chunk"}), 500
 
 
 @api_blueprint.route("/finalize-upload", methods=["POST"])
@@ -3561,7 +3899,7 @@ def finalize_upload():
         - total_chunks
         - output_filename (optional)
     """
-    lock_path = None
+    held_lock = None
     partial_path = None
     try:
         _maybe_sweep_uploads()
@@ -3579,12 +3917,9 @@ def finalize_upload():
             return jsonify({"error": "Upload session not found"}), 404
         if not _record_total_chunks(temp_folder, total_chunks):
             return jsonify({"error": "total_chunks does not match the upload"}), 409
-        lock_path = os.path.join(temp_folder, ".finalizing")
-        try:
-            lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            os.close(lock_fd)
-        except FileExistsError:
-            return jsonify({"error": "Upload is already being finalized"}), 409
+        held_lock, refused = _take_finalize_lock(temp_folder)
+        if refused:
+            return refused
         output_filename = request.form.get("output_filename", "inference_input.gz")
         requested_bdmap_id = request.form.get("bdmap_id") or request.form.get("case_id")
 
@@ -3634,6 +3969,7 @@ def finalize_upload():
 
         # Assemble outside the visible destination and publish with one atomic
         # replace, so a crash can never leave a truncated CT at final_path.
+        _remove_dead_partials(final_path)
         partial_path = f"{final_path}.partial-{uuid.uuid4().hex}"
         with open(partial_path, "xb") as out_file:
             for chunk_path in chunk_paths:
@@ -3650,26 +3986,133 @@ def finalize_upload():
 
         _remove_staging_session(safe_session_id)
 
+        # discard_upload cannot delete what this request is still making (the
+        # owner marker it goes by is only written above), so it leaves a note
+        # before it looks at the lock, and it is read only after the staging
+        # folder holding that lock is gone: a discard that saw the lock has
+        # written its note by now.
+        if _discard_requested(safe_session_id):
+            _remove_finalized_upload(safe_session_id)
+            return jsonify({"error": "This upload was discarded."}), 409
+
         uploaded_filename = os.path.relpath(final_path, base_path)
         return jsonify({
             "status": "combined",
             "bdmap_id": bdmap_id,
             "uploaded_filename": uploaded_filename,
         })
-    except Exception as e:
-        print(f"❌ Finalize upload error: {e}")
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        current_app.logger.exception("Finalize upload failed")
+        return jsonify({"error": "Could not assemble the upload"}), 500
     finally:
         if partial_path:
             try:
                 os.remove(partial_path)
             except OSError:
                 pass
-        if lock_path:
+        _release_finalize_lock(held_lock, session_id)
+
+def _remove_dead_partials(final_path):
+    """Delete half-assembled files beside ``final_path``.
+
+    The caller holds the finalize lock, so any that are here belong to a
+    finalize that died; a takeover would otherwise leave them next to the CT.
+    """
+    directory, name = os.path.split(final_path)
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return
+    for entry in entries:
+        if entry.startswith(f"{name}.partial-"):
             try:
-                os.remove(lock_path)
+                os.remove(os.path.join(directory, entry))
             except OSError:
                 pass
+
+
+def _remove_finalized_upload(session_id):
+    """Delete sessions/inference/<session_id> using only names read from disk."""
+    inference_root = os.path.join(Constants.SESSIONS_DIR_NAME, "inference")
+    try:
+        entries = os.listdir(inference_root)
+    except FileNotFoundError:
+        return False
+    for entry in entries:
+        if entry == session_id:
+            shutil.rmtree(os.path.join(inference_root, entry), ignore_errors=True)
+            return True
+    return False
+
+
+@api_blueprint.route("/discard-upload/<session_id>", methods=["POST"])
+@require_auth
+def discard_upload(session_id):
+    """Delete a pre-upload the user took back before running it.
+
+    The upload page starts sending a NIfTI as soon as it is picked, so Run is
+    instant. Removing the file, or switching to View only, calls this so the
+    CT doesn't stay on the server. A session that has been run is left alone:
+    the scan belongs to that run now.
+    """
+    if not _is_safe_id(session_id) or secure_filename(session_id) != session_id:
+        return jsonify({"error": "Invalid session ID"}), 400
+    # A job that was cancelled before it got the GPU never ran on the upload
+    # (a Cancel that landed between a run request's two checks makes one), and
+    # the page's discard, sent when that Cancel found no job, must still work.
+    job = _get_inference_job(session_id)
+    if job is not None and not _cancelled_before_running(job):
+        return jsonify({"error": "This scan has already been run."}), 409
+
+    # Refuses an upload that is another account's before anything below acts on
+    # it: a finalize deletes the finalized folder.
+    staging, access_error = _staging_for_current_user(session_id, create=False)
+    if access_error:
+        return access_error
+    # A run request that is still copying the CT has no job yet, but the file
+    # is the run's until it has: deleting it now would pull it out from under
+    # that request. It is told instead, and deletes the upload itself if it ends
+    # without a job (a Cancel that came in meanwhile, a refusal). The page has
+    # nothing left to do about it either way.
+    user = current_user()
+    if _hold_discard_while_reserved(session_id, user["id"]):
+        return jsonify({"status": "discarding"}), 202
+    if _dispatch_reserved(session_id):
+        return jsonify({"error": "This scan has already been run."}), 409
+    # The page aborts its finalize request when the user leaves, but the server
+    # goes on assembling the file, and until it is done there is no owner marker
+    # to find it by. Deleting now would miss it: leave word for finalize to
+    # delete it itself, unless it has finished since the lock was seen.
+    lock_path = os.path.join(staging, ".finalizing")
+    finalize_died = False
+    if os.path.exists(lock_path):
+        # A lock nobody has touched for a while is left by a finalize that died
+        # (see FINALIZE_LOCK_STALE_SECONDS), and is ours to take over like a
+        # retried finalize would: that retry cannot start on the file being deleted.
+        try:
+            finalize_died = acquire_finalize_lock(lock_path)
+        except FileNotFoundError:
+            pass  # the staging folder went while we looked
+        else:
+            if not finalize_died:
+                _mark_discarded(session_id)
+                # A live finalize, or one whose retry is taking over a dead
+                # lock this very moment: either will read the note.
+                if finalize_running(lock_path) or takeover_in_progress(lock_path):
+                    return jsonify({"status": "discarding"}), 200
+    owner_id = _read_owner_marker(session_id)
+
+    removed = False
+    if os.path.isdir(staging):
+        _remove_staging_session(session_id)
+        removed = True
+    # Unowned finalized folders predate ownership markers; leave them be, unless
+    # a finalize died before writing one: the staging folder the caller owns
+    # says whose its half-assembled file is.
+    if (owner_id is not None or finalize_died) and _remove_finalized_upload(session_id):
+        removed = True
+    return jsonify({"status": "discarded" if removed else "not_found"}), 200
+
 
 @api_blueprint.route("/upload-dicom-slice", methods=["POST"])
 @require_auth
@@ -3713,9 +4156,9 @@ def upload_dicom_slice():
         slice_file.save(save_path)
         os.utime(session_folder, None)
         return jsonify({"status": "ok", "filename": os.path.basename(save_path)})
-    except Exception as e:
-        print(f"❌ DICOM slice upload error: {e}")
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        current_app.logger.exception("DICOM slice upload failed")
+        return jsonify({"error": "Could not save the DICOM slice"}), 500
 
 
 def _select_dicom_series_files(sitk, reader, dicom_dir, series_ids):
@@ -3743,7 +4186,17 @@ def _select_dicom_series_files(sitk, reader, dicom_dir, series_ids):
 @api_blueprint.route("/finalize-dicom", methods=["POST"])
 @require_auth
 def finalize_dicom():
-    """Convert an uploaded DICOM series to NIfTI using SimpleITK."""
+    """Convert an uploaded DICOM series to NIfTI using SimpleITK.
+
+    Goes by the same finalize lock and discard note as the chunk finalize: two
+    conversions of one session cannot run at once, and a discard that arrives
+    while the series is being converted (a Cancel) has the file deleted by this
+    request once it exists, instead of the CT being written under a card that
+    is already gone.
+    """
+    held_lock = None
+    session_id = None
+    partial_path = None
     try:
         import SimpleITK as sitk
 
@@ -3765,6 +4218,10 @@ def finalize_dicom():
         if not os.path.isdir(dicom_dir):
             return jsonify({"error": "No DICOM slices found for this session"}), 400
 
+        held_lock, refused = _take_finalize_lock(session_folder)
+        if refused:
+            return refused
+
         reader = sitk.ImageSeriesReader()
         series_ids = reader.GetGDCMSeriesIDs(dicom_dir)
         if not series_ids:
@@ -3774,8 +4231,15 @@ def finalize_dicom():
         if not dicom_names:
             return jsonify({"error": "No readable DICOM series found in uploaded files"}), 400
         reader.SetFileNames(dicom_names)
-        image = reader.Execute()
-        image = sitk.DICOMOrient(image, "LPS")
+        try:
+            image = reader.Execute()
+            image = sitk.DICOMOrient(image, "LPS")
+        except Exception:
+            # A corrupt or mixed series is the usual cause: the upload's
+            # problem, not the server's, so 400 with a reason the user can act on.
+            current_app.logger.exception("DICOM series could not be read")
+            return jsonify({"error": "The DICOM files could not be read as a single series"}), 400
+        held_lock.heartbeat.beat()  # between the read and the write, whatever the thread got to do
 
         # Save to sessions/inference/<session_id>/<bdmap_id>/ct.nii.gz
         digits = "".join(ch for ch in safe_session_id if ch.isdigit())
@@ -3791,18 +4255,15 @@ def finalize_dicom():
         os.makedirs(target_dir, exist_ok=True)
         final_path = os.path.join(target_dir, "ct.nii.gz")
 
+        # The lock is ours, so any half-written file here is a dead finalize's.
+        _remove_dead_partials(final_path)
         user = current_user()
         if not _write_owner_marker(safe_session_id, user["id"]):
             return jsonify({"error": "You don't have access to this session."}), 403
         partial_path = f"{final_path}.partial-{uuid.uuid4().hex}.nii.gz"
-        try:
-            sitk.WriteImage(image, partial_path)
-            os.replace(partial_path, final_path)
-        finally:
-            try:
-                os.remove(partial_path)
-            except FileNotFoundError:
-                pass
+        sitk.WriteImage(image, partial_path)
+        os.replace(partial_path, final_path)
+        partial_path = None
 
         # Build the deletion target from a real directory entry (rather than a
         # request-derived join) after ownership verification above.
@@ -3811,16 +4272,28 @@ def finalize_dicom():
         except OSError:
             pass
 
+        # As in finalize_upload: a discard that saw the lock has left its note
+        # by now, and the file it could not find to delete is ours to delete.
+        if _discard_requested(safe_session_id):
+            _remove_finalized_upload(safe_session_id)
+            return jsonify({"error": "This upload was discarded."}), 409
+
         uploaded_filename = os.path.relpath(final_path, base_path)
         return jsonify({
             "status": "converted",
-            "path": final_path,
             "bdmap_id": bdmap_id,
             "uploaded_filename": uploaded_filename,
         })
-    except Exception as e:
-        print(f"❌ DICOM finalize error: {e}")
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        current_app.logger.exception("DICOM finalize failed")
+        return jsonify({"error": "Could not convert the DICOM series"}), 500
+    finally:
+        if partial_path:
+            try:
+                os.remove(partial_path)
+            except OSError:
+                pass
+        _release_finalize_lock(held_lock, session_id)
 
 
 ## OTHER ENDPOINTS ##

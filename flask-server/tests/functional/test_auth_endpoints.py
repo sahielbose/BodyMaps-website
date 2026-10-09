@@ -7,6 +7,7 @@ require_auth guard, and /me/jobs are exercised without the whole app.
 
 import hashlib
 import importlib
+import json
 
 import pytest
 
@@ -295,6 +296,98 @@ def test_me_jobs_empty_for_new_user(client):
     assert r.get_json() == {"jobs": []}
 
 
+def _write_run(runs, session_id, **record):
+    folder = runs / session_id
+    folder.mkdir(parents=True)
+    (folder / "job.json").write_text(json.dumps(record))
+
+
+def test_me_runs_requires_auth(client):
+    assert client.get("/api/me/runs").status_code == 401
+
+
+def test_me_runs_lists_only_my_runs_newest_first(client, tmp_path, monkeypatch):
+    import api.api_blueprint as api_routes
+    runs = tmp_path / "runs"
+    monkeypatch.setattr(api_routes, "SESSIONS_DIR", str(runs))
+    me = client.post("/api/auth/register", json={"email": "r@s.com", "password": "password1"}).get_json()["user"]["id"]
+    _write_run(runs, "older", user_id=me, status="completed", model="ePAI", created_at=1_700_000_000,
+               ct_path="/srv/sessions/older/ct.nii.gz", zip_path="/srv/sessions/older/auto_masks.zip")
+    _write_run(runs, "newer", user_id=me, status="failed", model="LesionSegmenter", created_at=1_700_000_500)
+    _write_run(runs, "someone-elses", user_id="another-user", status="completed", model="ePAI", created_at=1_700_000_900)
+    _write_run(runs, "unowned", status="completed", model="ePAI", created_at=1_700_000_900)
+
+    r = client.get("/api/me/runs")
+
+    assert r.status_code == 200
+    body = r.get_json()
+    assert [run["session_id"] for run in body["runs"]] == ["newer", "older"]
+    assert body["runs"][1] == {
+        "session_id": "older", "model": "ePAI", "status": "completed",
+        "created_at": "2023-11-14T22:13:20+00:00",
+    }
+    assert "/srv" not in r.get_data(as_text=True)  # no server paths
+
+
+def test_me_runs_owned_requires_auth(client):
+    assert client.post("/api/me/runs/owned", json={"session_ids": ["a"]}).status_code == 401
+
+
+def test_me_runs_owned_names_only_the_callers_sessions_including_ones_the_listing_cuts_off(client, tmp_path, monkeypatch):
+    import api.api_blueprint as api_routes
+    runs = tmp_path / "runs"
+    monkeypatch.setattr(api_routes, "SESSIONS_DIR", str(runs))
+    me = client.post("/api/auth/register", json={"email": "o@w.com", "password": "password1"}).get_json()["user"]["id"]
+    for i in range(60):
+        _write_run(runs, f"s{i:02d}", user_id=me, status="completed", model="ePAI", created_at=1_700_000_000 + i)
+    _write_run(runs, "theirs", user_id="another-user", status="completed", model="ePAI", created_at=1_700_000_900)
+
+    listed = {run["session_id"] for run in client.get("/api/me/runs").get_json()["runs"]}
+    assert "s00" not in listed  # cut off by the listing's cap
+
+    r = client.post("/api/me/runs/owned", json={"session_ids": ["s00", "s59", "theirs", "nothing"]})
+
+    assert r.status_code == 200
+    assert r.get_json() == {"owned": ["s00", "s59"]}
+
+
+def test_me_runs_owned_rejects_a_body_it_cannot_use(client):
+    client.post("/api/auth/register", json={"email": "p@w.com", "password": "password1"})
+
+    assert client.post("/api/me/runs/owned", json={}).status_code == 400
+    assert client.post("/api/me/runs/owned", json={"session_ids": "abc"}).status_code == 400
+    assert client.post("/api/me/runs/owned", json={"session_ids": ["a"] * 501}).status_code == 400
+    assert client.post("/api/me/runs/owned", data="not json", content_type="text/plain").status_code == 400
+
+
+def test_me_runs_is_capped_at_fifty(client, tmp_path, monkeypatch):
+    import api.api_blueprint as api_routes
+    runs = tmp_path / "runs"
+    monkeypatch.setattr(api_routes, "SESSIONS_DIR", str(runs))
+    me = client.post("/api/auth/register", json={"email": "t@u.com", "password": "password1"}).get_json()["user"]["id"]
+    for i in range(60):
+        _write_run(runs, f"s{i:02d}", user_id=me, status="completed", model="ePAI", created_at=1_700_000_000 + i)
+
+    listed = client.get("/api/me/runs").get_json()["runs"]
+
+    assert len(listed) == 50
+    assert listed[0]["session_id"] == "s59"
+
+
+def test_me_runs_reports_a_run_this_process_is_running_as_running(client, tmp_path, monkeypatch):
+    import api.api_blueprint as api_routes
+    runs = tmp_path / "runs"
+    monkeypatch.setattr(api_routes, "SESSIONS_DIR", str(runs))
+    me = client.post("/api/auth/register", json={"email": "v@x.com", "password": "password1"}).get_json()["user"]["id"]
+    _write_run(runs, "live", user_id=me, status="running", model="ePAI", created_at=1_700_000_100)
+    _write_run(runs, "dead", user_id=me, status="running", model="ePAI", created_at=1_700_000_000)
+    monkeypatch.setitem(api_routes.inference_jobs, "live", {"user_id": me, "status": "running"})
+
+    listed = client.get("/api/me/runs").get_json()["runs"]
+
+    assert {run["session_id"]: run["status"] for run in listed} == {"live": "running", "dead": "failed"}
+
+
 # ---- display name ---------------------------------------------------------
 
 def test_register_accepts_a_name_and_me_returns_it(client):
@@ -415,11 +508,14 @@ def test_export_returns_only_the_account_basics(client):
 
 # ---- deletion -------------------------------------------------------------
 
-def test_delete_jobs_keeps_the_account(client):
+def test_delete_jobs_keeps_the_account(client, tmp_path, monkeypatch):
+    import api.api_blueprint as api_routes
+    # Upload page runs are looked for in their own folder; keep it in the test's.
+    monkeypatch.setattr(api_routes, "SESSIONS_DIR", str(tmp_path / "runs"))
     client.post("/api/auth/register", json={"email": "v@w.com", "password": "password1"})
     r = client.delete("/api/me/jobs")
     assert r.status_code == 200
-    assert r.get_json()["deleted"] == {"jobs": 0, "files": 0}
+    assert r.get_json()["deleted"] == {"jobs": 0, "files": 0, "runs": 0}
     assert client.get("/api/auth/me").status_code == 200  # still signed in
 
 

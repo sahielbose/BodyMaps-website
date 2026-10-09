@@ -13,6 +13,8 @@ Routes (registered under <BASE_PATH>/api):
   POST   /me/plan         {plan}                    -> change plan (no payment)
   GET    /me/usage                                  -> plan limits + usage so far
   GET    /me/jobs                                   -> the current user's jobs
+  GET    /me/runs                                   -> the current user's Upload page runs
+  POST   /me/runs/owned                             -> which of the given session ids are the user's own
   GET    /me/export                                 -> everything we hold, as JSON
   DELETE /me/jobs                                   -> delete scan history, keep account
   DELETE /me                                        -> schedule account deletion
@@ -478,6 +480,43 @@ def my_jobs():
     return jsonify({"jobs": jobs}), 200
 
 
+@auth_blueprint.route("/me/runs", methods=["GET"])
+@require_auth
+def my_runs():
+    """The signed-in user's own runs from the Upload page, newest first.
+
+    /me/jobs reads the job table, which the path the Upload page uses never
+    writes; this reads the per-run records that path keeps. Session id, model,
+    status and start time only, capped at job_store.RUN_LIST_LIMIT, so the page
+    can show a user's recent scans on a browser that never ran them.
+    """
+    # Imported here: the inference blueprint is heavy and only this needs it.
+    from api.api_blueprint import list_inference_runs_for_user
+
+    return jsonify({"runs": list_inference_runs_for_user(current_user()["id"])}), 200
+
+
+@auth_blueprint.route("/me/runs/owned", methods=["POST"])
+@require_auth
+def my_runs_owned():
+    """Which of the given session ids are the signed-in user's own.
+
+    Body: {"session_ids": [...]}, at most job_store.OWNED_CHECK_LIMIT. GET
+    /me/runs lists only the newest runs, so it cannot say whether an older one
+    in a browser is this account's; this answers for exactly the ids asked
+    about, by the records deleting the account's history goes by. Only the
+    caller's own ids come back, so it says nothing about anyone else's.
+    """
+    body = request.get_json(silent=True)
+    ids = body.get("session_ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list) or len(ids) > job_store.OWNED_CHECK_LIMIT:
+        return jsonify({"error": f"session_ids must be a list of at most {job_store.OWNED_CHECK_LIMIT} ids"}), 400
+    # Imported here: the inference blueprint is heavy and only this needs it.
+    from api.api_blueprint import owned_inference_sessions_for_user
+
+    return jsonify({"owned": owned_inference_sessions_for_user(current_user()["id"], ids)}), 200
+
+
 # The account fields a signed-in user can already see in Settings. Nothing
 # internal: no ids, no session or role rows, no job records (real runs never
 # write the job table, and its rows carry server paths).
@@ -513,7 +552,12 @@ def export_me():
 @require_auth
 def delete_my_jobs():
     """Delete scan history but keep the account."""
-    result = job_store.delete_jobs_for_user(current_user()["id"])
+    # Imported here: the inference blueprint is heavy and only this needs it.
+    from api.api_blueprint import delete_inference_runs_for_user
+
+    user_id = current_user()["id"]
+    result = job_store.delete_jobs_for_user(user_id)
+    result["runs"] = delete_inference_runs_for_user(user_id)
     return jsonify({"deleted": result}), 200
 
 

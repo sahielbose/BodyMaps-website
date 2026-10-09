@@ -8,6 +8,7 @@ sessions root (the shared PanTS dataset) are never touched.
 """
 
 import importlib
+import json
 import os
 from datetime import timedelta
 
@@ -29,6 +30,9 @@ def stores(tmp_path, monkeypatch):
     importlib.reload(auth_store)
     import services.job_store as job_store
     importlib.reload(job_store)
+    # Runs from the Upload page live outside the sessions root; keep them in
+    # the test's own folder too.
+    monkeypatch.setattr(job_store, "RUNS_DIR", str(tmp_path / "runs"))
 
     engine.reset_engine_for_tests()
     engine.create_all()
@@ -230,3 +234,226 @@ def test_delete_history_rejects_a_traversal_path(stores):
 
     assert result["files"] == 0
     assert outside.exists()
+
+
+# ---- runs from the Upload page ---------------------------------------------
+# That path never writes the job table. A run names its owner in
+# <RUNS_DIR>/<session>/job.json, a CT uploaded ahead of Run in
+# <sessions>/inference/<session>/.owner.
+
+def _upload_page_run(tmp_path, session_id, user_id, status="completed"):
+    run = tmp_path / "runs" / session_id
+    run.mkdir(parents=True)
+    (run / "job.json").write_text(json.dumps({"user_id": user_id, "status": status}))
+    (run / "auto_masks.zip").write_text("masks")
+    upload = tmp_path / "sessions" / "inference" / session_id
+    (upload / "BDMAP_00000001").mkdir(parents=True)
+    (upload / ".owner").write_text(user_id)
+    (upload / "BDMAP_00000001" / "ct.nii.gz").write_text("scan")
+    return run, upload
+
+
+def test_delete_history_removes_upload_page_runs(stores):
+    auth_store, job_store, tmp_path = stores
+    mine = auth_store.create_user("ee@ff.com", "hunter2pass")
+    theirs = auth_store.create_user("gg@hh.com", "hunter2pass")
+    run, upload = _upload_page_run(tmp_path, "sess-mine", mine["id"])
+    their_run, their_upload = _upload_page_run(tmp_path, "sess-theirs", theirs["id"])
+    # a CT uploaded ahead of Run and never run: only the .owner record exists
+    pre = tmp_path / "sessions" / "inference" / "sess-pre"
+    pre.mkdir(parents=True)
+    (pre / ".owner").write_text(mine["id"])
+
+    assert job_store.delete_run_folders_for_user(mine["id"]) == ["sess-mine", "sess-pre"]
+    assert not run.exists() and not upload.exists() and not pre.exists()
+    assert their_run.exists() and their_upload.exists()
+
+
+def test_delete_history_leaves_a_run_still_in_progress(stores):
+    auth_store, job_store, tmp_path = stores
+    user = auth_store.create_user("ii@jj.com", "hunter2pass")
+    run, upload = _upload_page_run(tmp_path, "sess-live", user["id"], status="running")
+
+    removed = job_store.delete_run_folders_for_user(user["id"], is_active=lambda sid: sid == "sess-live")
+
+    assert removed == []
+    assert run.exists() and upload.exists()
+
+
+def test_delete_history_skips_folders_with_no_owner_record(stores):
+    auth_store, job_store, tmp_path = stores
+    user = auth_store.create_user("kk@ll.com", "hunter2pass")
+    legacy = tmp_path / "runs" / "sess-legacy"
+    legacy.mkdir(parents=True)
+    (legacy / "job.json").write_text(json.dumps({"status": "completed"}))
+    (tmp_path / "runs" / "job_durations.jsonl").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs" / "job_durations.jsonl").write_text("{}\n")
+
+    assert job_store.delete_run_folders_for_user(user["id"]) == []
+    assert legacy.exists()
+    assert (tmp_path / "runs" / "job_durations.jsonl").exists()
+
+
+# ---- listing a user's Upload page runs --------------------------------------
+
+def _write_run(tmp_path, session_id, **record):
+    run = tmp_path / "runs" / session_id
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "job.json").write_text(json.dumps(record))
+    return run / "job.json"
+
+
+def test_list_runs_returns_only_the_owners_newest_first(stores):
+    _, job_store, tmp_path = stores
+    _write_run(tmp_path, "old", user_id="me", status="completed", model="ePAI", created_at=1_700_000_000)
+    _write_run(tmp_path, "new", user_id="me", status="failed", model="LesionSegmenter", created_at=1_700_000_500)
+    _write_run(tmp_path, "theirs", user_id="someone-else", status="completed", model="ePAI", created_at=1_700_000_900)
+    _write_run(tmp_path, "unowned", status="completed", model="ePAI", created_at=1_700_000_900)
+
+    runs = job_store.list_run_records_for_user("me")
+
+    assert [r["session_id"] for r in runs] == ["new", "old"]
+    assert runs[0] == {
+        "session_id": "new",
+        "model": "LesionSegmenter",
+        "status": "failed",
+        "created_at": "2023-11-14T22:21:40+00:00",
+    }
+
+
+def test_list_runs_sends_no_paths_or_internal_fields(stores):
+    _, job_store, tmp_path = stores
+    _write_run(
+        tmp_path, "s1", user_id="me", status="completed", model="ePAI", created_at=1_700_000_000,
+        ct_path="/srv/sessions/s1/ct.nii.gz", session_path="/srv/sessions/s1", zip_path="/srv/z.zip",
+        output_mask_dir="/srv/out", error=None,
+    )
+
+    (run,) = job_store.list_run_records_for_user("me")
+
+    assert set(run) == {"session_id", "model", "status", "created_at"}
+    assert "/srv" not in json.dumps(run)
+
+
+def test_list_runs_falls_back_to_the_file_time_for_runs_with_no_start_time(stores):
+    _, job_store, tmp_path = stores
+    record = _write_run(tmp_path, "early", user_id="me", status="completed", model="ePAI")
+    os.utime(record, (1_700_000_000, 1_700_000_000))
+
+    (run,) = job_store.list_run_records_for_user("me")
+
+    assert run["created_at"] == "2023-11-14T22:13:20+00:00"
+
+
+def test_list_runs_reads_a_run_its_process_left_running_as_failed(stores):
+    _, job_store, tmp_path = stores
+    _write_run(tmp_path, "dead", user_id="me", status="running", model="ePAI", created_at=1_700_000_000)
+    _write_run(tmp_path, "waiting", user_id="me", status="queued", model="ePAI", created_at=1_700_000_100)
+    _write_run(tmp_path, "live", user_id="me", status="running", model="ePAI", created_at=1_700_000_200)
+
+    runs = job_store.list_run_records_for_user(
+        "me", live_job=lambda sid: {"status": "completed"} if sid == "live" else None,
+    )
+
+    assert {r["session_id"]: r["status"] for r in runs} == {
+        "dead": "failed", "waiting": "failed", "live": "completed",
+    }
+
+
+def test_list_runs_is_capped_and_skips_what_is_not_a_run(stores):
+    _, job_store, tmp_path = stores
+    for i in range(job_store.RUN_LIST_LIMIT + 5):
+        _write_run(tmp_path, f"s{i:03d}", user_id="me", status="completed", model="ePAI", created_at=1_700_000_000 + i)
+    (tmp_path / "runs" / "job_durations.jsonl").write_text("{}\n")
+    (tmp_path / "runs" / "empty").mkdir()
+    (tmp_path / "runs" / "broken").mkdir()
+    (tmp_path / "runs" / "broken" / "job.json").write_text("{not json")
+    _write_run(tmp_path, "odd-status", user_id="me", status="paused", model="ePAI", created_at=1_800_000_000)
+
+    runs = job_store.list_run_records_for_user("me")
+
+    assert len(runs) == job_store.RUN_LIST_LIMIT
+    assert runs[0]["session_id"] == f"s{job_store.RUN_LIST_LIMIT + 4:03d}"
+    assert job_store.list_run_records_for_user("me", runs_root=str(tmp_path / "nowhere")) == []
+
+
+# ---- which sessions are the user's, exactly ----------------------------------
+# GET /me/runs is capped and reads only the newest run folders, so it cannot say
+# whether an older session id in a browser is the account's. The ownership check
+# answers for the ids asked about, by the records deleting history goes by.
+
+def test_owned_sessions_are_named_by_the_same_records_delete_goes_by(stores):
+    auth_store, job_store, tmp_path = stores
+    mine = auth_store.create_user("oo@pp.com", "hunter2pass")
+    _upload_page_run(tmp_path, "run-mine", mine["id"])
+    _upload_page_run(tmp_path, "run-theirs", "someone-else")
+    pre = tmp_path / "sessions" / "inference" / "pre-mine"  # uploaded ahead of Run, never run
+    pre.mkdir(parents=True)
+    (pre / ".owner").write_text(mine["id"])
+    _write_run(tmp_path, "run-unowned", status="completed")
+
+    ids = ["run-mine", "run-theirs", "pre-mine", "run-unowned", "never-heard-of"]
+    owned = job_store.owned_run_sessions(mine["id"], ids)
+
+    assert owned == ["run-mine", "pre-mine"]
+    # Exactly what deleting the account's history removes.
+    assert job_store.delete_run_folders_for_user(mine["id"]) == sorted(owned)
+
+
+def test_owned_sessions_reach_past_the_listing_cap(stores):
+    auth_store, job_store, tmp_path = stores
+    mine = auth_store.create_user("qq@rr.com", "hunter2pass")
+    for i in range(60):
+        _write_run(tmp_path, f"s{i:02d}", user_id=mine["id"], status="completed", model="ePAI",
+                   created_at=1_700_000_000 + i)
+    listed = {r["session_id"] for r in job_store.list_run_records_for_user(mine["id"])}
+    oldest = [f"s{i:02d}" for i in range(10)]
+    assert not listed & set(oldest)  # the listing never says these are the account's
+
+    assert job_store.owned_run_sessions(mine["id"], oldest) == oldest
+
+
+def test_a_run_this_process_is_working_on_counts_as_owned(stores):
+    _, job_store, _tmp_path = stores
+
+    owned = job_store.owned_run_sessions(
+        "me", ["live", "live-theirs"],
+        live_job=lambda sid: {"user_id": "me" if sid == "live" else "other", "status": "running"},
+    )
+
+    assert owned == ["live"]
+
+
+def test_ownership_lookups_only_take_plain_ids_and_never_leave_the_folder(stores):
+    auth_store, job_store, tmp_path = stores
+    mine = auth_store.create_user("ss@tt.com", "hunter2pass")
+    _upload_page_run(tmp_path, "fine", mine["id"])
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "job.json").write_text(json.dumps({"user_id": mine["id"]}))
+
+    hostile = ["../outside", "..", ".", "a/b", "", None, 7, "fine", "fine", "x" * 200]
+    assert job_store.owned_run_sessions(mine["id"], hostile) == ["fine"]
+
+
+def test_ownership_lookups_are_bounded(stores):
+    auth_store, job_store, tmp_path = stores
+    mine = auth_store.create_user("uu@vv.com", "hunter2pass")
+    limit = job_store.OWNED_CHECK_LIMIT
+    for i in range(limit + 5):
+        _write_run(tmp_path, f"b{i}", user_id=mine["id"], status="completed")
+
+    owned = job_store.owned_run_sessions(mine["id"], [f"b{i}" for i in range(limit + 5)])
+
+    assert len(owned) == limit
+
+
+def test_purge_removes_upload_page_runs_too(stores):
+    auth_store, job_store, tmp_path = stores
+    user = auth_store.create_user("mm@nn.com", "hunter2pass")
+    run, upload = _upload_page_run(tmp_path, "sess-gone", user["id"])
+    auth_store.request_deletion(user["id"])
+    _age_deletion(auth_store, user["id"], auth_store.DELETION_GRACE_DAYS + 1)
+
+    assert auth_store.purge_expired_deletions() == 1
+    assert not run.exists() and not upload.exists()

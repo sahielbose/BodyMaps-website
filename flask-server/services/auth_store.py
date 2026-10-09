@@ -658,6 +658,7 @@ def purge_expired_deletions() -> int:
     removed = 0
     for user_id in list_users_pending_purge():
         job_store.delete_jobs_for_user(user_id)
+        job_store.delete_run_folders_for_user(user_id)
         with session_scope() as s:
             user = s.get(User, user_id)
             if user is None:
