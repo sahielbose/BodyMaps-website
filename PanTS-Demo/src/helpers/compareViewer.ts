@@ -28,7 +28,9 @@ import * as tools from "@cornerstonejs/tools";
 import { SegmentationRepresentations } from "@cornerstonejs/tools/enums";
 import type { Color, ColorLUT } from "@cornerstonejs/core/types";
 import { addVolumeLabelmap } from "./viewer/addVolumeLabelmap";
-import { segmentation_category_colors } from "./constants";
+import { segmentation_categories, segmentation_category_colors } from "./constants";
+import { SeatedEllipticalROITool, SeatedRectangleROITool } from "./viewer/measurementTextBox";
+import { addLabelmapActors } from "./viewer/labelmapActors";
 
 const ENGINE_ID = "cmp_engine";
 // Per-case: 3 viewports + a tool group + a segmentation id.
@@ -94,8 +96,14 @@ const MEASUREMENT_ANNOTATION_STYLE = {
 	textBoxColorHighlighted: MEASURE_COLOR_HI,
 	textBoxColorSelected: "#ffffff",
 	textBoxLinkLineColor: MEASURE_COLOR,
-	textBoxFontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif",
+	// The viewer's own UI font (the SVG attribute cannot read the --vp-font token).
+	textBoxFontFamily: '"IBM Plex Sans", system-ui, sans-serif',
 	textBoxFontSize: "14px",
+	// Cyan text alone vanishes over the organ colours and other measurements'
+	// lines, so it sits on a dark plate like the slice counter does.
+	textBoxBackground: "rgba(8, 9, 11, 0.86)",
+	textBoxBorderRadius: 4,
+	textBoxMargin: 4,
 	shadow: true,
 };
 
@@ -121,6 +129,8 @@ export type CompareElements = {
 export type CompareSources = {
 	ctA: string; segA: string; ctB: string; segB: string;
 };
+/** One pane's slice position: the 0-based index it shows and how many slices it has. */
+export type SliceReadout = { current: number; total: number };
 export type CompareHandle = {
 	setLinked: (linked: boolean) => void;
 	setSyncCursor: (sync: boolean) => void;
@@ -132,10 +142,16 @@ export type CompareHandle = {
 	applyZoom: (zoom: number) => void;
 	// Center each case's planes on that case's crosshair (mirrors the single viewer).
 	centerCursor: () => void;
-	// Move each case's crosshair to that organ's centroid (label = segment index).
-	jumpToOrgan: (label: number) => void;
+	// Move each case's crosshair to that organ's centroid (label = segment index). Returns
+	// the cases whose mask has no such organ, which stay where they are.
+	jumpToOrgan: (label: number) => ("a" | "b")[];
 	// Re-fit the viewports after the surrounding grid changes size (view-mode switch).
-	refit: () => void;
+	/** Re-measures the panes after the grid changed size. A view-mode switch refits
+	 *  them from scratch; `keepView` (a dock opening or closing) keeps each pane's
+	 *  slice, pan and zoom and only rescales it to its new cell. Returns true while the
+	 *  panes may still be catching up (Cornerstone drops a resize while a render is
+	 *  queued, or the cells moved since the last pass), so the caller refits again. */
+	refit: (keepView?: boolean) => boolean;
 	resetView: () => void;
 	// Which viewport cine/flip/rotate act on — whichever pane was last clicked/scrolled.
 	setFocusedViewport: (viewportId: string) => void;
@@ -150,6 +166,8 @@ export type CompareHandle = {
 	// Hands the primary mouse button (on BOTH cases at once) to a measurement tool or
 	// the magnify loupe, or back to navigation (Crosshairs) when passed null.
 	setActiveMeasurementTool: (toolName: PrimaryMouseToolName | null) => void;
+	/** Cancels a half-drawn measurement in any pane. True when one was in progress. */
+	cancelDrawing: () => boolean;
 	clearMeasurements: () => void;
 	getMeasurementSummaries: () => MeasurementSummary[];
 	renameMeasurement: (uid: string, label: string) => void;
@@ -158,6 +176,9 @@ export type CompareHandle = {
 	subscribeToMeasurementChanges: (
 		cb: (kind: MeasurementChangeKind, summary: MeasurementSummary) => void
 	) => () => void;
+	/** Reports each pane's slice once straight away and again whenever its slice changes
+	 *  (a scroll, Link scroll, Sync cursor, a jump). Returns the unsubscribe. */
+	subscribeToSliceChanges: (cb: (viewportId: string, readout: SliceReadout) => void) => () => void;
 	destroy: () => void;
 };
 
@@ -178,8 +199,8 @@ function formatNum(n: number, digits = 1): string {
 
 // Each tool caches different stats keys; scan for the ones we know how to show.
 function formatAnnotationValue(a: any): string {
-	const text = a?.data?.text;
-	if (typeof text === "string" && text.trim()) return text.trim();
+	// An arrow has nothing to compute: its note is the annotation's label, which the row already shows.
+	if (a?.metadata?.toolName === ARROW_TOOL) return "";
 	const statsByTarget = a?.data?.cachedStats ?? {};
 	for (const stats of Object.values(statsByTarget) as any[]) {
 		if (!stats || typeof stats !== "object") continue;
@@ -195,7 +216,13 @@ function formatAnnotationValue(a: any): string {
 		if (typeof stats.value === "number") return `${formatNum(stats.value, 0)} HU`;
 		if (typeof stats.mean === "number") return `mean ${formatNum(stats.mean, 0)} HU`;
 	}
-	return "…";
+	// A ROI box that runs past the edge of the scan keeps only its Modality: the tool
+	// skips the area and mean when a corner lies outside the volume.
+	if ((Object.values(statsByTarget) as any[]).some((stats) => typeof stats?.Modality === "string")) {
+		return "Outside the scan";
+	}
+	// A ROI whose stats have not been calculated yet (they follow the draw).
+	return "Not computed";
 }
 
 function annotationCenter(a: any): Vec3 | null {
@@ -206,6 +233,34 @@ function annotationCenter(a: any): Vec3 | null {
 	const c: Vec3 = [0, 0, 0];
 	for (const p of pts) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; }
 	return [c[0] / pts.length, c[1] / pts.length, c[2] / pts.length];
+}
+
+/** Whether any measurement has a statistics text box. Boxes on automatic
+ *  placement are re-seated beside their shape on the next annotation render; a
+ *  box the user dragged keeps the spot they chose. */
+export function hasMeasurementTextBoxes(): boolean {
+	try {
+		const names = MEASUREMENT_TOOL_NAMES as readonly string[];
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		return ((tools.annotation.state.getAllAnnotations() ?? []) as any[]).some(
+			(a) => !!a?.data?.handles?.textBox && names.includes(a?.metadata?.toolName),
+		);
+	} catch {
+		/* annotation state not initialized */
+		return false;
+	}
+}
+
+/** Redraws the annotation (SVG) layer of the given panes. Its canvas geometry is
+ *  derived from world coordinates only on an annotation render, so it is stale
+ *  after any camera change that is not one (a resize, a reset, a refit). */
+export function repaintPaneAnnotations(viewportIds: string[]): void {
+	if (!viewportIds.length) return;
+	try {
+		tools.utilities.triggerAnnotationRenderForViewportIds(viewportIds);
+	} catch {
+		/* annotation state or viewports not initialized yet */
+	}
 }
 
 function toSummary(a: any, caseKey: CaseKey): MeasurementSummary {
@@ -427,26 +482,96 @@ export function fitAffine(pairs: [Vec3, Vec3][]): ((p: Vec3) => Vec3) | null {
 	};
 }
 
-// Fallback for too few landmarks for a full affine fit: an independent linear regression
-// (scale + offset) per axis. Needs at least 2 pairs, and each axis needs some spread across
-// the landmarks — an axis that can't be fit rejects the whole mapping rather than silently
-// degrading to a wrong-but-plausible-looking transform.
+const median = (xs: number[]): number => {
+	const s = [...xs].sort((p, q) => p - q);
+	const m = s.length >> 1;
+	return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+
+// Median of every pairwise slope of ys against xs (Theil-Sen). null when no two xs differ.
+function medianSlope(xs: number[], ys: number[]): number | null {
+	const slopes: number[] = [];
+	for (let i = 0; i < xs.length; i++) {
+		for (let j = i + 1; j < xs.length; j++) {
+			const dx = xs[j] - xs[i];
+			if (Math.abs(dx) > 1e-6) slopes.push((ys[j] - ys[i]) / dx);
+		}
+	}
+	return slopes.length ? median(slopes) : null;
+}
+
+// A robust line that is the same line whichever way round it is fit: the slope is the
+// geometric mean of the Theil-Sen slope of ys on xs and the inverse of xs on ys, and the line
+// runs through the medians. So fitting B from A and A from B gives exact inverses, and Link
+// scroll doesn't jump when the person switches which case they scroll.
+function symmetricLine(xs: number[], ys: number[]): { s: number; t: number } | null {
+	const fwd = medianSlope(xs, ys);
+	if (fwd === null) return null;
+	const back = medianSlope(ys, xs);
+	const s = back !== null && fwd * back > 0 ? Math.sign(fwd) * Math.sqrt(fwd / back) : fwd;
+	return { s, t: median(ys) - s * median(xs) };
+}
+
+// Fallback for too few landmarks for a full affine fit, and Link scroll's depth mapping: an
+// independent line (scale + offset) per axis. Needs at least 2 pairs, and each axis needs some
+// spread across the landmarks — an axis that can't be fit rejects the whole mapping rather
+// than silently degrading to a wrong-but-plausible-looking transform.
+// The fit is robust on purpose. A few labels sit far from the rest in real masks (femurs and
+// a bladder low in a long scan, lungs or a vessel cut off at a short scan's edge, a stray
+// speck labelled femur), and a least-squares line chases them: it flattened the depth slope
+// to 0.11 for cases 7 and 23, so the other case barely moved. So: a median-based line, then
+// drop labels whose residual is more than 3 robust standard deviations and fit again.
 export function fitPerAxisLinear(pairs: [Vec3, Vec3][]): ((p: Vec3) => Vec3) | null {
 	if (pairs.length < 2) return null;
-	const n = pairs.length;
 	const fits = [0, 1, 2].map((axis) => {
-		let sumA = 0, sumB = 0, sumAA = 0, sumAB = 0;
-		for (const [a, b] of pairs) {
-			sumA += a[axis]; sumB += b[axis]; sumAA += a[axis] * a[axis]; sumAB += a[axis] * b[axis];
-		}
-		const denom = n * sumAA - sumA * sumA;
-		if (Math.abs(denom) < 1e-6) return null; // landmarks don't spread on this axis
-		const s = (n * sumAB - sumA * sumB) / denom;
-		const t = (sumB - s * sumA) / n;
-		return { s, t };
+		const xs = pairs.map(([a]) => a[axis]);
+		const ys = pairs.map(([, b]) => b[axis]);
+		const first = symmetricLine(xs, ys);
+		if (!first) return null; // landmarks don't spread on this axis
+		const res = ys.map((y, i) => Math.abs(y - (first.s * xs[i] + first.t)));
+		const cut = 3 * 1.4826 * median(res) + 1e-6;
+		const keep = res.map((r, i) => (r <= cut ? i : -1)).filter((i) => i >= 0);
+		if (keep.length < 2 || keep.length === xs.length) return first;
+		return symmetricLine(keep.map((i) => xs[i]), keep.map((i) => ys[i])) ?? first;
 	});
 	if (fits.some((f) => !f)) return null;
 	return (p: Vec3): Vec3 => [0, 1, 2].map((i) => fits[i]!.s * p[i] + fits[i]!.t) as Vec3;
+}
+
+// The scroll steps Cornerstone's own scroll(delta) needs to bring a volume viewport's slice
+// onto world point P, from getVolumeViewportScrollInfo(vp, volumeId, true). It counts steps
+// the way Cornerstone does (from the min end of the volume along the camera's
+// viewPlaneNormal), so it works for any storage order and for a flipped pane, whose normal
+// points the other way. The target is clamped to the volume so an end slice isn't re-scrolled.
+export type ScrollInfo = {
+	numScrollSteps: number;
+	currentStepIndex: number;
+	sliceRangeInfo: {
+		sliceRange: { min: number; max: number };
+		spacingInNormalDirection: number;
+		camera: { viewPlaneNormal?: Vec3 };
+	};
+};
+export function scrollDeltaToWorld(info: ScrollInfo, P: Vec3): number {
+	const { sliceRange, spacingInNormalDirection: sp, camera } = info.sliceRangeInfo;
+	const n = camera.viewPlaneNormal;
+	const range = sliceRange.max - sliceRange.min;
+	if (!n || !(sp > 0) || !(range > 0) || !(info.numScrollSteps > 0)) return 0;
+	const proj = P[0] * n[0] + P[1] * n[1] + P[2] * n[2];
+	// Same fraction-of-range form getVolumeViewportScrollInfo uses for currentStepIndex.
+	const target = Math.round(((proj - sliceRange.min) / range) * info.numScrollSteps);
+	return Math.max(0, Math.min(info.numScrollSteps, target)) - info.currentStepIndex;
+}
+
+// Sync cursor's fallback when no landmark mapping could be fit: put the point at the same
+// fraction of the destination's world bounds ([xmin, xmax, ymin, ymax, zmin, zmax]) on each
+// world axis, clamped to the volume. Exact for the axis-aligned volumes PanTS uses.
+export function mapByBounds(p: ArrayLike<number>, src: ArrayLike<number>, dst: ArrayLike<number>): Vec3 {
+	return [0, 1, 2].map((i) => {
+		const lo = src[2 * i], hi = src[2 * i + 1];
+		const frac = Math.min(1, Math.max(0, (p[i] - lo) / ((hi - lo) || 1)));
+		return dst[2 * i] + frac * (dst[2 * i + 1] - dst[2 * i]);
+	}) as Vec3;
 }
 
 // Best available A→B (or B→A) world-mm mapping from shared-organ landmark pairs: a full
@@ -459,6 +584,39 @@ export function fitCaseMapping(pairs: [Vec3, Vec3][]): ((p: Vec3) => Vec3) | nul
 }
 
 let currentEngine: RenderingEngine | null = null;
+
+// The tool groups, segmentation ids and engine id above are fixed names, so two overlapping
+// setupCompare calls (Back then Forward while the first is still downloading) would share
+// them. Each call takes a generation; a call that is no longer the latest stops at its next
+// await and never touches what the newer call owns.
+let setupGen = 0;
+function throwIfSuperseded(gen: number) {
+	if (gen !== setupGen) throw new Error("Comparison superseded by a newer load");
+}
+
+// Cornerstone's volume cache outlives the engine, and a superseded call never returns a
+// handle, so nothing else would ever free the volumes it already cached. It releases them
+// itself, except what the newer call can still reach: its CT ids (they include the URL, so
+// Back then Forward to the same pair shares them) and any fixed-id segmentation volume the
+// newer call has claimed. segOwner records which call created each fixed-id volume last.
+let liveCtVolumeIds = new Set<string>();
+const segOwner = new Map<string, number>();
+function removeCachedVolume(id: string) {
+	try {
+		cache.removeVolumeLoadObject(id);
+	} catch {
+		/* not cached */
+	}
+}
+
+// Frees one case's volumes on behalf of a superseded call `gen`, under the rule above.
+function releaseSupersededCase(ctVolId: string, segmentationId: string, gen: number) {
+	if (!liveCtVolumeIds.has(ctVolId)) removeCachedVolume(ctVolId);
+	if (segOwner.get(segmentationId) === gen) {
+		segOwner.delete(segmentationId);
+		removeCachedVolume(segmentationId);
+	}
+}
 
 // Deterministic reference-line tool-instance name for a case's tool group + source pane.
 function refLineInstanceName(tgId: string, pane: PaneName): string {
@@ -481,8 +639,8 @@ function makeToolGroup(id: string, panes: Record<PaneName, string>) {
 	tools.addTool(tools.BidirectionalTool);
 	tools.addTool(tools.AngleTool);
 	tools.addTool(tools.ProbeTool);
-	tools.addTool(tools.RectangleROITool);
-	tools.addTool(tools.EllipticalROITool);
+	tools.addTool(SeatedRectangleROITool);
+	tools.addTool(SeatedEllipticalROITool);
 	tools.addTool(tools.PlanarFreehandROITool);
 	tools.addTool(tools.ArrowAnnotateTool);
 	tools.addTool(tools.AdvancedMagnifyTool);
@@ -531,30 +689,115 @@ function makeToolGroup(id: string, panes: Record<PaneName, string>) {
 	return tg;
 }
 
+// The NIfTI loader only settles its header promise from a successful stream: on a 404 it
+// logs "Fetch error" and never resolves or rejects, so awaiting it for a case that does
+// not exist left the page on "Loading both cases…" forever. Race it against a HEAD probe
+// that fails fast when the file is definitely missing, and a timeout for a request that
+// never answers at all. The header is the first few hundred bytes, so a healthy load
+// wins the race in well under the timeout.
+const HEADER_TIMEOUT_MS = 60_000;
+
+export async function loadNiftiImageIds(
+	url: string,
+	load: (url: string) => Promise<string[]> = (u) => createNiftiImageIdsAndCacheMetadata({ url: u }),
+	timeoutMs = HEADER_TIMEOUT_MS
+): Promise<string[]> {
+	const never = new Promise<never>(() => {});
+	const probe = fetch(url, { method: "HEAD" }).then(
+		(res) => {
+			// Only a definite "not there" fails fast. Anything else (a server that refuses
+			// HEAD, a rate limit) is left to the loader and the timeout.
+			if (res.status === 404 || res.status === 410) throw new Error(`HTTP ${res.status} for ${url}`);
+			return never;
+		},
+		() => never // HEAD blocked (CORS, offline): inconclusive, the timeout still guards
+	);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new Error(`Timed out loading ${url}`)), timeoutMs);
+	});
+	try {
+		return await Promise.race([load(url), probe, timeout]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+// NIfTI volumes carry no DICOM Modality, and the ROI tools print their unit from it (CT
+// gives "HU", anything else gives nothing). Compare cases are dataset scans, CT by
+// construction, so tag them. Same helper as the single viewer's _tagNiftiVolumeAsCt,
+// duplicated here for the same no-import reason as the tool names above.
+export function tagNiftiVolumeAsCt(volume: { metadata?: unknown }): void {
+	const metadata = volume.metadata as { Modality?: string } | undefined;
+	if (metadata && metadata.Modality === undefined) metadata.Modality = "CT";
+}
+
+/** A case that could not be loaded; `which` lets the page name it. */
+export type CaseLoadError = Error & { which: CaseKey };
+function caseLoadError(which: CaseKey, cause: unknown): CaseLoadError {
+	const err = new Error(
+		`Case ${which.toUpperCase()} failed to load: ${cause instanceof Error ? cause.message : String(cause)}`
+	) as CaseLoadError;
+	err.which = which;
+	return err;
+}
+
 // Load one case's CT + segmentation into its 3 viewports. Segmentation failures are
-// swallowed so the CT still shows (dev checkouts often lack masks).
+// swallowed so the CT still shows (dev checkouts often lack masks). A call that a newer
+// setupCompare has superseded stops after each await, before it touches the shared
+// (fixed id) segmentation state or viewports, and its failure is never swallowed.
 async function loadCase(
 	engine: RenderingEngine,
 	ctUrl: string,
 	segUrl: string,
 	viewportIds: string[],
 	segmentationId: string,
-	colorLUT: ColorLUT
+	colorLUT: ColorLUT,
+	gen: number
 ) {
-	const ctIds = await createNiftiImageIdsAndCacheMetadata({ url: ctUrl });
 	const ctVolId = `${segmentationId}_ct:${ctUrl}`;
+	try {
+		await loadCaseVolumes(engine, ctUrl, segUrl, viewportIds, segmentationId, ctVolId, colorLUT, gen);
+	} catch (e) {
+		if (gen !== setupGen) releaseSupersededCase(ctVolId, segmentationId, gen);
+		throw e;
+	}
+}
+
+async function loadCaseVolumes(
+	engine: RenderingEngine,
+	ctUrl: string,
+	segUrl: string,
+	viewportIds: string[],
+	segmentationId: string,
+	ctVolId: string,
+	colorLUT: ColorLUT,
+	gen: number
+) {
+	const ctIds = await loadNiftiImageIds(ctUrl);
+	throwIfSuperseded(gen);
 	const ctVol = await volumeLoader.createAndCacheVolume(ctVolId, { imageIds: ctIds });
+	tagNiftiVolumeAsCt(ctVol);
 	await ctVol.load();
+	throwIfSuperseded(gen);
 	await setVolumesForViewports(engine, [{ volumeId: ctVolId }], viewportIds);
+	throwIfSuperseded(gen);
 	engine.renderViewports(viewportIds);
 
 	// An empty URL means the case has no mask (CancerVerse): show the CT alone.
 	if (!segUrl) return;
 	try {
-		const segIds = await createNiftiImageIdsAndCacheMetadata({ url: segUrl });
+		const segIds = await loadNiftiImageIds(segUrl);
+		throwIfSuperseded(gen);
 		if (!segIds.length) return;
+		// The id is fixed, and createAndCacheVolume hands back whatever is already cached under
+		// it, so a mask left by an earlier pair must go before this pair's is created.
+		removeCachedVolume(segmentationId);
+		segOwner.set(segmentationId, gen);
 		const segVol = await volumeLoader.createAndCacheVolume(segmentationId, { imageIds: segIds });
+		throwIfSuperseded(gen);
 		await segVol.load();
+		throwIfSuperseded(gen);
 		// segVol.load() resolving only guarantees the volume's own combined scalar buffer is
 		// ready — NOT that every per-slice image is individually cached (cache.getImage(id)).
 		// That population can lag behind in the background; computeCentroids reading it right
@@ -564,30 +807,147 @@ async function loadCase(
 		// loadAndCacheImages returns an ARRAY OF PROMISES, not Promise.all()'d — awaiting the
 		// array itself resolves immediately without waiting for any individual image to load.
 		await Promise.all(imageLoader.loadAndCacheImages(segIds));
+		throwIfSuperseded(gen);
 		tools.segmentation.segmentationStyle.setStyle(
 			{ type: SegmentationRepresentations.Labelmap, segmentationId },
 			SEG_CONFIG
 		);
-		tools.segmentation.addSegmentations([
-			{
-				segmentationId,
-				representation: {
-					type: SegmentationRepresentations.Labelmap,
-					data: { imageIds: segIds, volumeId: segmentationId },
+		// suppressEvents: no pane has this mask yet, so the render request addSegmentations
+		// would queue names no viewports. Cornerstone's segmentation render queue is shared
+		// by every page and stops draining at an empty batch, which stranded the colour pass
+		// that unhides this case's labelmap actors (case B showed bare CT on a reopen). The
+		// representation adds below still queue a render for each pane.
+		tools.segmentation.addSegmentations(
+			[
+				{
+					segmentationId,
+					representation: {
+						type: SegmentationRepresentations.Labelmap,
+						data: { imageIds: segIds, volumeId: segmentationId },
+					},
+					// Every organ label is a segment, so each pane's representation gets a
+					// visibility entry per organ. Without them Cornerstone only knew label 1 and
+					// ignored organ toggles for every other label.
+					config: { segments: ORGAN_SEGMENTS },
 				},
-			},
-		]);
+			],
+			true
+		);
+		await addLabelmapActors(engine, segmentationId, segmentationId, viewportIds);
 		for (const vpId of viewportIds) {
+			throwIfSuperseded(gen);
 			await addVolumeLabelmap(engine, vpId, segmentationId, colorLUT);
+			throwIfSuperseded(gen);
 			tools.segmentation.activeSegmentation.setActiveSegmentation(vpId, segmentationId);
 		}
 	} catch (e) {
+		if (gen !== setupGen) throw e;
 		console.warn(`[compare] segmentation unavailable for ${segmentationId}:`, e);
 	}
 }
 
-export async function setupCompare(els: CompareElements, src: CompareSources): Promise<CompareHandle> {
+// One segment per organ label (1..N, in the Organs panel's order).
+const ORGAN_SEGMENTS = Object.fromEntries(
+	segmentation_categories.map((name, i) => [i + 1, { segmentIndex: i + 1, label: name }])
+);
+
+// The panes that hold a labelmap representation of the mask. A case without a mask (CancerVerse)
+// or whose mask failed to load has none.
+function panesWithMask(segmentationId: string, viewportIds: readonly string[]): string[] {
+	const spec = { segmentationId, type: SegmentationRepresentations.Labelmap };
+	return viewportIds.filter((vpId) => {
+		try {
+			return !!tools.segmentation.state.getSegmentationRepresentations(vpId, spec)?.length;
+		} catch {
+			return false;
+		}
+	});
+}
+
+// Tells which case a measurement belongs to from the viewport it was added to. The
+// FrameOfReferenceUID cannot: the NIfTI loader gives every volume the same constant, so
+// both cases share one.
+export function createAnnotationCaseTracker() {
+	const cases = new Map<string, CaseKey>();
+	// A removal is announced to every listener, and this tracker hears it first. The panel's own
+	// "removed" listener still needs the case, so the entry lingers here until the dispatch is over.
+	const justRemoved = new Map<string, CaseKey>();
+	return {
+		onAdded: (evt: Event) => {
+			const detail = (evt as CustomEvent).detail;
+			const uid = detail?.annotation?.annotationUID;
+			const info = typeof detail?.viewportId === "string" ? paneInfo(detail.viewportId) : null;
+			if (uid && info && !cases.has(uid)) cases.set(uid, info.caseKey);
+		},
+		onRemoved: (evt: Event) => {
+			const uid = (evt as CustomEvent).detail?.annotation?.annotationUID;
+			if (!uid) return;
+			const caseKey = cases.get(uid);
+			cases.delete(uid);
+			if (!caseKey) return;
+			justRemoved.set(uid, caseKey);
+			queueMicrotask(() => justRemoved.delete(uid));
+		},
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		caseKeyFor: (a: any): CaseKey | null => (a?.annotationUID && cases.get(a.annotationUID)) || null,
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		caseKeyForRemoved: (a: any): CaseKey | null => (a?.annotationUID && justRemoved.get(a.annotationUID)) || null,
+	};
+}
+
+// Annotation state is a module-level singleton like the volume cache: a measurement left
+// behind would be listed, and drawn on the slices, in the next comparison. The single viewer
+// clears its annotations on teardown for the same reason.
+export function clearAllAnnotations() {
+	try {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		for (const a of [...((tools.annotation.state.getAllAnnotations() ?? []) as any[])]) {
+			if (a?.annotationUID) tools.annotation.state.removeAnnotation(a.annotationUID);
+		}
+	} catch {
+		/* annotation state may not be ready — no-op */
+	}
+}
+
+// Cancels the setupCompare call `gen` while it is still loading and was never handed back as a
+// handle (the page was left meanwhile), so it stops downloading and frees what it built. It
+// supersedes the call, which throws at its next await, and tears down the engine, tool groups
+// and the two fixed-id segmentations itself, since no handle exists to do it. Unlike
+// handle.destroy() it leaves every other segmentation and annotation alone: the next page (the
+// single viewer) owns those by now. A call a newer one has already replaced is left alone.
+function abortSetupCompare(gen: number) {
+	if (gen !== setupGen) return;
+	setupGen++;
+	liveCtVolumeIds = new Set();
+	if (!currentEngine) return;
+	try {
+		tools.ToolGroupManager.destroyToolGroup(A.tg);
+		tools.ToolGroupManager.destroyToolGroup(B.tg);
+		for (const id of [A.seg, B.seg]) tools.segmentation.removeSegmentation(id);
+	} catch {
+		/* nothing built yet, or already gone */
+	}
+	currentEngine.destroy();
+	currentEngine = null;
+}
+
+// `signal` lets the page cancel a load that has not produced a handle yet (see above).
+export async function setupCompare(els: CompareElements, src: CompareSources, signal?: AbortSignal): Promise<CompareHandle> {
+	const gen = ++setupGen;
+	const onAbort = () => abortSetupCompare(gen);
+	if (signal?.aborted) onAbort();
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await buildCompare(els, src, gen);
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
+async function buildCompare(els: CompareElements, src: CompareSources, gen: number): Promise<CompareHandle> {
+	liveCtVolumeIds = new Set([`${A.seg}_ct:${src.ctA}`, `${B.seg}_ct:${src.ctB}`]);
 	await ensureInit();
+	throwIfSuperseded(gen);
 
 	try {
 		tools.ToolGroupManager.destroyToolGroup(A.tg);
@@ -599,6 +959,7 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 		currentEngine.destroy();
 		currentEngine = null;
 	}
+	clearAllAnnotations();
 
 	const engine = new RenderingEngine(ENGINE_ID);
 	currentEngine = engine;
@@ -619,8 +980,47 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 
 	const colorLUT = buildColorLUT();
 	tools.segmentation.removeAllSegmentations();
-	await loadCase(engine, src.ctA, src.segA, [A.ax, A.sag, A.cor], A.seg, colorLUT);
-	await loadCase(engine, src.ctB, src.segB, [B.ax, B.sag, B.cor], B.seg, colorLUT);
+	// A failed case tears down what was built so far (no handle exists yet to do it) and
+	// is reported by name.
+	// Cases that finished loading: loadCase releases its own volumes when it is superseded
+	// mid-load, but a case that already resolved has to be released here.
+	const loaded: { ctVolId: string; segmentationId: string }[] = [];
+	const loadOrFail = async (which: CaseKey, ctUrl: string, load: () => Promise<void>) => {
+		try {
+			await load();
+			const segmentationId = which === "a" ? A.seg : B.seg;
+			loaded.push({ ctVolId: `${segmentationId}_ct:${ctUrl}`, segmentationId });
+			throwIfSuperseded(gen);
+		} catch (e) {
+			// A superseded call owns nothing any more: the tool groups, segmentations and
+			// engine now belong to the newer comparison, and only its cached volumes are left
+			// to free.
+			if (gen !== setupGen) {
+				for (const c of loaded) releaseSupersededCase(c.ctVolId, c.segmentationId, gen);
+				throw e;
+			}
+			try {
+				tools.segmentation.removeAllSegmentations();
+				tools.ToolGroupManager.destroyToolGroup(A.tg);
+				tools.ToolGroupManager.destroyToolGroup(B.tg);
+			} catch {
+				/* ignore */
+			}
+			if (currentEngine === engine) {
+				engine.destroy();
+				currentEngine = null;
+			}
+			// No handle will ever exist to destroy() this load, so free every volume it cached
+			// (the cases that finished, the failed case's partial CT and both fixed-id masks);
+			// the ids are the ones destroy() frees.
+			for (const id of [...loaded.map((c) => c.ctVolId), `${which === "a" ? A.seg : B.seg}_ct:${ctUrl}`, A.seg, B.seg]) {
+				removeCachedVolume(id);
+			}
+			throw caseLoadError(which, e);
+		}
+	};
+	await loadOrFail("a", src.ctA, () => loadCase(engine, src.ctA, src.segA, [A.ax, A.sag, A.cor], A.seg, colorLUT, gen));
+	await loadOrFail("b", src.ctB, () => loadCase(engine, src.ctB, src.segB, [B.ax, B.sag, B.cor], B.seg, colorLUT, gen));
 
 	// Centroids are computed once per case (both eagerly here, for the mapping below, and
 	// lazily reused by jumpToOrgan) and cached thereafter.
@@ -665,6 +1065,8 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 	// converts that to a slice index) — falling back to the old plain proportional-index
 	// fraction only when no reliable mapping could be fit. ---
 	let linked = true;
+	// Pane sizes at the last refit, so the next one can tell whether the cells are still moving.
+	let lastRefitSizes = "";
 	// Shared by Link Scroll AND Sync Cursor (and jumpToOrgan/jumpToMeasurement below) — NOT two
 	// independent flags. Moving the crosshair (setToolCenter) also repositions the axial
 	// camera as a side effect, firing CAMERA_MODIFIED same as a real scroll would; conversely,
@@ -675,40 +1077,79 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 	// re-triggers the first — a visible flicker as the two fight. One shared flag means
 	// whichever mechanism is actively applying a change silences the other's reaction to it.
 	let syncing = false;
-	const mirror = (srcId: string, dstId: string, zMapFn: ((p: Vec3) => Vec3) | null) => () => {
-		if (!linked || syncing) return;
+	const mirror = (
+		srcId: string,
+		dstId: string,
+		zMapFn: ((p: Vec3) => Vec3) | null,
+		active: () => boolean = () => true
+	) => () => {
+		if (!linked || syncing || !active()) return;
 		const s = engine.getViewport(srcId) as SliceViewport;
 		const d = engine.getViewport(dstId) as SliceViewport;
 		if (!s || !d) return;
-		const nD = sliceCount(d);
-		if (nD <= 1) return;
+		if (sliceCount(d) <= 1) return;
+		// Everything below counts in Cornerstone's scroll steps, the same units d.scroll() takes.
+		// They run from the min end of the volume along the camera's viewPlaneNormal (axial: head
+		// to feet), NOT along the volume's storage k axis, which runs feet to head in some cases.
+		// This throws when a viewport has no volume yet, so a pane mid-load is skipped.
+		const info = (vp: SliceViewport): ScrollInfo | null => {
+			try {
+				return csUtils.getVolumeViewportScrollInfo(vp, vp.getVolumeId(), true);
+			} catch {
+				return null;
+			}
+		};
+		const dInfo = info(d);
+		if (!dInfo) return;
 
-		let target: number;
+		let delta: number;
 		if (zMapFn) {
-			const dstImageData = d.getImageData();
-			if (!dstImageData) return;
 			const srcWorld = s.getCamera().focalPoint as Vec3;
 			const dstZ = zMapFn(srcWorld)[2];
-			// X/Y here are throwaways — for the axis-aligned volumes these viewports use, the
-			// slice (k) index depends only on world Z, not X/Y, so any placeholder is fine.
-			const dstIdx = csUtils.transformWorldToIndexContinuous(dstImageData.imageData, [srcWorld[0], srcWorld[1], dstZ]);
-			target = Math.round(dstIdx[2]);
+			// Keep the destination's own X/Y and move only its depth, so the source's in-plane
+			// position can't change which slice is picked.
+			const dstFocal = d.getCamera().focalPoint as Vec3;
+			delta = scrollDeltaToWorld(dInfo, [dstFocal[0], dstFocal[1], dstZ]);
 		} else {
-			const nS = sliceCount(s);
-			if (nS <= 1) return;
-			target = Math.round((s.getSliceIndex() / (nS - 1)) * (nD - 1));
+			const sInfo = info(s);
+			if (!sInfo || sInfo.numScrollSteps < 1) return;
+			let frac = sInfo.currentStepIndex / sInfo.numScrollSteps;
+			// A flipped pane's normal points the other way, so its steps count from the other end.
+			const sN = sInfo.sliceRangeInfo.camera.viewPlaneNormal;
+			const dN = dInfo.sliceRangeInfo.camera.viewPlaneNormal;
+			if (sN && dN && sN[0] * dN[0] + sN[1] * dN[1] + sN[2] * dN[2] < 0) frac = 1 - frac;
+			delta = Math.round(frac * dInfo.numScrollSteps) - dInfo.currentStepIndex;
 		}
-		target = Math.max(0, Math.min(nD - 1, target));
-		const delta = target - d.getSliceIndex();
 		if (delta === 0) return;
 		syncing = true;
-		d.scroll(delta);
-		setTimeout(() => { syncing = false; }, 0);
+		try {
+			d.scroll(delta);
+		} catch (e) {
+			console.warn("[compare] link scroll failed:", e);
+		} finally {
+			// Always clear it: a stuck flag would silently switch off Link scroll and Sync cursor.
+			setTimeout(() => { syncing = false; }, 0);
+		}
 	};
 	const onA = mirror(A.ax, B.ax, zOnlyAtoB);
 	const onB = mirror(B.ax, A.ax, zOnlyBtoA);
 	els.aAx.addEventListener(Enums.Events.CAMERA_MODIFIED, onA);
 	els.bAx.addEventListener(Enums.Events.CAMERA_MODIFIED, onB);
+	// In a Sagittal or Coronal single-plane view the axial camera never moves, so the visible
+	// panes need their own mirror. It follows the proportional slice position: the per-axis
+	// fit above is only trusted for depth. It stays off in MPR, where moving one case's
+	// crosshair re-centres its other panes and would otherwise snap the other case's panes.
+	// The page hides a plane by setting display:none on its cell (it keeps the element mounted).
+	const showsOnlyPane = (paneEl: HTMLElement, axialEl: HTMLElement) =>
+		paneEl.parentElement?.style.display !== "none" && axialEl.parentElement?.style.display === "none";
+	const onASag = mirror(A.sag, B.sag, null, () => showsOnlyPane(els.aSag, els.aAx));
+	const onBSag = mirror(B.sag, A.sag, null, () => showsOnlyPane(els.bSag, els.bAx));
+	const onACor = mirror(A.cor, B.cor, null, () => showsOnlyPane(els.aCor, els.aAx));
+	const onBCor = mirror(B.cor, A.cor, null, () => showsOnlyPane(els.bCor, els.bAx));
+	els.aSag.addEventListener(Enums.Events.CAMERA_MODIFIED, onASag);
+	els.bSag.addEventListener(Enums.Events.CAMERA_MODIFIED, onBSag);
+	els.aCor.addEventListener(Enums.Events.CAMERA_MODIFIED, onACor);
+	els.bCor.addEventListener(Enums.Events.CAMERA_MODIFIED, onBCor);
 
 	// --- Cross-case cursor sync: mirror one case's crosshair onto the other, via the same
 	// landmark-fitted mapping (world mm → world mm directly), falling back to the old
@@ -738,12 +1179,10 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 				const src = engine.getViewport(route.srcVp)?.getImageData();
 				const dst = engine.getViewport(route.dstVp)?.getImageData();
 				if (!src || !dst) return;
-				const sIdx = csUtils.transformWorldToIndexContinuous(src.imageData, center);
-				const dIdx = [0, 1, 2].map((i) => {
-					const frac = Math.min(1, Math.max(0, sIdx[i] / ((src.dimensions[i] - 1) || 1)));
-					return frac * ((dst.dimensions[i] - 1) || 1);
-				}) as Vec3;
-				world = csUtils.transformIndexToWorld(dst.imageData, dIdx);
+				// Fractions along each WORLD axis of each volume's bounds, not along its storage
+				// axes: cases store x, y and z in different directions, and an index fraction
+				// would mirror the point to the other side on every axis where they differ.
+				world = mapByBounds(center, src.imageData.getBounds(), dst.imageData.getBounds());
 			}
 			const dstTool = tools.ToolGroupManager.getToolGroup(route.dstTg)?.getToolInstance(
 				tools.CrosshairsTool.toolName
@@ -769,21 +1208,17 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 		[A.tg, [A.ax, A.sag, A.cor]] as const,
 		[B.tg, [B.ax, B.sag, B.cor]] as const,
 	];
+	const casePanes = [
+		[A.seg, [A.ax, A.sag, A.cor]] as const,
+		[B.seg, [B.ax, B.sag, B.cor]] as const,
+	];
 
-	// Known FrameOfReferenceUIDs for each case's volume, captured once after load — used to
-	// tag which case a measurement annotation belongs to (needed since it's the caller's job
-	// to know which case's crosshair to move on "jump to measurement").
-	const forA = (engine.getViewport(A.ax) as unknown as { getFrameOfReferenceUID?: () => string })
-		?.getFrameOfReferenceUID?.();
-	const forB = (engine.getViewport(B.ax) as unknown as { getFrameOfReferenceUID?: () => string })
-		?.getFrameOfReferenceUID?.();
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	const caseKeyForAnnotation = (a: any): CaseKey | null => {
-		const f = a?.metadata?.FrameOfReferenceUID;
-		if (f && f === forA) return "a";
-		if (f && f === forB) return "b";
-		return null;
-	};
+	// Which case each annotation was drawn on, read from the viewport it was added to. The
+	// "jump to measurement" caller needs the case to know which crosshair to move.
+	const annotationCases = createAnnotationCaseTracker();
+	eventTarget.addEventListener(tools.Enums.Events.ANNOTATION_ADDED, annotationCases.onAdded);
+	eventTarget.addEventListener(tools.Enums.Events.ANNOTATION_REMOVED, annotationCases.onRemoved);
+	const caseKeyForAnnotation = annotationCases.caseKeyFor;
 
 	// --- Focus tracking: which viewport cine/flip/rotate act on (whichever pane was last
 	// clicked/scrolled), and which pane is each case's reference-line "source" (tracked
@@ -822,6 +1257,13 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 		el.addEventListener("wheel", handler, { passive: true });
 		return { el, handler };
 	});
+
+	const sliceListenerTargets = [
+		{ el: els.aAx, vpId: A.ax }, { el: els.aSag, vpId: A.sag }, { el: els.aCor, vpId: A.cor },
+		{ el: els.bAx, vpId: B.ax }, { el: els.bSag, vpId: B.sag }, { el: els.bCor, vpId: B.cor },
+	];
+	// Slice-counter subscriptions still attached; destroy() drops any the caller did not.
+	const sliceUnsubscribers = new Set<() => void>();
 
 	// --- Cine playback — hand-rolled setInterval + viewport.scroll(), not
 	// cornerstoneTools.utilities.cine.playClip (same rationale as the single viewer: with
@@ -917,7 +1359,9 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 			engine.renderViewports(allVps);
 		},
 		setSegOpacity(alpha) {
-			for (const segId of [A.seg, B.seg]) {
+			for (const [segId, vps] of casePanes) {
+				// A case without a mask would only add an empty batch to the render queue.
+				if (!panesWithMask(segId, vps).length) continue;
 				try {
 					tools.segmentation.config.style.setStyle(
 						{ type: SegmentationRepresentations.Labelmap, segmentationId: segId },
@@ -932,19 +1376,24 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 		setOrganVisibility(checkState) {
 			// checkState[0] is the background (always on); indices 1..N are organ labels.
 			// Apply the same per-organ visibility to both cases' segmentations.
-			for (const [segId, vps] of [
-				[A.seg, [A.ax, A.sag, A.cor]],
-				[B.seg, [B.ax, B.sag, B.cor]],
-			] as const) {
-				for (let i = 1; i < checkState.length; i++) {
-					for (const vpId of vps) {
+			// Each setSegmentIndexVisibility queues two segmentation renders, drained one per
+			// frame, so only organs that change are set (setting all ~35 on every pane queued
+			// ~420 renders, seconds of lag). Panes without the mask are skipped: Cornerstone
+			// still queues a render for them, an empty one that stalls the queue. The cases
+			// take turns, so each one's first render is near the front of the queue and both
+			// update together instead of case B waiting for all of case A's renders.
+			const cases = casePanes.map(([segId, vps]) => ({
+				spec: { segmentationId: segId, type: SegmentationRepresentations.Labelmap },
+				panes: panesWithMask(segId, vps),
+			}));
+			for (let i = 1; i < checkState.length; i++) {
+				for (let p = 0; p < 3; p++) {
+					for (const { spec, panes } of cases) {
+						const vpId = panes[p];
+						if (!vpId) continue;
 						try {
-							tools.segmentation.config.visibility.setSegmentIndexVisibility(
-								vpId,
-								{ segmentationId: segId, type: SegmentationRepresentations.Labelmap },
-								i,
-								checkState[i]
-							);
+							if (tools.segmentation.config.visibility.getSegmentIndexVisibility(vpId, spec, i) === checkState[i]) continue;
+							tools.segmentation.config.visibility.setSegmentIndexVisibility(vpId, spec, i, checkState[i]);
 						} catch {
 							/* segmentation may be absent (dev checkout without masks) */
 						}
@@ -1000,12 +1449,16 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 			// Move each case's crosshair to that case's own centroid for the organ. Guard the
 			// proportional-scroll mirror so linking doesn't drag B's axial back to A's fraction.
 			syncing = true;
-			for (const [segId, tgId, vps] of [
-				[A.seg, A.tg, [A.ax, A.sag, A.cor]],
-				[B.seg, B.tg, [B.ax, B.sag, B.cor]],
+			const missing: ("a" | "b")[] = [];
+			for (const [which, segId, tgId, vps] of [
+				["a", A.seg, A.tg, [A.ax, A.sag, A.cor]],
+				["b", B.seg, B.tg, [B.ax, B.sag, B.cor]],
 			] as const) {
 				const mm = centroidsFor(segId)?.[label];
-				if (!mm) continue; // organ absent in this case
+				if (!mm) {
+					missing.push(which); // organ absent in this case
+					continue;
+				}
 				const tool = tools.ToolGroupManager.getToolGroup(tgId)?.getToolInstance(
 					tools.CrosshairsTool.toolName
 				) as { setToolCenter?: (mm: number[], suppress?: boolean) => void } | undefined;
@@ -1014,16 +1467,54 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 				engine.renderViewports([...vps]);
 			}
 			setTimeout(() => { syncing = false; }, 0);
+			return missing;
 		},
-		refit() {
-			// The grid changed size (view-mode switch) — re-measure and re-fit each pane so
-			// the CT fills its (now differently sized) cell instead of staying at the old fit.
-			engine.resize(true, false);
-			for (const vpId of allVps) {
-				const vp = engine.getViewport(vpId) as { resetCamera?: () => void };
-				vp?.resetCamera?.();
+		refit(keepView = false) {
+			type Pane = { element?: HTMLElement; getZoom?: () => number; setZoom?: (z: number) => void; resetCamera?: () => void };
+			// The resize puts each camera back and fires its camera events; they are not user
+			// scrolls, so linked scroll and the cursor sync must not map them onto the other case.
+			syncing = true;
+			if (keepView) {
+				// A dock narrowed or widened the grid while the user may be zoomed onto a
+				// measurement. Keep the cameras through the resize, then put each pane's zoom
+				// (relative to the fit of its new cell) back, as the single viewer does.
+				const zooms = new Map<string, number>();
+				for (const vpId of allVps) {
+					const z = (engine.getViewport(vpId) as Pane | undefined)?.getZoom?.();
+					if (typeof z === "number" && Number.isFinite(z) && z > 0) zooms.set(vpId, z);
+				}
+				engine.resize(true, true);
+				for (const [vpId, z] of zooms) {
+					const vp = engine.getViewport(vpId) as Pane | undefined;
+					if (!vp?.setZoom || (vp.element && (vp.element.clientWidth === 0 || vp.element.clientHeight === 0))) continue;
+					vp.setZoom(z);
+				}
+			} else {
+				// The grid changed size (view-mode switch) — re-measure and re-fit each pane so
+				// the CT fills its (now differently sized) cell instead of staying at the old fit.
+				engine.resize(true, false);
+				for (const vpId of allVps) {
+					(engine.getViewport(vpId) as Pane | undefined)?.resetCamera?.();
+				}
 			}
+			setTimeout(() => { syncing = false; }, 0);
+			// A resize dropped for a queued render frame changes nothing, so the caller needs
+			// another pass; so does a cell that moved since the last one.
+			const dropped = (engine as unknown as { _animationFrameSet?: boolean })._animationFrameSet === true;
+			const sizes = allVps
+				.map((vpId) => {
+					const el = (engine.getViewport(vpId) as { element?: HTMLElement } | undefined)?.element;
+					return el ? `${el.clientWidth}x${el.clientHeight}` : "";
+				})
+				.join("|");
+			const moved = sizes !== lastRefitSizes;
+			lastRefitSizes = sizes;
 			engine.renderViewports(allVps);
+			// The SVG layer (crosshairs, ROI outlines, measurement lines) only repaints on an
+			// annotation render; that render also re-seats the automatically placed
+			// statistics boxes for the resized cells.
+			repaintPaneAnnotations(allVps);
+			return dropped || moved;
 		},
 		resetView() {
 			for (const vpId of allVps) {
@@ -1031,6 +1522,7 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 				vp?.resetCamera();
 				vp?.render();
 			}
+			repaintPaneAnnotations(allVps);
 		},
 		setFocusedViewport(viewportId) {
 			setFocus(viewportId);
@@ -1067,6 +1559,30 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 		},
 		setActiveMeasurementTool(toolName) {
 			setActiveMeasurementToolFn(toolName);
+		},
+		cancelDrawing() {
+			let cancelled = false;
+			for (const vpId of allVps) {
+				const element = engine.getViewport(vpId)?.element;
+				if (!element) continue;
+				let uid: string | undefined;
+				try {
+					uid = tools.cancelActiveManipulations(element);
+				} catch {
+					uid = undefined;
+				}
+				if (!uid) continue;
+				cancelled = true;
+				// Cornerstone keeps a half-drawn line where the pointer left it; Freehand's own
+				// cancel has already removed its open outline.
+				try {
+					if (tools.annotation.state.getAnnotation(uid)) tools.annotation.state.removeAnnotation(uid);
+				} catch {
+					/* annotation state may be gone with the engine — nothing to remove */
+				}
+			}
+			if (cancelled) engine.renderViewports(allVps);
+			return cancelled;
 		},
 		clearMeasurements() {
 			try {
@@ -1139,7 +1655,8 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 			const make = (kind: MeasurementChangeKind) => (evt: Event) => {
 				const a = (evt as CustomEvent).detail?.annotation;
 				if (!a?.annotationUID || !names.includes(a?.metadata?.toolName)) return;
-				const caseKey = caseKeyForAnnotation(a);
+				const caseKey =
+					caseKeyForAnnotation(a) ?? (kind === "removed" ? annotationCases.caseKeyForRemoved(a) : null);
 				if (!caseKey) return;
 				cb(kind, toSummary(a, caseKey));
 			};
@@ -1153,15 +1670,51 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 				for (const [name, handler] of pairs) eventTarget.removeEventListener(name, handler);
 			};
 		},
+		subscribeToSliceChanges(cb) {
+			const cleanups: (() => void)[] = [];
+			for (const { el, vpId } of sliceListenerTargets) {
+				const viewport = engine.getViewport(vpId) as SliceViewport | undefined;
+				if (!viewport) continue;
+				const read = (): SliceReadout => ({ current: viewport.getSliceIndex(), total: sliceCount(viewport) });
+				let last = read();
+				cb(vpId, last);
+				// Pan, zoom and rotate fire this event too, so only a changed reading goes out.
+				const handler = () => {
+					const next = read();
+					if (next.current === last.current && next.total === last.total) return;
+					last = next;
+					cb(vpId, next);
+				};
+				el.addEventListener(Enums.Events.CAMERA_MODIFIED, handler);
+				cleanups.push(() => el.removeEventListener(Enums.Events.CAMERA_MODIFIED, handler));
+			}
+			const unsubscribe = () => {
+				sliceUnsubscribers.delete(unsubscribe);
+				cleanups.forEach((fn) => fn());
+			};
+			sliceUnsubscribers.add(unsubscribe);
+			return unsubscribe;
+		},
 		destroy() {
 			stopCineFn();
+			for (const unsubscribe of [...sliceUnsubscribers]) unsubscribe();
 			for (const { el, handler } of focusListeners) {
 				el.removeEventListener("mousedown", handler);
 				el.removeEventListener("wheel", handler);
 			}
 			els.aAx.removeEventListener(Enums.Events.CAMERA_MODIFIED, onA);
 			els.bAx.removeEventListener(Enums.Events.CAMERA_MODIFIED, onB);
+			els.aSag.removeEventListener(Enums.Events.CAMERA_MODIFIED, onASag);
+			els.bSag.removeEventListener(Enums.Events.CAMERA_MODIFIED, onBSag);
+			els.aCor.removeEventListener(Enums.Events.CAMERA_MODIFIED, onACor);
+			els.bCor.removeEventListener(Enums.Events.CAMERA_MODIFIED, onBCor);
 			eventTarget.removeEventListener(tools.Enums.Events.CROSSHAIR_TOOL_CENTER_CHANGED, onCrosshair);
+			eventTarget.removeEventListener(tools.Enums.Events.ANNOTATION_ADDED, annotationCases.onAdded);
+			eventTarget.removeEventListener(tools.Enums.Events.ANNOTATION_REMOVED, annotationCases.onRemoved);
+			// A handle that a newer setupCompare has already replaced must not tear down the
+			// shared tool groups, segmentations, engine or cache entries the newer one is using.
+			if (currentEngine !== engine) return;
+			clearAllAnnotations();
 			try {
 				tools.segmentation.removeAllSegmentations();
 				tools.ToolGroupManager.destroyToolGroup(A.tg);
@@ -1169,10 +1722,8 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 			} catch {
 				/* ignore */
 			}
-			if (currentEngine) {
-				currentEngine.destroy();
-				currentEngine = null;
-			}
+			engine.destroy();
+			currentEngine = null;
 			// Cornerstone's volume cache is a module-level singleton independent of the
 			// RenderingEngine — destroying the engine above does NOT free the CT/segmentation
 			// volumes it was displaying. Without this, every case comparison the user opens in
@@ -1180,11 +1731,7 @@ export async function setupCompare(els: CompareElements, src: CompareSources): P
 			// leaves its full-resolution volumes pinned in memory, growing unbounded until the
 			// tab OOMs. Same ids loadCase used to cache them (ctVolId formula must match).
 			for (const id of [`${A.seg}_ct:${src.ctA}`, `${B.seg}_ct:${src.ctB}`, A.seg, B.seg]) {
-				try {
-					cache.removeVolumeLoadObject(id);
-				} catch {
-					/* not cached, e.g. segmentation failed to load */
-				}
+				removeCachedVolume(id);
 			}
 		},
 	};
