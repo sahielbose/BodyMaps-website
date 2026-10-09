@@ -553,6 +553,8 @@ const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
 // case" screen forever. Give a genuinely slow connection five full minutes
 // before exposing recovery controls; only an abandoned request should retry.
 const VIEWER_LOAD_TIMEOUT_MS = 300_000;
+// How many more times a timed-out solo challenge tries to submit itself after a failure.
+const CHALLENGE_TIMEOUT_MAX_RETRIES = 5;
 // A layout change refits the panes until their sizes settle; this caps the passes.
 const LAYOUT_REFIT_MAX = 6;
 const VIEWER_RETRY_BASE_DELAY_MS = 2_000;
@@ -2490,18 +2492,44 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		return unsubscribe;
 	}, [takeSnapshot, captureTracker, liveRoomConnected, sendLiveRoomDurable, isSoloChallenge, setSoloChallengeMeasurement]);
 
+	// The timed-out submit can fail (a network blip) or be skipped (a manual submit was
+	// in flight). The dock may have nothing to click by then, so it is tried again a
+	// few times, a little later each time, until a result arrives.
+	const [challengeRetryTick, setChallengeRetryTick] = useState(0);
+	const challengeRetryCountRef = useRef(0);
+	const challengeRetryTimerRef = useRef<number | undefined>(undefined);
+	const challengeResultRef = useRef(soloChallenge?.result);
+	challengeResultRef.current = soloChallenge?.result;
+	useEffect(() => () => window.clearTimeout(challengeRetryTimerRef.current), []);
 	useEffect(() => {
 		if (!soloChallenge || soloChallenge.result || soloChallenge.remainingSeconds > 0) return;
 		if (challengeTimedOutRef.current) return;
 		challengeTimedOutRef.current = true;
-		void soloChallenge.submit(serializedChallengeMeasurement, true);
-	}, [soloChallenge, soloChallenge?.remainingSeconds, soloChallenge?.result, serializedChallengeMeasurement]);
+		void Promise.resolve(soloChallenge.submit(serializedChallengeMeasurement, true)).finally(() => {
+			if (!pageMountedRef.current || challengeResultRef.current || challengeRetryCountRef.current >= CHALLENGE_TIMEOUT_MAX_RETRIES) return;
+			const delay = Math.min(30_000, 3_000 * 2 ** challengeRetryCountRef.current);
+			challengeRetryCountRef.current += 1;
+			challengeRetryTimerRef.current = window.setTimeout(() => {
+				challengeTimedOutRef.current = false;
+				setChallengeRetryTick((n) => n + 1);
+			}, delay);
+		});
+	}, [soloChallenge, soloChallenge?.remainingSeconds, soloChallenge?.result, serializedChallengeMeasurement, challengeRetryTick]);
 
+	// The reveal depends on what the result says, not on the result object: a re-grade
+	// (Retry AI grade) hands back a new object with the same ground truth, and re-running
+	// the reveal would put the learner's pan, layers and opacity back where they started.
+	const hasChallengeResult = Boolean(soloChallenge?.result);
+	const revealedLabel = soloChallenge?.result?.ground_truth.segmentation_label;
+	const revealedMeshOrganId = soloChallenge?.result?.ground_truth.mesh_organ_id;
+	const [revealStart, revealEnd] = soloChallenge?.result?.ground_truth.reference_measurement_lps ?? [];
+	const hasRevealCenter = revealStart?.length === 3 && revealEnd?.length === 3;
+	const revealCenterX = hasRevealCenter ? (revealStart[0] + revealEnd[0]) / 2 : undefined;
+	const revealCenterY = hasRevealCenter ? (revealStart[1] + revealEnd[1]) / 2 : undefined;
+	const revealCenterZ = hasRevealCenter ? (revealStart[2] + revealEnd[2]) / 2 : undefined;
 	useEffect(() => {
 		if (!isSoloChallenge || !viewerReady || checkBoxData.length === 0) return;
 		const visible = [true, ...checkBoxData.map(() => false)];
-		const revealedLabel = soloChallenge?.result?.ground_truth.segmentation_label;
-		const meshOrganId = soloChallenge?.result?.ground_truth.mesh_organ_id;
 		if (revealedLabel && revealedLabel < visible.length) {
 			visible[revealedLabel] = true;
 			const revealColor: Color = [239, 68, 68, 255];
@@ -2509,26 +2537,21 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setLabelColorMap((current) => ({
 				...current,
 				[revealedLabel]: revealColor,
-				...(meshOrganId ? { [meshOrganId]: revealColor } : {}),
+				...(revealedMeshOrganId ? { [revealedMeshOrganId]: revealColor } : {}),
 			}));
 		}
 		setCheckState(visible);
 		setVisibilities(visible);
-		if (soloChallenge?.result) {
+		if (hasChallengeResult) {
 			setOpacityValue(76);
 			setFillOpacity(0.76);
-			const [start, end] = soloChallenge.result.ground_truth.reference_measurement_lps;
-			if (start?.length === 3 && end?.length === 3) {
-				const center: [number, number, number] = [
-					(start[0] + end[0]) / 2,
-					(start[1] + end[1]) / 2,
-					(start[2] + end[2]) / 2,
-				];
+			if (revealCenterX !== undefined && revealCenterY !== undefined && revealCenterZ !== undefined) {
+				const center: [number, number, number] = [revealCenterX, revealCenterY, revealCenterZ];
 				moveCornerstoneCrosshairToMm(center);
 				setCrosshairMm(center);
 			}
 		}
-	}, [isSoloChallenge, soloChallenge?.result, viewerReady, checkBoxData]);
+	}, [isSoloChallenge, hasChallengeResult, revealedLabel, revealedMeshOrganId, revealCenterX, revealCenterY, revealCenterZ, viewerReady, checkBoxData]);
 
 	// Quiz questions share only the server-authored viewer cue. Student navigation
 	// remains local; masks and measurements stay hidden until the final reveal.
@@ -6134,7 +6157,7 @@ const aiAvailableOrgans = useMemo(() => {
 						setCrosshairToolActive(false);
 						setActiveMeasureTool(LENGTH_TOOL);
 					}}
-					onSubmit={() => void soloChallenge.submit(serializedChallengeMeasurement)}
+					onSubmit={() => void soloChallenge.submit(serializedChallengeMeasurement, soloChallenge.remainingSeconds === 0)}
 				/>
 			)}
 			{quizPractice && quizPractice.dockOpen && (

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { SoloChallengeDock } from "./SoloChallengeChrome";
+import { SoloChallengeDock, SoloChallengeHeader } from "./SoloChallengeChrome";
 import type { EducationChallenge, EducationResult, SoloChallengeController } from "./types";
 
 const challenge: EducationChallenge = {
@@ -51,6 +51,33 @@ function controller(overrides: Partial<SoloChallengeController> = {}): SoloChall
 const measurement = { uid: "m1", tool: "Length", label: "", value: "31.0 mm", center: [-5, -5, 2] as [number, number, number] };
 const serialized = { id: "m1", tool: "Length", points: [[-4, -4, 2], [-6, -6, 2]], polyline: [], text: "", label: "", frame_of_reference: "", metadata: {} };
 
+describe("Solo Challenge timer", () => {
+	// The ticking clock sits in no live region; a separate status line speaks
+	// only at one minute left and at time up, so its text changes rarely.
+	it("keeps the clock out of every live region", () => {
+		render(<SoloChallengeHeader controller={controller({ remainingSeconds: 240 })} />);
+		const timer = screen.getByRole("timer");
+		expect(timer).toHaveTextContent("04:00");
+		expect(timer.closest("[aria-live], [role=status], [role=alert], [role=log]")).toBeNull();
+		expect(screen.getByRole("status")).toHaveTextContent(/^$/);
+	});
+
+	it("announces the last minute once and then time up", () => {
+		const { rerender } = render(<SoloChallengeHeader controller={controller({ remainingSeconds: 61 })} />);
+		const status = screen.getByRole("status");
+		expect(status).toHaveTextContent(/^$/);
+
+		rerender(<SoloChallengeHeader controller={controller({ remainingSeconds: 60 })} />);
+		expect(status).toHaveTextContent("One minute remaining.");
+		rerender(<SoloChallengeHeader controller={controller({ remainingSeconds: 59 })} />);
+		expect(status).toHaveTextContent("One minute remaining.");
+		expect(screen.getByRole("timer")).toHaveTextContent("00:59");
+
+		rerender(<SoloChallengeHeader controller={controller({ remainingSeconds: 0 })} />);
+		expect(status).toHaveTextContent("Time is up.");
+	});
+});
+
 describe("Solo Challenge chrome", () => {
 	it("requires a complete marked and measured interpretation before submission", () => {
 		const onSubmit = vi.fn();
@@ -62,6 +89,17 @@ describe("Solo Challenge chrome", () => {
 		expect(button).toBeEnabled();
 		fireEvent.click(button);
 		expect(onSubmit).toHaveBeenCalledOnce();
+	});
+
+	it("keeps Submit disabled for an incomplete form until time runs out, then lets it through", () => {
+		const incomplete = { findingChoice: "focal_pancreatic_lesion", marker: null, impression: "" };
+		const dock = (remainingSeconds: number) => (
+			<SoloChallengeDock controller={controller({ ...incomplete, remainingSeconds })} crosshair={null} measurement={null} serializedMeasurement={null} onSetMarker={vi.fn()} onActivateMeasure={vi.fn()} onSubmit={vi.fn()} />
+		);
+		const { rerender } = render(dock(30));
+		expect(screen.getByRole("button", { name: /Submit interpretation/i })).toBeDisabled();
+		rerender(dock(0));
+		expect(screen.getByRole("button", { name: /Submit interpretation/i })).toBeEnabled();
 	});
 
 	it("offers an AI grading retry while preserving a provisional result", () => {

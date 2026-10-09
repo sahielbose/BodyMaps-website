@@ -11,6 +11,9 @@ export type SoloChallengeSession = {
 	marker: [number, number, number] | null;
 	measurement: SharedMeasurement | null;
 	result: EducationResult | null;
+	// Server clock minus the device clock, in milliseconds, measured when the
+	// attempt started, so the countdown follows the server's deadline.
+	clockOffsetMs?: number;
 };
 
 type StoredSoloChallengeSession = SoloChallengeSession & {
@@ -21,9 +24,20 @@ function storageKey(challengeId: string) {
 	return `${STORAGE_PREFIX}.${challengeId}`;
 }
 
-function discard(storage: Storage, key: string) {
+// Blocked site data (cookies off, a sandboxed iframe) makes even reading
+// sessionStorage throw, so it is looked up behind a guard, never in a default
+// parameter where the throw would escape the callers' try blocks.
+function sessionStore(): Storage | null {
 	try {
-		storage.removeItem(key);
+		return sessionStorage;
+	} catch {
+		return null;
+	}
+}
+
+function discard(storage: Storage | null, key: string) {
+	try {
+		storage?.removeItem(key);
 	} catch {
 		// Treat an unavailable storage backend as already cleared.
 	}
@@ -62,7 +76,8 @@ function validResult(value: unknown, challengeId: string, attemptId: string): va
 		&& (result.status === "graded" || result.status === "provisional");
 }
 
-export function readSoloChallengeSession(challengeId: string, storage: Storage = window.sessionStorage): SoloChallengeSession | null {
+export function readSoloChallengeSession(challengeId: string, storage: Storage | null = sessionStore()): SoloChallengeSession | null {
+	if (!storage) return null;
 	const key = storageKey(challengeId);
 	try {
 		const parsed = JSON.parse(storage.getItem(key) || "null") as Partial<StoredSoloChallengeSession> | null;
@@ -93,6 +108,7 @@ export function readSoloChallengeSession(challengeId: string, storage: Storage =
 			marker: parsed.marker,
 			measurement: parsed.measurement,
 			result: parsed.result,
+			clockOffsetMs: Number.isFinite(parsed.clockOffsetMs) ? parsed.clockOffsetMs : undefined,
 		};
 	} catch {
 		discard(storage, key);
@@ -100,15 +116,15 @@ export function readSoloChallengeSession(challengeId: string, storage: Storage =
 	}
 }
 
-export function writeSoloChallengeSession(challengeId: string, session: SoloChallengeSession, storage: Storage = window.sessionStorage) {
+export function writeSoloChallengeSession(challengeId: string, session: SoloChallengeSession, storage: Storage | null = sessionStore()) {
 	const value: StoredSoloChallengeSession = { version: SESSION_VERSION, ...session };
 	try {
-		storage.setItem(storageKey(challengeId), JSON.stringify(value));
+		storage?.setItem(storageKey(challengeId), JSON.stringify(value));
 	} catch {
 		// Storage can be unavailable in hardened/private contexts; the live attempt still works.
 	}
 }
 
-export function clearSoloChallengeSession(challengeId: string, storage: Storage = window.sessionStorage) {
+export function clearSoloChallengeSession(challengeId: string, storage: Storage | null = sessionStore()) {
 	discard(storage, storageKey(challengeId));
 }

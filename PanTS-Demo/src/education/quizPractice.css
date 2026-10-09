@@ -16,6 +16,29 @@
 	background: rgba(52, 211, 153, .09);
 }
 
+/* The progress inside the Questions button stands in for the status chip,
+   which this header hides on a phone (the live room keeps its status word
+   there, so the hide lives here rather than in liveRooms.css). */
+.edu-quiz-progress { display: none; font-variant-numeric: tabular-nums; }
+
+/* At phone width the header wraps its actions onto a second row; share that
+   row equally between the two buttons instead of leaving a right-aligned half. */
+@media (max-width: 780px) {
+	.edu-quiz-header .lr-header__actions .lr-header-button { flex: 1 1 0; }
+}
+
+/* On a phone the question panel is a bottom sheet, so the scan above it stays
+   visible instead of a 92vw panel covering it. */
 @media (max-width: 520px) {
-	.edu-quiz-header .lr-header__warning { display: none; }
+	.edu-quiz-progress { display: inline; }
+	.edu-quiz-header .lr-status { display: none; }
+	.is-quiz-practice .lr-quiz-dock {
+		inset: auto 0 0 0;
+		width: 100%;
+		max-width: 100%;
+		max-height: 55dvh;
+		border-top: 1px solid var(--lr-border);
+		border-left: 0;
+		box-shadow: 0 -18px 48px rgba(0, 0, 0, .5);
+	}
 }

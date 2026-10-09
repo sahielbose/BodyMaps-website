@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EducationAttempt, EducationResult } from "./types";
 import {
 	clearSoloChallengeSession,
@@ -84,5 +84,20 @@ describe("solo challenge session", () => {
 
 		clearSoloChallengeSession(challengeId);
 		expect(readSoloChallengeSession(challengeId)).toBeNull();
+	});
+
+	it("reads nothing, and never throws, when site data is blocked", () => {
+		// Cookies off or a sandboxed iframe: even reaching sessionStorage throws.
+		const blocked = () => { throw new DOMException("The operation is insecure.", "SecurityError"); };
+		const storage = vi.spyOn(globalThis, "sessionStorage", "get").mockImplementation(blocked);
+		try {
+			expect(readSoloChallengeSession(challengeId)).toBeNull();
+			expect(() => writeSoloChallengeSession(challengeId, {
+				attempt, findingChoice: "", impression: "", marker: null, measurement: null, result: null,
+			})).not.toThrow();
+			expect(() => clearSoloChallengeSession(challengeId)).not.toThrow();
+		} finally {
+			storage.mockRestore();
+		}
 	});
 });

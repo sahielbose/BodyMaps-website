@@ -148,6 +148,12 @@ class AttemptDeadlinePassed(EducationError):
     code = "attempt_deadline_passed"
 
 
+class ChallengeUnavailable(EducationError):
+    # The challenge's answer data is not installed. Retrying will not help, so this is a 4xx.
+    status_code = 409
+    code = "challenge_unavailable"
+
+
 class AIGradeUnavailable(EducationError):
     status_code = 503
     code = "ai_grade_unavailable"
@@ -324,7 +330,7 @@ class EducationStore:
         try:
             return case35_mask_path(self.pants_path)
         except FileNotFoundError as exc:
-            raise EducationError(str(exc)) from exc
+            raise ChallengeUnavailable(str(exc)) from exc
 
     @staticmethod
     def _attempt_id(value: str) -> str:
@@ -401,7 +407,8 @@ class EducationStore:
         try:
             mask, affine, ground_truth = load_case35_ground_truth(self.pants_path)
         except (FileNotFoundError, ValueError) as exc:
-            raise EducationError(str(exc)) from exc
+            # The mask is missing or holds no usable lesion, which no retry can fix.
+            raise ChallengeUnavailable(str(exc)) from exc
         ground_truth["teaching_points"] = [
             f"The highlighted area shows the abnormality in the {ground_truth['location']}.",
             "Use the top-down (axial) CT view and measure the slice where the abnormality looks widest.",
@@ -418,7 +425,7 @@ class EducationStore:
             try:
                 return case35_reveal_segmentation(self.pants_path)
             except (FileNotFoundError, ValueError) as exc:
-                raise EducationError(str(exc)) from exc
+                raise ChallengeUnavailable(str(exc)) from exc
 
     def _grade_impression(self, impression: str, ground_truth: dict[str, Any], _objective: dict[str, Any]) -> dict[str, Any]:
         system_prompt = """

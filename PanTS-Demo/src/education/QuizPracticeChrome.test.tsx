@@ -49,7 +49,7 @@ describe("QuizPracticeChrome", () => {
 		fireEvent.click(screen.getByRole("button", { name: /Pancreas/i }));
 		expect(value.selectAnswer).toHaveBeenCalledWith("pancreas");
 		expect(screen.getByRole("button", { name: /Submit/i })).toBeDisabled();
-		expect(screen.getByText("1 linked question")).toBeInTheDocument();
+		expect(screen.getByText("Pick one answer for each question")).toBeInTheDocument();
 	});
 
 	it("header has a CT viewer link back to this case's normal viewer", () => {

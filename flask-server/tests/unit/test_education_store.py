@@ -16,6 +16,7 @@ from services.education_store import (
     AttemptExpired,
     AttemptUnauthorized,
     CHALLENGE_ID,
+    ChallengeUnavailable,
     EducationError,
     EducationStore,
 )
@@ -133,6 +134,62 @@ def test_reveal_endpoint_requires_submitted_attempt(education_store, monkeypatch
     revealed = client.get(reveal_url, headers={"X-Attempt-Key": key})
     assert revealed.status_code == 200
     assert revealed.mimetype == "application/gzip"
+
+
+def test_start_without_the_case_mask_says_the_challenge_is_unavailable(tmp_path, monkeypatch):
+    store = EducationStore(tmp_path / "sessions", tmp_path / "pants", now=Clock(), grader=passing_grader)
+    with pytest.raises(ChallengeUnavailable):
+        store.start_attempt(CHALLENGE_ID)
+    monkeypatch.setattr(education_api, "_store", store)
+    app = Flask(__name__)
+    app.register_blueprint(education_api.education_blueprint, url_prefix="/api")
+
+    response = app.test_client().post(f"/api/education/challenges/{CHALLENGE_ID}/attempts", json={})
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "challenge_unavailable"
+
+
+def test_mask_removed_after_start_says_the_challenge_is_unavailable(education_store, monkeypatch):
+    monkeypatch.setattr(education_api, "_store", education_store)
+    app = Flask(__name__)
+    app.register_blueprint(education_api.education_blueprint, url_prefix="/api")
+    client = app.test_client()
+    mask = education_store.pants_path / "mask_only" / "PanTS_00000035" / "combined_labels.nii.gz"
+
+    graded, graded_key = education_store.start_attempt(CHALLENGE_ID)
+    education_store.submit(graded["attempt_id"], graded_key, valid_submission())
+    pending, pending_key = education_store.start_attempt(CHALLENGE_ID)
+    mask.unlink()
+
+    with pytest.raises(ChallengeUnavailable):
+        education_store._ground_truth()
+    with pytest.raises(ChallengeUnavailable):
+        education_store.submit(pending["attempt_id"], pending_key, valid_submission())
+    with pytest.raises(ChallengeUnavailable):
+        education_store.reveal_segmentation(graded["attempt_id"], graded_key)
+
+    submitted = client.post(
+        f"/api/education/attempts/{pending['attempt_id']}/submit",
+        json=valid_submission(),
+        headers={"X-Attempt-Key": pending_key},
+    )
+    assert submitted.status_code == 409
+    assert submitted.get_json()["code"] == "challenge_unavailable"
+    revealed = client.get(
+        f"/api/education/attempts/{graded['attempt_id']}/reveal-segmentation.nii.gz",
+        headers={"X-Attempt-Key": graded_key},
+    )
+    assert revealed.status_code == 409
+    assert revealed.get_json()["code"] == "challenge_unavailable"
+
+
+def test_mask_without_a_lesion_says_the_challenge_is_unavailable(education_store):
+    mask = education_store.pants_path / "mask_only" / "PanTS_00000035" / "combined_labels.nii.gz"
+    nib.save(nib.Nifti1Image(np.zeros((12, 12, 5), dtype=np.uint8), np.eye(4)), mask)
+
+    with pytest.raises(ChallengeUnavailable):
+        education_store._ground_truth()
 
 
 def test_grade_prompt_defines_each_rubric_criterion(education_store):

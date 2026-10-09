@@ -96,6 +96,26 @@ export type SoloChallengeController = {
 	taskDockOpen: boolean;
 	setTaskDockOpen: (value: boolean) => void;
 	clearSession: () => void;
+	// The submit window closed before an answer was accepted, so this attempt can
+	// no longer be graded; the dock offers startOver instead of a dead Submit.
+	deadlineMissed?: boolean;
+	startOver?: () => void;
+	// Why the answer overlay could not be loaded, kept apart from `error` (which
+	// the results panel words as a grading problem).
+	revealError?: string | null;
+	// The tutor chat, held by the page so closing the Results panel keeps it.
+	tutor?: SoloChallengeTutor;
+};
+
+export type SoloChallengeTutorMessage = { role: "student" | "tutor"; text: string };
+
+export type SoloChallengeTutor = {
+	question: string;
+	setQuestion: (value: string) => void;
+	messages: SoloChallengeTutorMessage[];
+	setMessages: (update: (current: SoloChallengeTutorMessage[]) => SoloChallengeTutorMessage[]) => void;
+	sending: boolean;
+	setSending: (value: boolean) => void;
 };
 
 export type QuizPracticeChoice = { id: string; label: string };
@@ -165,4 +185,7 @@ export type QuizPracticeController = {
 	previous: () => void;
 	next: () => void;
 	reportContent: (category: string) => Promise<void>;
+	// Kept on the controller so they outlive the dock, which unmounts when closed.
+	reportRecorded?: boolean;
+	reportError?: string | null;
 };

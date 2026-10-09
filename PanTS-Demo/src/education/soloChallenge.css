@@ -72,14 +72,24 @@
 .edu-start__card > p { max-width: 620px; color: var(--edu-muted); font-size: 18px; line-height: 1.55; }
 .edu-start__facts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin: 30px 0; background: var(--edu-line); border: 1px solid var(--edu-line); }
 .edu-start__facts span { display: flex; align-items: center; gap: 9px; padding: 15px; background: var(--edu-panel); color: var(--edu-text); font-size: 13px; }
-.edu-start ol { margin: 0 0 24px; padding-left: 24px; color: rgba(255, 255, 255, .72); line-height: 1.8; }
+/* Tailwind's preflight strips list markers, so the steps are numbered here. The number sits in the padding, so a wrapped line lines up with its own step's text. */
+.edu-start ol { margin: 0 0 24px; padding-left: 26px; list-style: decimal; color: rgba(255, 255, 255, .72); line-height: 1.5; }
+.edu-start li { margin-bottom: 8px; padding-left: 4px; }
+.edu-start li:last-child { margin-bottom: 0; }
+.edu-start li::marker { color: var(--edu-primary); font: 600 13px var(--font-mono); }
 .edu-start__notice { padding: 14px 16px; border-left: 2px solid rgba(215, 183, 101, .72); background: rgba(215, 183, 101, .055); color: #d9c58d; font-size: 12px; line-height: 1.55; }
 .edu-start__card > button { width: 100%; margin-top: 26px; min-height: 54px; display: flex; align-items: center; justify-content: center; gap: 9px; border: 0; border-radius: 6px; background: var(--edu-primary); color: #07111f; font-weight: 700; cursor: pointer; }
 .edu-start__card > button:hover:not(:disabled) { background: var(--edu-primary-hover); }
 .edu-start__card > button:disabled { opacity: 0.55; cursor: wait; }
 .edu-start--state > div { text-align: center; }
-.edu-start--state h1 { font-size: 34px; }
-.edu-start--state a { color: var(--edu-primary); }
+.edu-start--state h1 { margin: 18px 0 0; font-size: 24px; line-height: 1.3; letter-spacing: 0; }
+/* The retry on the light unavailable page (MessagePage), in the same JHU blue as its primary link. */
+.edu-load-retry { margin-top: 14px; padding: 9px 16px; border: 0; border-radius: 4px; background: #002d72; color: #fff; font: inherit; font-size: 15px; font-weight: 500; cursor: pointer; }
+.edu-load-retry:hover { background: #001d4a; }
+.edu-load-retry:focus-visible { outline: 2px solid #002d72; outline-offset: 2px; }
+.edu-start__back { display: block; width: fit-content; margin: 16px auto 0; color: var(--edu-primary); font-size: 14px; }
+.edu-start__back:hover { color: var(--edu-primary-hover); }
+.edu-start__back:focus-visible { outline: 2px solid var(--edu-primary); outline-offset: 2px; }
 .edu-loading { display: inline-block; width: 34px; height: 34px; border: 2px solid rgba(255,255,255,.15); border-top-color: var(--edu-primary); border-radius: 50%; animation: edu-spin .8s linear infinite; }
 @keyframes edu-spin { to { transform: rotate(360deg); } }
 
@@ -133,12 +143,20 @@
 	font-family: var(--font-sans);
 	overflow: hidden;
 }
-.edu-dock__head { min-height: 62px; padding: 14px 14px 12px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--edu-line); }
+/* Same header metrics as the viewer's other side panels (.vp-panel-head): 48px,
+   a 16px inset and a borderless 32px close button (36px for touch). The challenge
+   title wraps instead of truncating, so the header keeps 4px above and below it; a
+   one-line title still comes out at the 48px minimum. */
+.edu-dock__head { box-sizing: border-box; min-height: 48px; padding: 4px 8px 4px 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--edu-line); }
 .edu-dock__head > div { display: flex; flex-direction: column; gap: 5px; }
-.edu-dock__head strong { font-size: 15px; }
-.edu-dock__head button { width: 36px; height: 36px; flex: 0 0 36px; display: grid; place-items: center; box-sizing: border-box; padding: 0; border: 1px solid var(--edu-line); border-radius: 6px; background: transparent; color: var(--edu-muted); cursor: pointer; line-height: 0; }
+.edu-dock__head strong { font-size: 14px; }
+.edu-dock__head .edu-kicker { color: var(--vp-text-faint, rgba(255, 255, 255, .5)); letter-spacing: .16em; }
+.edu-dock__head button { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; box-sizing: border-box; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--edu-muted); cursor: pointer; line-height: 0; }
 .edu-dock__head button svg { display: block; margin: auto; }
-.edu-dock__head button:hover { border-color: var(--edu-line-strong); background: var(--edu-surface-2); color: var(--edu-text); }
+@media (max-width: 640px), (pointer: coarse) {
+	.edu-dock__head button { width: 36px; height: 36px; flex-basis: 36px; }
+}
+.edu-dock__head button:hover { border-color: transparent; background: var(--edu-surface-2); color: var(--edu-text); }
 .edu-dock__body, .edu-result { flex: 1; overflow-y: auto; padding: 16px; }
 .edu-task-prompt { margin: 0 0 18px; color: var(--edu-muted); font-size: 13px; line-height: 1.55; }
 .edu-task-section { padding: 17px 0; border-top: 1px solid var(--edu-line); }
@@ -160,6 +178,7 @@
 .edu-submit { width: 100%; min-height: 46px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: 6px; background: var(--edu-primary); color: #07111f; cursor: pointer; font-weight: 700; }
 .edu-submit:hover:not(:disabled) { background: var(--edu-primary-hover); }
 .edu-submit:disabled { opacity: .38; cursor: not-allowed; }
+.edu-result > .edu-submit { margin-top: 14px; }
 .edu-submit-note { display: block; margin: 10px 4px 0; color: #68747f; font-size: 10px; line-height: 1.5; text-align: center; }
 .edu-error { margin: 12px 0; padding: 10px 12px; border: 1px solid rgba(255,111,104,.35); background: rgba(255,111,104,.08); color: #ffaaa5; font-size: 12px; }
 
@@ -176,19 +195,20 @@
 .edu-result h3 { margin: 8px 0; font-size: 20px; }
 .edu-result h4 { margin: 16px 0 8px; color: var(--edu-text); font-size: 12px; }
 .edu-result section p, .edu-result section li { color: #9aa6b1; font-size: 11px; line-height: 1.55; }
-.edu-result section ul { padding-left: 18px; }
+.edu-result section ul { padding-left: 18px; list-style: disc; }
 .edu-truth-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin-top: 14px; border: 1px solid var(--edu-line); background: var(--edu-line); }
 .edu-truth-facts > div { display: grid; gap: 5px; padding: 10px; background: var(--edu-panel); }
 .edu-truth-facts span { color: var(--edu-muted); font: 600 9px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
-.edu-truth-facts strong { color: var(--edu-text); font-size: 12px; text-transform: capitalize; }
-.edu-result__feedback > div, .edu-tutor > div { display: flex; align-items: center; gap: 8px; color: var(--edu-primary); font-size: 12px; }
+.edu-truth-facts strong { color: var(--edu-text); font-size: 12px; }
+.edu-truth-facts strong::first-letter { text-transform: uppercase; }
+.edu-result__feedback > div, .edu-tutor > div:not(.edu-tutor__log) { display: flex; align-items: center; gap: 8px; color: var(--edu-primary); font-size: 12px; }
 .edu-rubric { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .edu-rubric span { display: flex; flex-direction: column; padding: 8px; background: #111820; color: #7f8b96; font-size: 9px; text-transform: capitalize; }
 .edu-rubric strong { color: white; font: 600 12px var(--font-mono); }
 .edu-retry { min-height: 36px; margin-top: 10px; padding: 0 11px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--edu-line); border-radius: 6px; background: var(--edu-surface-2); color: var(--edu-text); cursor: pointer; font-size: 11px; font-weight: 600; }
 .edu-retry:disabled { opacity: .5; cursor: wait; }
-.edu-tutor > p { padding: 9px; margin: 8px 0; background: #111820; }
-.edu-tutor > p[data-role="student"] { margin-left: 24px; border-right: 2px solid var(--edu-primary); }
+.edu-tutor > p, .edu-tutor__log > p { padding: 9px; margin: 8px 0; background: #111820; }
+.edu-tutor__log > p[data-role="student"] { margin-left: 24px; border-right: 2px solid var(--edu-primary); }
 .edu-tutor > p.edu-tutor__pending { display: flex; align-items: center; min-height: 38px; }
 .edu-tutor__pending span { display: inline-flex; align-items: center; gap: 5px; }
 .edu-tutor__pending i { width: 5px; height: 5px; border-radius: 50%; background: var(--edu-primary); animation: edu-tutor-dot 1s ease-in-out infinite; }
@@ -205,13 +225,17 @@
 .edu-tutor button:focus-visible { outline: 2px solid var(--edu-primary); outline-offset: 2px; }
 .edu-tutor button:disabled { background: var(--edu-surface-2); color: var(--edu-muted); cursor: not-allowed; opacity: .55; }
 .edu-finish { display: flex; justify-content: center; margin-top: 14px; padding: 12px; border: 1px solid var(--edu-line); color: #dbe4eb; text-decoration: none; font-size: 11px; }
+.edu-finish:hover { color: #dbe4eb; }
 .edu-finding-marker { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border: 2px solid var(--edu-success); border-radius: 50%; box-shadow: 0 0 0 5px rgba(52,211,153,.15), 0 0 20px rgba(52,211,153,.48); pointer-events: none; z-index: 8; }
 .edu-finding-marker::before, .edu-finding-marker::after { content: ""; position: absolute; background: var(--edu-success); }
 .edu-finding-marker::before { width: 32px; height: 1px; left: -7px; top: 9px; }
 .edu-finding-marker::after { height: 32px; width: 1px; left: 9px; top: -7px; }
 
+/* !important so the (0,2,0) urgent-timer pulse and the spinners lose too. */
 @media (prefers-reduced-motion: reduce) {
-	.edu-tutor__pending i { animation: none; opacity: .75; }
+	.edu-loading,
+	.edu-timer.is-urgent { animation: none !important; }
+	.edu-tutor__pending i { animation: none !important; opacity: .75; }
 }
 
 @media (max-width: 900px) {
@@ -219,6 +243,9 @@
 	.edu-header__prompt { display: none; }
 	.edu-header__actions { margin-left: auto; }
 	.edu-dock { position: absolute; inset: 0 0 0 auto; width: min(360px, 92vw); max-width: 92vw; z-index: 110; box-shadow: -18px 0 48px rgba(0,0,0,.5); }
+	/* iOS zooms the page into any focused field under 16px; the min-heights hold the larger text. */
+	.edu-task-section textarea,
+	.edu-tutor textarea { font-size: 16px; }
 }
 
 @media (max-width: 560px) {
