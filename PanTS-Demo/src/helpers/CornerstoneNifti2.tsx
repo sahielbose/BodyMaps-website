@@ -5591,13 +5591,22 @@ export function applyLogicalOperator(
     if (!bypassMasking && next !== 0 && prev !== 0 && prev !== targetSegmentIndex) return;
     changes.push({ i, j, k, prev, next });
   };
+  // Without Bypass masking, source voxels belong to another class and can never
+  // be written, so clearing the target would erase it and copy nothing. Leave
+  // the target alone in that case, so Copy reports "Nothing changed" instead.
+  let copyBlocked = false;
+  if (operation === "copy" && !bypassMasking && sourceSegmentIndex !== null && sourceSegmentIndex !== targetSegmentIndex) {
+    scan: for (let k = 0; k < dimZ; k++) for (let j = 0; j < dimY; j++) for (let i = 0; i < dimX; i++) {
+      if (vm.getAtIJK(i, j, k) === sourceSegmentIndex && maskFilter(i, j, k)) { copyBlocked = true; break scan; }
+    }
+  }
   for (let k = 0; k < dimZ; k++) for (let j = 0; j < dimY; j++) for (let i = 0; i < dimX; i++) {
     const targetOn = vm.getAtIJK(i, j, k) === targetSegmentIndex;
     const sourceOn = sourceSegmentIndex !== null && vm.getAtIJK(i, j, k) === sourceSegmentIndex;
     switch (operation) {
       case "copy":
         if (sourceOn) setVoxel(i, j, k, targetSegmentIndex);
-        else if (targetOn) setVoxel(i, j, k, 0);
+        else if (targetOn && !copyBlocked) setVoxel(i, j, k, 0);
         break;
       case "add":
         if (sourceOn) setVoxel(i, j, k, targetSegmentIndex);

@@ -125,3 +125,33 @@ it("does not overlap requests and recovers after a timed-out probe", async () =>
   await act(async () => { await result.current.refreshModels(); });
   expect(result.current.models).toEqual(installed.models);
 });
+
+it("keeps the model picked in this session across a focus refresh when storage is blocked", async () => {
+  vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("blocked"); });
+  vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("blocked"); });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(installed)));
+  const { result } = renderHook(() => useAIModels(true));
+  await settle();
+  expect(result.current.selectedModel).toBe("llama3.1:latest");
+  act(() => result.current.selectModel("qwen3:4b"));
+  await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+  await settle();
+  expect(result.current.selectedModel).toBe("qwen3:4b");
+});
+
+it("brings the pick back after a refresh that failed once", async () => {
+  const fetchModels = vi.fn()
+    .mockResolvedValueOnce(response(installed))
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue(response(installed));
+  vi.stubGlobal("fetch", fetchModels);
+  localStorage.clear();
+  vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("blocked"); });
+  const { result } = renderHook(() => useAIModels(true));
+  await settle();
+  act(() => result.current.selectModel("qwen3:4b"));
+  await act(async () => { await result.current.refreshModels(); });
+  expect(result.current.modelState).toBe("fallback");
+  await act(async () => { await result.current.refreshModels(); });
+  expect(result.current.selectedModel).toBe("qwen3:4b");
+});

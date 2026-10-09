@@ -30,6 +30,8 @@ vi.mock("../helpers/CornerstoneNifti2", async (importOriginal) => {
 			renderingEngine: {},
 			viewportIds: [],
 			volumeId: "test-volume",
+			// Called when a test unmounts the viewer before this load settles.
+			dispose: vi.fn(),
 		}),
 		setFillOpacity: vi.fn(),
 		setPaneSliceIndex: vi.fn(),

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import "./SegmentEffectPanel.css"
-import { copySegmentAcrossSlices, setPaneSliceIndex } from "../../helpers/CornerstoneNifti2";
+import { interpolateSegmentBetweenSlices, setPaneSliceIndex } from "../../helpers/CornerstoneNifti2";
 import type { MaskFilter, CinePane } from "../../helpers/CornerstoneNifti2";
 import { useSliceAnchorPicker } from "../../helpers/viewer/useSliceAnchorPicker";
 import { GuidedStepModal, PickErrorHint, formatAnchor, type GuidedFlowControls } from "./SliceAnchorPickerUI";
@@ -65,7 +65,7 @@ export default function FillBetweenSlicesFlyout({ segmentIndex, maskFilter, onLo
 	const run = () => {
 		if (!first || !last) return;
 		setFinishing(true);
-		const result = copySegmentAcrossSlices(first.pane, first.sliceIndex, last.sliceIndex, segmentIndex, maskFilter);
+		const result = interpolateSegmentBetweenSlices(first.pane, first.sliceIndex, last.sliceIndex, segmentIndex, maskFilter);
 		if (result?.changedVoxels) {
 			onLog?.(`Filled between slices (${result.slicesWritten} slices, ${result.changedVoxels.toLocaleString()} vox)`);
 			setPaneSliceIndex(last.pane, last.sliceIndex);

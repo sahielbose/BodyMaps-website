@@ -2,9 +2,32 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { API_BASE } from "../../helpers/constants";
 import type { AIModelInfo } from "./types";
 
+// Bumped to v2 so a previously-stored reasoning model (e.g. qwen3) is reset;
+// the default now prefers a non-reasoning model that never leaks "thinking".
 const MODEL_STORAGE_KEY = "bodymaps-ai-model-v2";
+// Reasoning models emit a chain-of-thought that can leak into the answer on
+// older Ollama; we avoid picking them as the initial default.
 const REASONING_MODEL = /qwen3(?!-vl)|deepseek-r1|-r1\b|:think|marco-o1|qwq/i;
 const RETRY_MS = 15_000;
+
+// The remembered model pick. localStorage throws when site data is blocked;
+// the pick then just isn't remembered.
+function readStoredModel(): string {
+  try {
+    return window.localStorage.getItem(MODEL_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function storeModel(value: string) {
+  try {
+    if (value) window.localStorage.setItem(MODEL_STORAGE_KEY, value);
+    else window.localStorage.removeItem(MODEL_STORAGE_KEY);
+  } catch {
+    /* not remembered */
+  }
+}
 
 /** Recover an open sidebar when the server's model service restarts. */
 export function useAIModels(open: boolean) {
@@ -16,6 +39,10 @@ export function useAIModels(open: boolean) {
   const [modelIssue, setModelIssue] = useState<"unavailable" | "empty" | null>(null);
   const [refreshingModels, setRefreshingModels] = useState(false);
   const requestRef = useRef<AbortController | null>(null);
+  // The model picked in this session. Every refresh recomputes the selection, so
+  // without this a pick that storage could not keep (site data blocked) would be
+  // replaced by the default on the next focus, or after a failed refresh.
+  const pickedRef = useRef("");
 
   const refreshModels = useCallback(async () => {
     if (requestRef.current) return;
@@ -42,10 +69,13 @@ export function useAIModels(open: boolean) {
         return;
       }
       setModels(nextModels);
-      const storedModel = window.localStorage.getItem(MODEL_STORAGE_KEY) ?? "";
+      const storedModel = readStoredModel();
       const backendDefault = String(data.default_model || "");
       const cleanModel = nextModels.find((model) => !REASONING_MODEL.test(model.name));
-      const nextSelection = nextModels.some((model) => model.name === storedModel)
+      const has = (name: string) => Boolean(name) && nextModels.some((model) => model.name === name);
+      const nextSelection = has(pickedRef.current)
+        ? pickedRef.current
+        : has(storedModel)
         ? storedModel
         : !REASONING_MODEL.test(backendDefault) &&
             nextModels.some((model) => model.name === backendDefault)
@@ -97,7 +127,9 @@ export function useAIModels(open: boolean) {
 
   const selectModel = (name: string) => {
     setSelectedModel(name);
-    window.localStorage.setItem(MODEL_STORAGE_KEY, name);
+    pickedRef.current = name;
+    storeModel(name);
+    setModelState(name || models.length > 0 ? "ollama" : "fallback");
   };
 
   return {
