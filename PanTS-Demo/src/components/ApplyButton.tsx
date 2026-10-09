@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { IconChevronRight, IconCheck } from "@tabler/icons-react";
 
 interface ApplyButtonProps {
@@ -57,6 +57,16 @@ export default function ApplyButton({
 }: ApplyButtonProps) {
 	const [applying, setApplying] = useState(false);
 	const [success, setSuccess] = useState(false);
+	// The flyout holding this button can unmount during the success beat
+	// (another tool picked, the class editor closed). onDone then closes or
+	// deselects whatever is open by then, so it only runs while mounted.
+	const mounted = useRef(true);
+	useEffect(() => {
+		mounted.current = true;
+		return () => {
+			mounted.current = false;
+		};
+	}, []);
 
 	const handleClick = () => {
 		if (disabled || applying || success) return;
@@ -73,6 +83,7 @@ export default function ApplyButton({
 				if (ok && onDone) {
 					setSuccess(true);
 					window.setTimeout(() => {
+						if (!mounted.current) return;
 						setSuccess(false);
 						onDone();
 					}, 650);
@@ -82,22 +93,35 @@ export default function ApplyButton({
 	};
 
 	return (
-		<button
-			type="button"
-			className={`atb-action-btn ${success ? "is-success" : ""} ${className}`}
-			disabled={disabled || applying || success}
-			onClick={handleClick}
-		>
-			<span className="atb-action-btn__label">
-				{success ? successLabel : applying ? applyingLabel : label}
+		<>
+			<button
+				type="button"
+				className={`atb-action-btn ${success ? "is-success" : ""} ${className}`}
+				disabled={disabled}
+				// Busy and success are aria-disabled, not disabled: a focused button
+				// that turns disabled drops focus to <body>, which strands a keyboard
+				// user when a refused Apply leaves the flyout open. handleClick
+				// already ignores clicks while either beat plays.
+				aria-disabled={applying || success || undefined}
+				aria-busy={applying || undefined}
+				onClick={handleClick}
+			>
+				<span className="atb-action-btn__label">
+					{success ? successLabel : applying ? applyingLabel : label}
+				</span>
+				{success ? (
+					<IconCheck size={14} stroke={3} className="atb-action-btn__check" />
+				) : applying ? (
+					<span className="atb-action-btn__spinner" aria-hidden="true" />
+				) : (
+					<IconChevronRight size={14} stroke={2.5} className="atb-action-btn__arrow" />
+				)}
+			</button>
+			{/* Same as ActionButton: the disabled button's label change is not
+			 *  read out, so this always-mounted region announces it. */}
+			<span className="sr-only" role="status">
+				{success ? successLabel : applying ? applyingLabel : ""}
 			</span>
-			{success ? (
-				<IconCheck size={14} stroke={3} className="atb-action-btn__check" />
-			) : applying ? (
-				<span className="atb-action-btn__spinner" aria-hidden="true" />
-			) : (
-				<IconChevronRight size={14} stroke={2.5} className="atb-action-btn__arrow" />
-			)}
-		</button>
+		</>
 	);
 }

@@ -3808,6 +3808,9 @@ export function applyMargin(
 ): { changedVoxels: number } | null {
   const segVolume = cache.getVolume(segmentationId);
   if (!segVolume) return null;
+  // The per-axis iteration floor below is one voxel, so a size of 0 would still
+  // move the edge by a full voxel. Nothing to do for it.
+  if (!(marginMm > 0)) return { changedVoxels: 0 };
   const spacing = segVolume.spacing as number[];
   // Convert mm -> voxel-iteration count SEPARATELY per axis, the same way
   // getActualMarginMm already does for its "Actual: X x Y x Zmm" readout.
@@ -3919,11 +3922,11 @@ export function getActualMarginMm(marginMm: number): { mm: [number, number, numb
   const segVolume = cache.getVolume(segmentationId);
   if (!segVolume) return null;
   const spacing = segVolume.spacing as number[];
-  const voxels: [number, number, number] = [
-    Math.max(1, Math.round(marginMm / spacing[0])),
-    Math.max(1, Math.round(marginMm / spacing[1])),
-    Math.max(1, Math.round(marginMm / spacing[2])),
-  ];
+  // Same clamp as applyMargin, so the readout matches what the edit does.
+  const voxels = [0, 1, 2].map((axis) => {
+    const raw = marginMm / spacing[axis];
+    return Number.isFinite(raw) ? Math.min(2000, Math.max(1, Math.round(raw))) : 1;
+  }) as [number, number, number];
   return { mm: [voxels[0] * spacing[0], voxels[1] * spacing[1], voxels[2] * spacing[2]], voxels };
 }
 
@@ -3938,28 +3941,50 @@ export function getActualMarginMm(marginMm: number): { mm: [number, number, numb
 
 export type HollowSurface = "inside" | "medial" | "outside";
 
+// Per-axis iteration counts for a shell of `thicknessMm`. Same per-axis
+// conversion as applyMargin: averaging the spacings into one number made the
+// shell far thinner than the label on anisotropic scans (a 3 mm shell on
+// 0.7 x 0.7 x 5 mm voxels came out 0.7 mm in plane and 5 mm along z).
+function _hollowIterationsPerAxis(thicknessMm: number, spacing: number[]): [number, number, number] {
+  return [0, 1, 2].map((axis) => {
+    const raw = thicknessMm / spacing[axis];
+    return Number.isFinite(raw) ? Math.min(2000, Math.max(1, Math.round(raw))) : 1;
+  }) as [number, number, number];
+}
+
 function _hollowShellMask(
   orig: Uint8Array, w: number, h: number, d: number,
-  offsets: number[][], surface: HollowSurface, thicknessIter: number
+  offsets: number[][], surface: HollowSurface, iterationsPerAxis: [number, number, number]
 ): Uint8Array {
   const out = new Uint8Array(orig.length);
+  // Equal counts keep the chosen 6/26 neighbourhood; unequal counts need the
+  // separable per-axis pass so each axis gets its own physical distance.
+  const uniform = iterationsPerAxis[0] === iterationsPerAxis[1] && iterationsPerAxis[1] === iterationsPerAxis[2];
+  const morph = (mask: Uint8Array, mode: "dilate" | "erode", perAxis: [number, number, number]): Uint8Array => {
+    if (uniform) return _morphDistanceMask(mask, w, h, d, offsets, perAxis[0], mode);
+    let cur = mask;
+    for (let axis = 0; axis < 3; axis++) {
+      if (perAxis[axis] > 0) cur = _morphDistanceMask(cur, w, h, d, _AXIS_OFFSETS[axis], perAxis[axis], mode);
+    }
+    return cur;
+  };
   if (surface === "inside") {
     // Original segment is the OUTSIDE of the shell: shell = original minus (original eroded by thickness).
-    const eroded = _morphDistanceMask(orig, w, h, d, offsets, thicknessIter, "erode");
+    const eroded = morph(orig, "erode", iterationsPerAxis);
     for (let li = 0; li < orig.length; li++) out[li] = orig[li] && !eroded[li] ? 1 : 0;
     return out;
   }
   if (surface === "outside") {
     // Original segment is the INSIDE of the shell: shell = (original dilated by thickness) minus original.
-    const dilated = _morphDistanceMask(orig, w, h, d, offsets, thicknessIter, "dilate");
+    const dilated = morph(orig, "dilate", iterationsPerAxis);
     for (let li = 0; li < orig.length; li++) out[li] = dilated[li] && !orig[li] ? 1 : 0;
     return out;
   }
   // "medial": original boundary runs through the middle of the shell — split
   // the thickness evenly, growing half outward and half inward from it.
-  const half = Math.max(1, Math.round(thicknessIter / 2));
-  const eroded = _morphDistanceMask(orig, w, h, d, offsets, half, "erode");
-  const dilated = _morphDistanceMask(orig, w, h, d, offsets, half, "dilate");
+  const half = iterationsPerAxis.map((n) => Math.max(1, Math.round(n / 2))) as [number, number, number];
+  const eroded = morph(orig, "erode", half);
+  const dilated = morph(orig, "dilate", half);
   for (let li = 0; li < orig.length; li++) out[li] = dilated[li] && !eroded[li] ? 1 : 0;
   return out;
 }
@@ -3976,11 +4001,9 @@ export function applyHollow(
   const activeSegment = _activeEditSegment;
 
   const spacing = segVolume.spacing as number[];
-  const avgSpacing = (spacing[0] + spacing[1] + spacing[2]) / 3;
-  const rawIterations = thicknessMm / avgSpacing;
-  const iterations = Number.isFinite(rawIterations) ? Math.min(2000, Math.max(1, Math.round(rawIterations))) : 1;
+  const iterationsPerAxis = _hollowIterationsPerAxis(thicknessMm, spacing);
 
-  const margin = iterations + 1;
+  const margin = Math.max(...iterationsPerAxis) + 1;
   const bbox = _segBBox(vmGlobal, activeSegment, margin);
   if (!bbox) return null;
   const { i0, i1, j0, j1, k0, k1 } = bbox;
@@ -4002,7 +4025,7 @@ export function applyHollow(
   // hollowed as normal, even when they share a class with a thin blob
   // elsewhere in the volume.
   const { thick, thin } = _splitThinComponents(orig, w, h, d);
-  const shell = _hollowShellMask(thick, w, h, d, offsets, surface, iterations);
+  const shell = _hollowShellMask(thick, w, h, d, offsets, surface, iterationsPerAxis);
   for (let li = 0; li < shell.length; li++) if (thin[li]) shell[li] = 1;
 
   const changes: Array<{ i: number; j: number; k: number; prev: number; next: number }> = [];
@@ -4028,11 +4051,15 @@ export function applyHollow(
   return { changedVoxels: changes.length };
 }
 
-// Actual physical shell thickness given the current pixel spacing — same
-// mm→voxel rounding as getActualMarginMm, reused here for the Hollow panel's
-// "Actual: 2.5 x 2.5 x 2.4mm (4x4x3 pixel)" readout.
+// Actual physical shell thickness given the current pixel spacing, from the
+// same per-axis voxel counts applyHollow uses, for the Hollow flyout's
+// "About 0.7 x 0.7 x 5.0 mm" readout.
 export function getActualHollowMm(thicknessMm: number): { mm: [number, number, number]; voxels: [number, number, number] } | null {
-  return getActualMarginMm(thicknessMm);
+  const segVolume = cache.getVolume(segmentationId);
+  if (!segVolume) return null;
+  const spacing = segVolume.spacing as number[];
+  const voxels = _hollowIterationsPerAxis(thicknessMm, spacing);
+  return { mm: [voxels[0] * spacing[0], voxels[1] * spacing[1], voxels[2] * spacing[2]], voxels };
 }
 
 // ============================================================================

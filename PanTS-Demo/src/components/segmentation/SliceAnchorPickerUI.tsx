@@ -7,16 +7,18 @@
 // interrupting the flow. Exit / Start over are published via
 // GuidedFlowControls and rendered as fixed buttons in the toolbar ribbon,
 // rather than floating over the canvas here.
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import type { SliceAnchor } from "../../helpers/viewer/useSliceAnchorPicker";
+import { useDialogFocus } from "../../hooks/useDialogFocus";
 
-const PANE_LABEL: Record<string, string> = { axial: "Axial", sagittal: "Sagittal", coronal: "Coronal" };
-
-// "Axial - Slice 42" — consistent everywhere an anchor is shown.
+// "the axial view, slice 42": consistent everywhere an anchor is shown, written
+// to sit mid-sentence. Pass the first anchor when formatting the second one, so
+// the pane isn't repeated ("slice 57"); both picks are always in the same pane.
 // eslint-disable-next-line react-refresh/only-export-components
-export function formatAnchor(anchor: SliceAnchor): string {
-	return `${PANE_LABEL[anchor.pane] ?? anchor.pane} - Slice ${anchor.sliceIndex + 1}`;
+export function formatAnchor(anchor: SliceAnchor, after?: SliceAnchor): string {
+	const slice = `slice ${anchor.sliceIndex + 1}`;
+	return after && after.pane === anchor.pane ? slice : `the ${anchor.pane} view, ${slice}`;
 }
 
 /** Contract a guided-flow tool publishes upward so the annotation toolbar
@@ -48,6 +50,23 @@ export interface GuidedFlowControls {
 	continueHint?: string;
 }
 
+// How many step cards are mounted right now. The toolbar's one-time
+// "guided controls" explainer waits on this, so first entry to a flow shows
+// one "Got it" at a time instead of two stacked dialogs.
+let stepModalCount = 0;
+const stepModalListeners = new Set<() => void>();
+const notifyStepModals = () => stepModalListeners.forEach((l) => l());
+const subscribeStepModals = (l: () => void) => {
+	stepModalListeners.add(l);
+	return () => { stepModalListeners.delete(l); };
+};
+
+/** True while any GuidedStepModal is on screen. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function useGuidedStepModalOpen(): boolean {
+	return useSyncExternalStore(subscribeStepModals, () => stepModalCount > 0, () => false);
+}
+
 // Duration of the backdrop fade / card scale-in, played each time a new
 // step's modal mounts (see the `entered` state below).
 const ENTER_ANIM_MS = 180;
@@ -58,17 +77,29 @@ const ENTER_ANIM_MS = 180;
  *  region"). The full-viewport backdrop has pointer-events enabled, so it
  *  blocks every canvas click until the button is pressed. */
 export function GuidedStepModal({
-	title, instruction, primaryLabel = "Got it", onPrimary, secondaryLabel, onSecondary, busy,
+	title, instruction, note, primaryLabel = "Got it", onPrimary, secondaryLabel, onSecondary, onEscape, busy, initialFocus = "primary",
 }: {
 	title: string;
 	instruction: string;
+	/** Optional alert under the instruction, e.g. why the last press changed nothing. */
+	note?: string | null;
 	primaryLabel?: string;
 	onPrimary: () => void;
 	/** Optional second, quieter action next to the primary — e.g. "Skip"
 	 *  on Grow-from-seeds' optional exclusions step. */
 	secondaryLabel?: string;
 	onSecondary?: () => void;
+	/** What Escape does. Acknowledgements dismiss and confirmations cancel;
+	 *  leave it out where the primary commits an edit, so Escape never does. */
+	onEscape?: () => void;
+	/** Progress card: the primary is disabled and the card is a status notice.
+	 *  A secondary action (Cancel) stays live, and with onEscape so does
+	 *  Escape, so a slow step can still be stopped. */
 	busy?: boolean;
+	/** Which button takes keyboard focus when the card opens. Defaults to the
+	 *  primary; an irreversible confirmation passes "secondary" so a stray
+	 *  Enter or Space lands on Cancel, not on the destructive action. */
+	initialFocus?: "primary" | "secondary";
 }) {
 	// Mount hidden, then fade/scale in on the next frame (see ENTER_ANIM_MS).
 	const [entered, setEntered] = useState(false);
@@ -76,6 +107,30 @@ export function GuidedStepModal({
 		const raf = requestAnimationFrame(() => setEntered(true));
 		return () => cancelAnimationFrame(raf);
 	}, []);
+	useEffect(() => {
+		stepModalCount += 1;
+		notifyStepModals();
+		return () => {
+			stepModalCount -= 1;
+			notifyStepModals();
+		};
+	}, []);
+	const cardRef = useRef<HTMLDivElement>(null);
+	const primaryRef = useRef<HTMLButtonElement>(null);
+	const secondaryRef = useRef<HTMLButtonElement>(null);
+	const titleId = useId();
+	const instructionId = useId();
+	// A busy card ("Applying") is a progress notice with nothing to press, so
+	// it only becomes a dialog (focus on the primary, Tab kept inside, Escape
+	// handled) once its button is live. A busy card the caller lets people
+	// stop takes Escape and puts focus on its Cancel, without trapping Tab.
+	const stoppableWhileBusy = !!busy && !!onEscape;
+	useDialogFocus(!busy || stoppableWhileBusy, cardRef, {
+		initialFocus: busy || initialFocus === "secondary" ? secondaryRef : primaryRef,
+		onEscape,
+		lockScroll: false,
+		trapFocus: !busy,
+	});
 
 	if (typeof document === "undefined") return null;
 	return createPortal(
@@ -101,7 +156,12 @@ export function GuidedStepModal({
 			}}
 		>
 			<div
+				ref={cardRef}
 				data-guided-overlay="true"
+				role={busy ? "status" : "dialog"}
+				aria-modal={busy ? undefined : true}
+				aria-labelledby={titleId}
+				aria-describedby={instructionId}
 				style={{
 					width: 380,
 					maxWidth: "100%",
@@ -121,11 +181,15 @@ export function GuidedStepModal({
 					transition: `opacity ${ENTER_ANIM_MS}ms ease-out, transform ${ENTER_ANIM_MS}ms cubic-bezier(0.2, 0.8, 0.3, 1)`,
 				}}
 			>
-				<div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.01em" }}>{title}</div>
-				<div style={{ fontSize: 13, color: "rgba(255,255,255,0.68)", lineHeight: 1.5 }}>{instruction}</div>
+				<div id={titleId} style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.01em" }}>{title}</div>
+				<div id={instructionId} style={{ fontSize: 13, color: "rgba(255,255,255,0.68)", lineHeight: 1.5 }}>{instruction}</div>
+				{note && (
+					<div role="alert" style={{ fontSize: 12.5, color: "rgba(255,255,255,0.92)", lineHeight: 1.45 }}>{note}</div>
+				)}
 
 				<div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
 					<button
+						ref={primaryRef}
 						type="button"
 						onClick={onPrimary}
 						disabled={busy}
@@ -146,6 +210,7 @@ export function GuidedStepModal({
 					</button>
 					{secondaryLabel && onSecondary && (
 						<button
+							ref={secondaryRef}
 							type="button"
 							onClick={onSecondary}
 							style={{
@@ -178,7 +243,7 @@ export function PickErrorHint({ message, x, y }: { message: string; x: number; y
 	// Clamp so the hint never renders off the right/bottom edge when the
 	// click happens near a corner of the viewport.
 	const left = Math.min(x + 18, (typeof window !== "undefined" ? window.innerWidth : 1024) - 260);
-	const top = Math.min(y + 18, (typeof window !== "undefined" ? window.innerHeight : 768) - 60);
+	const top = Math.min(y + 18, (typeof window !== "undefined" ? window.innerHeight : 768) - 90);
 	return createPortal(
 		<div
 			role="alert"

@@ -69,10 +69,11 @@ import { GuidedStepModal } from "../components/segmentation/SliceAnchorPickerUI"
 import HollowFlyout from "../components/segmentation/HollowFlyout";
 import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
 import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
+import { voxelsLog } from "../helpers/viewer/editLog";
 import { useInteractivePromptTool } from "../helpers/viewer/useInteractivePromptTool";
 import { loadRecentUploads, renameRecentUpload } from "../helpers/recentUploads";
 import {
-  applyMargin, getActualMarginMm,
+  applyMargin, getActualMarginMm, getActualHollowMm,
   applyIslandsOperation, applyLogicalOperator, applySmoothing,
   deleteSegmentEverywhere, getSegmentAtVoxel, getActiveEditSegment, type LogicalOperation,
   type LevelTraceOperation
@@ -283,6 +284,23 @@ type OrganStat = OrganMetric;
 // Formats a nullable metric for the organ-stats detail drawer — "—" when the backend
 // didn't compute it (e.g. an empty/degenerate mask), fixed-point otherwise.
 const fmtStat = (v: number | null, digits = 0): string => (v === null ? "—" : v.toFixed(digits));
+
+// The reading timeline prints these lines as logged, so each edit is worded
+// like the Annotate menu it came from, not as the operation's internal name.
+const ISLANDS_LOG: Record<string, string> = {
+	keepLargest: "Kept the largest island",
+	removeSmall: "Removed small islands",
+	splitToSegments: "Split islands into classes",
+	keepSelected: "Kept the picked island",
+	removeSelected: "Removed the picked island",
+};
+const LOGICAL_LOG: Record<string, string> = {
+	copy: "Copied a class to the target",
+	add: "Combined a class into the target",
+	invert: "Inverted the class",
+	clear: "Cleared the class",
+	fill: "Filled the class",
+};
 
 // Cornerstone's segmentation Color is [r, g, b, a] on a 0–255 scale; CSS wants alpha 0–1.
 // Falls back to a neutral gray if a label has no LUT entry (shouldn't happen in practice).
@@ -1063,16 +1081,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const renderAnnotationFlyout = (tool: Exclude<PrimaryEditTool, null>, onApplied: () => void, onCloseSettings: () => void, onGuidedControlsChange: (controls: import("../components/segmentation/SliceAnchorPickerUI").GuidedFlowControls | null) => void) => {
 	switch (tool) {
 		case "margin": {
-			const marginInfo = activeSegment ? getActualMarginMm(3) : null;
 			return (
 			  <MarginPanel
 			  onApply={(op, mm) => {
 				const { applyToVisible, ids } = resolveMaskingTargets();
 				const r = applyMargin(op, mm, applyToVisible, ids, maskFilter);
-				if (r) sessionRef.current?.log("edit", `Margin ${op} ${mm}mm (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+				if (r?.changedVoxels) sessionRef.current?.log("edit", `${op === "grow" ? "Grew" : "Shrank"} the class by ${mm} mm (${voxelsLog(r.changedVoxels)})`, 2000);
+				return r;
 			}}			
-				actualMm={marginInfo?.mm ?? null}
-				actualVoxels={marginInfo?.voxels ?? null}
+				getActual={activeSegment ? getActualMarginMm : undefined}
 				onApplied={onApplied}
 			  />
 			);
@@ -1084,8 +1101,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				onGuidedControlsChange={onGuidedControlsChange}
 				onApply={(op, min) => {
 					const r = applyIslandsOperation(op, min, islandSeedVoxel ?? undefined, maskFilter);
-				  if (r) {
-					sessionRef.current?.log("edit", `Islands: ${op} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+				  if (r?.changedVoxels) {
+					sessionRef.current?.log("edit", `${ISLANDS_LOG[op] ?? "Edited islands"} (${voxelsLog(r.changedVoxels)})`, 2000);
 					// "Split islands to segments" creates brand-new segment indices on
 					// the backend (with their own color already registered) — fold
 					// them into the same UI state a manually-created class would use,
@@ -1122,6 +1139,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						setActiveCatalogOrganId(null);
 					}
 				  }
+				  return r;
 				}}
 				pickingSelectedIsland={morphPicker.picking}
 				onPickSelectedIsland={morphPicker.startPicking}
@@ -1146,7 +1164,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					onApply={(op, src, bypass) => {
 					  const target = activeSegment ?? checkBoxData[0]?.id ?? 1;
 					  const r = applyLogicalOperator(op, target, src, bypass, maskFilter);
-					  if (r) sessionRef.current?.log("edit", `Logical op ${op} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+					  if (r?.changedVoxels) sessionRef.current?.log("edit", `${LOGICAL_LOG[op] ?? "Combined classes"} (${voxelsLog(r.changedVoxels)})`, 2000);
+					  return r;
 					}}
 					onApplied={onApplied}
 				  />
@@ -1198,6 +1217,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			<HollowFlyout
 			segmentIndex={activeSegment ?? 1}
 			maskFilter={maskFilter}
+			getActual={activeSegment ? getActualHollowMm : undefined}
 			onLog={(d) => sessionRef.current?.log("edit", d, 2000)}
 			onApplied={onApplied}
 			/>
@@ -1205,10 +1225,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		case "smoothing":
 		return (
 			<SmoothingFlyout
-			onApply={(method, kernelMm) => {
+			onApply={(_method, kernelMm) => {
 				const { applyToVisible, ids } = resolveMaskingTargets();
 				const r = applySmoothing(kernelMm, applyToVisible, ids, maskFilter);
-				if (r) sessionRef.current?.log("edit", `Smoothing ${method} (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+				if (r?.changedVoxels) sessionRef.current?.log("edit", `Smoothed the class by ${kernelMm} mm (${voxelsLog(r.changedVoxels)})`, 2000);
+				return r;
 			}}
 			onApplied={onApplied}
 			/>
@@ -1624,6 +1645,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		color: "transparent",
 	});
 	const hasActiveTarget = activeSegment != null;
+	// True for the whole life of a guided slice pick, published by AnnotationToolbar.
+	const [guidedPicking, setGuidedPicking] = useState(false);
 
 	useEffect(() => {
 		if (!hasActiveTarget && activeToolbarTool) {
@@ -1646,12 +1669,19 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		} else if (activeMeasureTool) {
 			setActiveMaskEditTool(null);
 			setActiveMeasurementTool(activeMeasureTool);
+		} else if (guidedPicking) {
+			// A click during a guided slice pick (Copy across, Fill between,
+			// Islands) chooses a slice or anchor; the crosshair must not also
+			// jump the other panes. Pan stays on the primary button.
+			setActiveMaskEditTool(null);
+			setActiveMeasurementTool(null);
+			toggleCrosshairTool(false);
 		} else {
 			setActiveMaskEditTool(null);
 			setActiveMeasurementTool(null);
 			toggleCrosshairTool(crosshairToolActive);
 		}
-	}, [editMode, activeToolbarTool, activeMeasureTool, crosshairToolActive]);
+	}, [editMode, activeToolbarTool, activeMeasureTool, crosshairToolActive, guidedPicking]);
 
 
 
@@ -5104,6 +5134,7 @@ const aiAvailableOrgans = useMemo(() => {
 				hasActiveTarget={hasActiveTarget}
 				activeTool={activeToolbarTool}
 				onToolChange={handleToolbarToolChange}
+				onGuidedPickingChange={setGuidedPicking}
 				diameterMm={diameterMm}
 				onDiameterChange={handleDiameterChange}
 				onDiameterPreviewChange={setBrushPreviewActive}

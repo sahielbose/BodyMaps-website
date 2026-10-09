@@ -65,11 +65,14 @@
 
 .seg-effect__select {
     flex: 1;
-    background: var(--vp-panel-strong, rgba(255, 255, 255, 0.07));
-    border: 1px solid var(--vp-border, rgba(255, 255, 255, 0.09));
-    border-radius: 6px;
-    color: var(--vp-text, #ffffff);
-    padding: 5px 7px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    color: #fff;
+    /* Dark native list, so the white class names stay readable on Windows and Linux. */
+    color-scheme: dark;
+    padding: 8px 9px;
+    font-size: 12.5px;
 }
 
 .seg-effect__apply {
@@ -230,21 +233,6 @@
     color: var(--vp-text, #ffffff);
 }
 
-.seg-effect__apply-spinner-wrap {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.seg-effect__apply-spinner {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    border: 2px solid rgba(8, 9, 11, 0.25);
-    border-top-color: #08090b;
-    animation: seg-effect-spin 0.7s linear infinite;
-}
-
 @keyframes seg-effect-render-pulse {
 
     0%,
@@ -310,7 +298,8 @@
 }
 
 .seg-effect__number:focus {
-    outline: none;
+    outline: 2px solid #7cb7da;
+    outline-offset: 1px;
     border-color: #0b17ff;
     background: rgba(104, 172, 229, 0.08);
 }
@@ -318,6 +307,26 @@
 .seg-effect__number--compact {
     width: 50px;
     flex-shrink: 0;
+}
+
+/* 16px keeps iOS Safari from zooming the page when the box is focused, and
+   the taller box is a fair touch target. Only the slider flyouts' compact box
+   gets the larger size. The box is border-box, so the 64px leaves a 54px text
+   area: room for the Islands flyout's five digits (20000) at 16px. */
+@media (max-width: 640px), (pointer: coarse) {
+    .seg-effect__number--compact {
+        width: 64px;
+        min-height: 34px;
+        padding-left: 4px;
+        padding-right: 4px;
+        font-size: 16px;
+    }
+
+    /* Same iOS zoom-on-focus guard for the Logical operators source dropdown. */
+    .seg-effect__select {
+        font-size: 16px;
+        min-height: 36px;
+    }
 }
 
 /* ============================================================

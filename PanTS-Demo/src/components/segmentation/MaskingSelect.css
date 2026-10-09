@@ -31,7 +31,7 @@
     font-weight: 600;
     padding: 7px 9px;
     cursor: pointer;
-    transition: background 0.12s ease, min-width 0.2s ease, width 0.2s ease;
+    transition: background 0.12s ease;
 }
 
 .masking-select__trigger:hover {
