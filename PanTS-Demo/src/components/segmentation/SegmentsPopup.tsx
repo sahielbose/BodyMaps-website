@@ -58,17 +58,6 @@ interface SegmentsPopupProps {
 	hasActiveTarget: boolean;
 }
 
-// Normalizes any organ label to Title Case ("Adrenal Gland Left") so the
-// Existing-class list reads consistently regardless of how the source
-// label was originally cased.
-function toTitleCase(label: string): string {
-	return label
-		.split(/\s+/)
-		.filter(Boolean)
-		.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-		.join(" ");
-}
-
 // Suggested default swatch for the next new class — cycles through the
 // Hopkins palette so a freshly-created class starts on-brand. Can still be
 // repainted via the color input afterward.
@@ -685,7 +674,7 @@ export default function SegmentsPopup({
 												className={`segpop__catalog-row ${activeCatalogOrganId === o.id ? "is-active" : ""}`}
 												onClick={() => handleSelectExisting(o.id)}
 											>
-												<span className="segpop__catalog-row-name">{toTitleCase(o.label)}</span>
+												<span className="segpop__catalog-row-name">{o.label}</span>
 
 											</button>
 										))}

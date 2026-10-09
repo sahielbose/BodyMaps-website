@@ -6,6 +6,8 @@
 // checkout without the image data — `loadOrganNorms()` returns null and the panel just
 // omits the percentile column. The math here is pure + unit-tested (organNorms.test.ts).
 
+import { ordinal } from "./ordinal";
+
 export type NormBucket = {
 	n: number; // sample size behind this bucket
 	q: number[]; // organ volume (cm³) at each level in `percentile_grid`, ascending
@@ -110,6 +112,11 @@ export function describeBasis(key: string): string {
 	if (bin === "ALL") return s === "ALL" ? "the whole dataset" : sexLabel;
 	const range = bin.replace("-", "–");
 	return s === "ALL" ? `ages ${range}` : `${sexLabel} ${range}`;
+}
+
+// The tooltip on a percentile cell, e.g. "1st percentile vs males 60–69 (n=240)".
+export function percentileTitle(percentile: number, basis: string, n: number | null): string {
+	return `${ordinal(Math.round(percentile))} percentile vs ${describeBasis(basis)} (n=${n})`;
 }
 
 // Fetch + cache the static norms asset. Served by the frontend (not the API), so it's

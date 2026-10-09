@@ -1,3 +1,7 @@
+/* /compare belongs to the viewer family (like /case and /compare-viewer): a dark
+   #08090b surface with its own bar and blue accents, no site header or footer. Text
+   and control boundaries are tuned for AA on this surface: text at least 4.5:1,
+   borders of controls at least 3:1. */
 .cmp {
   min-height: 100vh;
   background: #08090b;
@@ -5,95 +9,158 @@
   font-family: "IBM Plex Sans", system-ui, sans-serif;
   padding: 20px clamp(16px, 5vw, 64px) 64px;
   box-sizing: border-box;
+  --cmp-control-h: 38px;
 }
 
+.cmp__main {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+/* Shared focus ring for every control on the page, light enough to show on dark. */
+.cmp a:focus-visible,
+.cmp button:focus-visible,
+.cmp input:focus-visible,
+.cmp [tabindex="0"]:focus-visible {
+  outline: 2px solid var(--vp-accent);
+  outline-offset: 2px;
+}
+
+/* One height for the back link, both id inputs, the swap button, the viewer link and the
+   statistics button, so their top and bottom edges line up (the variable lives on .cmp so the
+   button under the bar shares it). The bar is a fixed grid (title and
+   viewer link on the first row, the id row under them), so what is typed into the inputs
+   never moves anything. */
 .cmp__bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "heading cta"
+    "inputs inputs";
+  align-items: center;
+  gap: 16px 12px;
+  margin-bottom: 24px;
+}
+.cmp__heading {
+  grid-area: heading;
   display: flex;
   align-items: center;
   gap: 16px;
-  flex-wrap: wrap;
-  margin-bottom: 24px;
+}
+/* Beside the title, so the bar is the same height before and after both IDs are set. */
+.cmp__cta {
+  grid-area: cta;
+  display: flex;
+  align-items: center;
+  min-height: var(--cmp-control-h);
 }
 .cmp__home {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  width: var(--cmp-control-h);
+  height: var(--cmp-control-h);
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
   color: #f4f5f7;
   text-decoration: none;
-  font-size: 18px;
+  flex-shrink: 0;
 }
-.cmp__home:hover { background: rgba(255, 255, 255, 0.08); }
+/* The colour is repeated: the global a:hover (black) would otherwise turn the arrow black on the dark bar. */
+.cmp__home:hover { color: #f4f5f7; background: rgba(255, 255, 255, 0.08); }
 .cmp__title {
   font-size: 20px;
   font-weight: 600;
   margin: 0;
 }
+
+/* Two equal tracks with the swap button in a track of its own between them, so it never
+   covers an input. The outer edges of Case A and Case B sit exactly over the outer edges of
+   their cards; the inner edges stop short of the cards' inner edges to leave room for it. */
 .cmp__inputs {
-  display: flex;
+  grid-area: inputs;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--cmp-control-h) minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  margin-left: auto;
+  min-width: 0;
+}
+/* The input fills its whole track. Once an id is set its thumbnail sits inside the input as
+   a prefix and the text moves over to make room, so nothing is reserved beside the input. */
+.cmp__slot {
+  position: relative;
+  min-width: 0;
 }
 .cmp__chip {
+  position: absolute;
+  top: 50%;
+  left: 6px;
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px 4px 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-.cmp__chip-meta {
-  font-size: 11px;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  color: rgba(255, 255, 255, 0.7);
-  white-space: nowrap;
+  transform: translateY(-50%);
+  /* A click on the thumbnail falls through to the input, so it focuses the field. */
+  pointer-events: none;
 }
 .cmp__input {
-  width: 120px;
-  padding: 8px 10px;
+  width: 100%;
+  min-width: 0;
+  height: var(--cmp-control-h);
+  padding: 0 10px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.4);
   background: rgba(255, 255, 255, 0.04);
   color: #f4f5f7;
   font-family: inherit;
   font-size: 13px;
+  box-sizing: border-box;
 }
-.cmp__input::placeholder { color: rgba(255, 255, 255, 0.35); }
+.cmp__slot--chip .cmp__input { padding-left: 42px; }
+.cmp__input::placeholder { color: rgba(255, 255, 255, 0.6); }
+/* A case id that failed to load: the same pink as the failed card, so the field reads as the cause. */
+.cmp__input[aria-invalid="true"] { border-color: #ff9db1; }
+.cmp__input:focus { border-color: var(--vp-accent); }
 .cmp__swap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.4);
   color: #f4f5f7;
   border-radius: 8px;
-  padding: 8px 10px;
+  /* Fixed square with no padding, so the global button padding cannot resize it. */
+  width: var(--cmp-control-h);
+  height: var(--cmp-control-h);
+  padding: 0;
+  box-sizing: border-box;
   cursor: pointer;
-  font-size: 14px;
+  flex-shrink: 0;
 }
 .cmp__swap:hover { background: rgba(255, 255, 255, 0.12); }
 .cmp__viewerlink {
-  padding: 8px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--cmp-control-h);
+  padding: 0 14px;
+  box-sizing: border-box;
   border-radius: 8px;
-  background: #2563eb;
-  color: #fff;
+  background: var(--vp-accent);
+  color: #08090b;
   text-decoration: none;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
 }
-.cmp__viewerlink:hover { background: #1d4ed8; }
+.cmp__viewerlink:hover { filter: brightness(1.1); }
 
 /* Now the page's main content (the stats table moved into a popup) — the two cases get
    room to be a real "hero" section instead of a cramped strip above a giant table. */
 .cmp__cases {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 20px;
-  max-width: 900px;
-  margin: 8px auto 28px;
+  margin: 8px 0 28px;
 }
 .cmp-case {
   display: flex;
@@ -102,14 +169,25 @@
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.08);
+  min-width: 0;
 }
+.cmp-case--failed { border-color: rgba(255, 157, 177, 0.4); }
 .cmp-case--empty {
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 0.62);
   font-size: 13px;
-  min-height: 96px;
+  /* As tall as a filled card (160px thumbnail + padding + border), so entering the first id
+     does not push everything below it down. */
+  min-height: 202px;
 }
+/* The sentence is one flex item, so the card's gap never splits it in two. */
+.cmp-case__none {
+  margin: 0;
+  text-align: center;
+  text-wrap: balance;
+}
+.cmp__nowrap { white-space: nowrap; }
 .cmp-thumb {
   border-radius: 12px;
   object-fit: cover;
@@ -118,30 +196,68 @@
 }
 .cmp-thumb--lg { width: 160px; height: 160px; }
 .cmp-thumb--sm { width: 26px; height: 26px; border-radius: 7px; }
+/* No preview: an icon (plus a word in the big card), never text too small to read. */
 .cmp-thumb--empty {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.35);
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  gap: 8px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.72);
   text-align: center;
 }
-.cmp-thumb--sm.cmp-thumb--empty { font-size: 7px; }
-.cmp-case__meta { display: flex; flex-direction: column; gap: 8px; }
-.cmp-case__id { font-size: 18px; font-weight: 600; }
+.cmp-case__meta { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.cmp-case__id { font-size: 18px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
 .cmp-case__demo {
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.62);
+  color: rgba(255, 255, 255, 0.68);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
+.cmp-case__error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #ff9db1;
+}
 .cmp-case__open {
+  display: inline-flex;
+  align-items: center;
+  /* The arrow is its own span, and a flex container drops the space before it. */
+  gap: 0.35em;
+  min-height: 36px;
   margin-top: auto;
-  font-size: 12px;
-  color: #7aa2ff;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--vp-accent);
   text-decoration: none;
 }
-.cmp-case__open:hover { text-decoration: underline; }
+/* The colour is repeated: the global a:hover (black) would otherwise win on the dark card. */
+.cmp-case__open:hover { color: var(--vp-accent); text-decoration: underline; }
+
+.cmp__msg {
+  max-width: 520px;
+  margin-inline: auto;
+  padding: 40px 16px;
+  text-align: center;
+  text-wrap: balance;
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 13px;
+  line-height: 1.6;
+}
+/* Stays in the accessibility tree when empty (display:none would drop the live region). */
+.cmp__msg:empty { padding: 0; }
+/* Focus lands here after Try again; it is a message, not a control, so it takes no ring. */
+.cmp__msg:focus { outline: none; }
+/* A figure the case does not have: quieter than data, so a run of them does not read as values. */
+.cmp__cell--empty,
+.cmp__vol.cmp__cell--empty,
+.cmp__detail-row span.cmp__cell--empty:not(:first-child) {
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 400;
+}
+.cmp__vol.cmp__cell--empty { font-size: 13px; }
+.cmp__status-strong { color: #f4f5f7; font-weight: 500; }
 
 /* CTA that replaces the always-open table — the stats live in a popup (.cmp__modal) opened
    from here, so the page stays focused on the two scans above. */
@@ -151,18 +267,23 @@
   margin-bottom: 40px;
 }
 .cmp__statsPromptBtn {
-  padding: 12px 22px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  /* Same height as the bar's controls; the fallback covers this being outside .cmp__bar. */
+  height: var(--cmp-control-h, 38px);
+  padding: 0 20px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
   background: rgba(255, 255, 255, 0.05);
   color: #f4f5f7;
   font-family: inherit;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
 }
-.cmp__statsPromptBtn:hover { background: rgba(255, 255, 255, 0.1); border-color: var(--accent-tint); }
+.cmp__statsPromptBtn:hover { background: rgba(255, 255, 255, 0.1); border-color: var(--vp-accent); }
 
+/* Fades in like the sign-in popup, so every dialog on the site opens alike. */
 .cmp__modalOverlay {
   position: fixed;
   inset: 0;
@@ -172,7 +293,12 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  z-index: 100;
+  z-index: var(--z-modal);
+  animation: cmp-fade 0.15s ease;
+}
+@keyframes cmp-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 .cmp__modal {
   width: min(920px, 100%);
@@ -197,7 +323,7 @@
 .cmp__modalClose {
   background: transparent;
   border: none;
-  color: rgba(255, 255, 255, 0.7);
+  color: rgba(255, 255, 255, 0.75);
   font-size: 22px;
   line-height: 1;
   cursor: pointer;
@@ -210,22 +336,19 @@
   padding: 16px 20px 20px;
 }
 
-.cmp__msg {
-  padding: 40px 16px;
-  text-align: center;
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.cmp__table {
+/* Horizontal scroll lives here, inside the dialog, rather than clipping the last
+   column on a phone. */
+.cmp__tableScroll {
+  overflow-x: auto;
   border-radius: 14px;
-  overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.cmp__table {
+  min-width: 600px;
 }
 .cmp__row {
   display: grid;
-  grid-template-columns: 1.3fr 1fr 1fr 1fr;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr);
   gap: 18px;
   align-items: center;
   padding: 16px 20px;
@@ -239,12 +362,21 @@
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.68);
   padding: 12px 20px;
+  white-space: nowrap;
 }
+/* The head is its own grid, so its tracks cannot grow to the longer "Δ (Case 11 − Case 10)": they
+   are minmax(0, ...) to stay level with the rows below, and that label wraps instead. The delta
+   track is the widest so the label breaks between words, never inside "(Case 2)". */
+.cmp__row--head { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr); }
+.cmp__row--head span:last-child { white-space: normal; overflow-wrap: break-word; text-wrap: balance; }
 .cmp__row--head span:not(:first-child),
 .cmp__cell { text-align: right; }
 .cmp__organ {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
   color: #f4f5f7;
   font-weight: 600;
   font-size: 16px;
@@ -256,6 +388,7 @@
   flex-direction: column;
   align-items: flex-end;
   gap: 5px;
+  white-space: nowrap;
 }
 .cmp__cell-line {
   display: flex;
@@ -266,13 +399,14 @@
 .cmp__pct {
   font-style: normal;
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.45);
+  color: rgba(255, 255, 255, 0.62);
 }
 .cmp__meanhu {
   font-style: normal;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.55);
+  color: rgba(255, 255, 255, 0.65);
 }
+/* The +/- sign carries the direction; colour only reinforces it. */
 .cmp-delta--up .cmp__vol,
 .cmp-delta--up.cmp__meanhu { color: #6ee7a8; }
 .cmp-delta--down .cmp__vol,
@@ -283,12 +417,27 @@
    comparison is one click away. */
 .cmp__row--expandable { cursor: pointer; }
 .cmp__row--expandable:hover { background: rgba(255, 255, 255, 0.05); }
+/* The disclosure button inside the organ cell: looks like plain text, toggles the row. */
+.cmp__toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.cmp__toggle:focus-visible { outline-offset: 2px; border-radius: 4px; }
 .cmp__chevron {
-  display: inline-block;
-  width: 12px;
-  margin-right: 4px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.42);
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+  color: rgba(255, 255, 255, 0.8);
   transition: transform 0.15s ease;
 }
 .cmp__chevron--open { transform: rotate(90deg); }
@@ -298,8 +447,18 @@
   color: #ffb454;
   cursor: help;
 }
+/* Visible legend for the flag above, since a title never shows on touch. */
+.cmp__truncated-note {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.72);
+}
+.cmp__truncated-note .cmp__truncated-flag { margin-left: 0; cursor: inherit; }
+/* Same horizontal padding as .cmp__row, so both grids share their columns; the labels are
+   indented by the first cell alone. */
 .cmp__detail {
-  padding: 6px 20px 18px 36px;
+  padding: 6px 20px 18px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -307,41 +466,150 @@
 }
 .cmp__detail-row {
   display: grid;
-  grid-template-columns: 1.3fr 1fr 1fr 1fr;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr);
   gap: 18px;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 13px;
+  white-space: nowrap;
 }
+.cmp__detail-row--head { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr); }
+.cmp__detail-row--head span:last-child { white-space: normal; overflow-wrap: break-word; text-wrap: balance; }
 .cmp__detail-row span:not(:first-child) { text-align: right; color: rgba(255, 255, 255, 0.85); }
 .cmp__detail-row span:first-child {
-  color: rgba(255, 255, 255, 0.55);
+  /* The chevron (16px icon) plus the .cmp__organ gap (4px), so the labels line up under the organ name. */
+  padding-left: 20px;
+  color: rgba(255, 255, 255, 0.65);
   font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
-.cmp__detail-row--head span:not(:first-child) {
-  color: rgba(255, 255, 255, 0.42);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
-}
+.cmp__detail-row--head span:not(:first-child),
 .cmp__detail-row--head span:first-child {
-  color: rgba(255, 255, 255, 0.42);
+  color: rgba(255, 255, 255, 0.62);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-size: 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 .cmp__detail-delta { font-weight: 600; }
+.cmp__detail-none {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+}
 .cmp__detail-delta.cmp-delta--up { color: #6ee7a8; }
 .cmp__detail-delta.cmp-delta--down { color: #ff9db1; }
 
 /* Dotted-underline affordance for any stat label with a hover explanation (e.g. Kurtosis) —
    makes the tooltip discoverable instead of relying on users guessing to hover plain text. */
 .cmp__tooltip-label {
+  justify-self: start;
   cursor: help;
-  border-bottom: 1px dotted rgba(255, 255, 255, 0.4);
+  text-decoration: underline dotted rgba(255, 255, 255, 0.5);
+  text-underline-offset: 3px;
 }
 
+/* Names the subtraction order on a phone when long ids leave the rows only "Δ". */
+.cmp__delta-note {
+  display: none;
+  margin: 0 0 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.62);
+  overflow-wrap: anywhere;
+}
+
+/* Narrow dialogs (below about 720px the 600px table no longer fits): each organ becomes a
+   name line over a three-column grid of labelled Case A, Case B and difference figures,
+   so the whole comparison is visible without sideways scrolling. */
+@media (max-width: 720px) {
+  .cmp__table { min-width: 0; }
+  .cmp__row--head { display: none; }
+  .cmp__delta-note { display: block; }
+  .cmp__row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px 10px;
+    align-items: start;
+    padding: 14px 12px;
+  }
+  .cmp__organ { grid-column: 1 / -1; }
+  .cmp__cell {
+    align-items: flex-start;
+    text-align: left;
+    white-space: normal;
+  }
+  .cmp__cell::before {
+    content: attr(data-label);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.62);
+    /* One line always, so the three figures of a row share a baseline. */
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cmp__cell-line { flex-wrap: wrap; column-gap: 6px; }
+  .cmp__vol { font-size: 14px; }
+  .cmp__detail { padding: 6px 12px 14px; }
+  /* The head shows the short "Δ" here, so the delta track goes back to an even share. */
+  .cmp__detail-row { grid-template-columns: 1.3fr repeat(3, 1fr); }
+  .cmp__detail-row--head { grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr)); }
+  .cmp__detail-row {
+    gap: 8px;
+    font-size: 12px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  /* The full delta label would wrap to three lines in this column; the organ row right above
+     already names both cases, so the head shows its short form (screen readers keep the full text). */
+  .cmp__detail-row--head span.cmp__head-delta { font-size: 0; }
+  .cmp__detail-row--head span.cmp__head-delta::after {
+    content: attr(data-short);
+    content: attr(data-short) / "";
+    font-size: 10px;
+  }
+  /* No indent in the narrow grid, for the header and its rows alike, so "Distribution" fits
+     its column and still lines up with the labels under it. */
+  .cmp__detail-row span:first-child { padding-left: 0; }
+  .cmp__detail-none { padding-left: 0; }
+}
+
+/* Narrow phones (360px and under): the tracked 10px "DISTRIBUTION" needs about 79px and its
+   column is 79px at 360 and 66px at 320, so it drops the tracking and a pixel to stay one word. */
+@media (max-width: 380px) {
+  .cmp__detail-row--head span:first-child { letter-spacing: 0; font-size: 9px; }
+}
+
+/* Phones: the id row is two full-width inputs with the swap button beside them, and the
+   viewer link gets its own row under them once both ids are set (no row while it is empty). */
 @media (max-width: 640px) {
-  .cmp__cases { grid-template-columns: 1fr; }
-  .cmp__inputs { margin-left: 0; width: 100%; }
-  .cmp__input { flex: 1; width: auto; }
+  .cmp { --cmp-control-h: 40px; }
+  .cmp__bar {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "heading"
+      "inputs";
+    row-gap: 12px;
+  }
+  .cmp__cta { grid-area: auto; }
+  .cmp__cta:empty { display: none; }
+  .cmp__cases { grid-template-columns: minmax(0, 1fr); }
+  .cmp-case { flex-direction: column; }
+  /* Stacked cards are content-sized: an empty one is just its line of text. */
+  .cmp-case--empty { min-height: 0; }
+  /* Fills the card up to 320px, centred, so it never dominates a wide phone or small tablet. */
+  .cmp-thumb--lg { width: 100%; max-width: min(100%, 320px); height: auto; aspect-ratio: 1; margin-inline: auto; }
+  .cmp__inputs {
+    grid-template-columns: minmax(0, 1fr) var(--cmp-control-h);
+    gap: 8px;
+  }
+  /* 16px keeps iOS from zooming the page when an id field is focused. */
+  .cmp__input { font-size: 16px; }
+  .cmp__slot { grid-column: 1; }
+  .cmp__slot--b { grid-row: 2; }
+  .cmp__swap { grid-column: 2; grid-row: 1 / span 2; }
+  .cmp__cta .cmp__viewerlink { flex: 1; }
+  .cmp__modalOverlay { padding: 12px; }
+  .cmp__modalBody { padding: 12px; }
 }

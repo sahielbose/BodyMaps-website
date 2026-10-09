@@ -3,7 +3,9 @@
 // place means the table, the summary banner, and the export all agree. The row math is
 // pure + unit-tested (organStatsExport.test.ts); only downloadStats touches the DOM.
 import { describeBasis, type OrganNorms, percentileForOrgan } from "./organNorms";
-import { filenameToName } from "./utils";
+// The prettifying filenameToName ("adrenal_gland_left" -> "Adrenal gland left"), the same
+// one the viewers use for organ names; ./utils has an older one that only strips extensions.
+import { filenameToName } from "./utils.name";
 
 // Sentinel the backend uses for an organ whose metric is unreliable (mask clipped at the
 // volume edge). Mirrors NiftiProcessor.number_max.
@@ -33,7 +35,7 @@ export type OrganMetric = {
 
 export type StatRow = {
 	organ_name: string;
-	label: string; // display name (e.g. "Kidney (left)")
+	label: string; // display name (e.g. "Kidney left")
 	volume_cm3: number | null; // null when the backend flagged it invalid
 	mean_hu: number | null;
 	percentile: number | null; // 0–100, or null when there's no reference
@@ -49,6 +51,13 @@ export type StatRow = {
 	truncated: boolean; // mask hit the volume edge on the first/last slice — metrics may be clipped
 };
 
+// An organ the scan holds no voxels of (the server still emits a record for it, with volume 0
+// and a null mean HU). It was not measured, so it has no percentile and is never "out of range".
+export function isAbsentOrgan(o: { voxel_count?: number | null; volume_cm3: number | null; mean_hu: number | null }): boolean {
+	if (o.voxel_count === 0) return true;
+	return o.volume_cm3 !== null && o.volume_cm3 <= 0 && (o.mean_hu === null || o.mean_hu === undefined);
+}
+
 // Build the display/export rows from the raw metrics + (optional) population norms.
 export function computeStatRows(
 	stats: OrganMetric[],
@@ -59,7 +68,9 @@ export function computeStatRows(
 	return stats.map((o) => {
 		const badVol = o.volume_cm3 === INVALID_METRIC;
 		const badHu = o.mean_hu === INVALID_METRIC;
-		const p = !badVol && norms ? percentileForOrgan(norms, o.organ_name, sex, age, o.volume_cm3) : null;
+		// A clipped organ is only partly in the scan, so its volume is not comparable to whole organs;
+		// like the backend assistant, give it no percentile (the table already shows its volume as n/a).
+		const p = !badVol && !o.truncated && !isAbsentOrgan(o) && norms ? percentileForOrgan(norms, o.organ_name, sex, age, o.volume_cm3) : null;
 		return {
 			organ_name: o.organ_name,
 			label: filenameToName(o.organ_name),
@@ -85,6 +96,21 @@ export function summarizeOutOfRange(rows: StatRow[]): { label: string; percentil
 	return rows
 		.filter((r) => r.percentile !== null && (r.percentile < 5 || r.percentile > 95))
 		.map((r) => ({ label: r.label, percentile: r.percentile as number }));
+}
+
+// An organ volume as every table and export prints it: one decimal under 10 cm³, so a small
+// organ (a lesion, a duct) does not round to 0, and whole cm³ above that. The branch is picked
+// after rounding to one decimal, so 9.96 is 10, not 10.0.
+export function roundVolumeCm3(v: number): number {
+	const r = Math.round(v * 10) / 10;
+	return r >= 10 ? Math.round(v) : r;
+}
+
+// The same figure with its unit. Only a volume too small for one decimal reads "<0.1".
+export function fmtVolumeCm3(v: number): string {
+	if (v > 0 && v < 0.05) return "<0.1 cm³";
+	const r = roundVolumeCm3(v);
+	return r >= 10 ? `${r} cm³` : `${r.toFixed(1)} cm³`;
 }
 
 const csvCell = (v: string | number): string => {
@@ -114,7 +140,7 @@ export function toCsv(rows: StatRow[]): string {
 	const lines = rows.map((r) =>
 		[
 			csvCell(r.label),
-			r.volume_cm3 === null ? "NA" : Math.round(r.volume_cm3),
+			r.volume_cm3 === null ? "NA" : roundVolumeCm3(r.volume_cm3),
 			r.mean_hu === null ? "NA" : Math.round(r.mean_hu),
 			r.median === null ? "NA" : Math.round(r.median),
 			r.standard_deviation === null ? "NA" : Math.round(r.standard_deviation),
@@ -136,7 +162,7 @@ export function toCsv(rows: StatRow[]): string {
 export function toJsonRows(rows: StatRow[]): Record<string, unknown>[] {
 	return rows.map((r) => ({
 		organ: r.label,
-		volume_cm3: r.volume_cm3 === null ? null : Math.round(r.volume_cm3),
+		volume_cm3: r.volume_cm3 === null ? null : roundVolumeCm3(r.volume_cm3),
 		mean_hu: r.mean_hu === null ? null : Math.round(r.mean_hu),
 		median_hu: r.median === null ? null : Math.round(r.median),
 		standard_deviation_hu: r.standard_deviation === null ? null : Math.round(r.standard_deviation),
@@ -153,14 +179,14 @@ export function toJsonRows(rows: StatRow[]): Record<string, unknown>[] {
 }
 
 // Trigger a browser download of the rows as CSV or JSON. DOM side-effect — not unit-tested.
-export function downloadStats(rows: StatRow[], format: "csv" | "json", caseId: string): void {
+export function downloadStats(rows: StatRow[], format: "csv" | "json", caseId: string, fileStem?: string): void {
 	const content = format === "csv" ? toCsv(rows) : JSON.stringify(toJsonRows(rows), null, 2);
 	const mime = format === "csv" ? "text/csv" : "application/json";
 	const blob = new Blob([content], { type: `${mime};charset=utf-8` });
 	const url = URL.createObjectURL(blob);
 	const link = document.createElement("a");
 	link.href = url;
-	link.download = `case_${caseId}_organ_stats.${format}`;
+	link.download = fileStem ? `organ-stats-${fileStem}.${format}` : `case_${caseId}_organ_stats.${format}`;
 	document.body.appendChild(link);
 	link.click();
 	document.body.removeChild(link);
