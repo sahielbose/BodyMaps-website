@@ -208,6 +208,7 @@ import { type MaskingArea } from "../components/segmentation/MaskingSelect";
 import { getLocalDicomFiles, loadLocalDicomSeries, localDicomSeriesLabel, localDicomSeriesNotice, NoDicomSeriesError } from "../helpers/dicomLocal";
 import { loadLocalNiftiAsRawBlobUrl } from "../helpers/localNifti";
 import {
+    describeBasis,
     loadOrganNorms,
     type OrganNorms,
     percentileTitle,
@@ -1010,6 +1011,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const aiWidthRef = useRef(400);
 	const vpRootRef = useRef<HTMLDivElement>(null);
 	const [organStats, setOrganStats] = useState<OrganStat[] | null>(null);
+	// The same stats for the assistant's metric answers, tagged with their case
+	// so a question never gets another case's numbers. A ref keeps the
+	// assistant's actions from being rebuilt whenever the stats arrive.
+	const organStatsRef = useRef<{ caseId: string; stats: OrganStat[] } | null>(null);
 	const [statsLoading, setStatsLoading] = useState(false);
 	const [statsError, setStatsError] = useState(false);
 	// The request itself failed (offline, a server error), as opposed to the server answering
@@ -4234,7 +4239,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				setStatsError(true);
 				return;
 			}
-			setOrganStats((data.organ_metrics ?? []) as OrganStat[]);
+			const stats = (data.organ_metrics ?? []) as OrganStat[];
+			organStatsRef.current = { caseId: String(caseId), stats };
+			setOrganStats(stats);
 		} catch (e) {
 			console.error(e);
 			setStatsFailed(true);
@@ -4304,6 +4311,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		if (enhance.state === "done") {
 			setAnnotateHdLoading(false);
 			setShowAnnotationToolbar(true);
+			// Same mutual exclusion as handleToggleAnnotationToolbar: the class
+			// panel would otherwise open hidden under the right-docked AI sidebar.
+			setShowAISidebar(false);
 		} else if (enhance.state === "failed") {
 			setAnnotateHdLoading(false);
 			setAnnotateHdError(true);
@@ -4368,6 +4378,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const handleToggleAnnotationToolbar = () => {
 		const opening = !showAnnotationToolbar;
 		setShowAnnotationToolbar(opening);
+		if (opening) {
+			// Both the class panel and the AI sidebar dock fixed to the right
+			// edge; the sidebar (z 90) sits above the panel (z 45), so opening
+			// annotation with the assistant up would hide the panel entirely
+			// while the layout reserved space for both. Mirror what
+			// handleToggleAISidebar already does in reverse: the two
+			// right-docked panels are mutually exclusive.
+			setShowAISidebar(false);
+		}
 		if (!opening) {
 			// Closing (deselecting the Annotate button): drop whatever class
 			// was targeted — the isolation effect above reacts to
@@ -4468,6 +4487,9 @@ const aiActions = useMemo(() => buildViewerActions({
 	setActiveMeasureToolFn: setActiveMeasureTool,
 	caseId: String(caseId),
 	apiBase: API_BASE,
+	getOrganStats: () =>
+		organStatsRef.current?.caseId === String(caseId) ? organStatsRef.current.stats : null,
+	setZoomLevel,
 }), [checkBoxData, caseId, handleWindowChange]);
 
 const statRows = useMemo(
@@ -4483,6 +4505,21 @@ demographics?.age ?? null
 [organStats, organNorms, demographics]
 );
 const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
+// The percentiles the Organ statistics panel shows, so the assistant quotes the
+// same ones instead of answering with the raw volume alone. The cohort goes in
+// the panel's words ("males 60–69"), not as its bucket key.
+const aiOrganReferences = useMemo(
+	() =>
+		statRows
+			.filter((r) => r.percentile !== null)
+			.map((r) => ({
+				organ_name: r.organ_name,
+				percentile: r.percentile as number,
+				basis: r.basis === null ? null : describeBasis(r.basis),
+				n: r.n,
+			})),
+	[statRows]
+);
 const customOrgans = useMemo(
     () => checkBoxData.filter((o) => o.id > segmentation_categories.length),
     [checkBoxData]
@@ -6242,6 +6279,7 @@ const aiAvailableOrgans = useMemo(() => {
 					zoomLevel,
 				}}
 				organMetrics={organStats ?? []}
+				organReferences={aiOrganReferences}
 				demographics={demographics}
 				actions={aiActions}
 				captureViewport={captureAllViews}

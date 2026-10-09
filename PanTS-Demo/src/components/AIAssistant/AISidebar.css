@@ -32,8 +32,10 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 58px;
-  padding: 12px 14px 11px 16px;
+  /* The height and inset of the viewer's other side panels (.vp-panel-head). */
+  min-height: 48px;
+  box-sizing: border-box;
+  padding: 0 8px 0 16px;
   border-bottom: 1px solid var(--vp-border, rgba(255, 255, 255, 0.09));
 }
 
@@ -74,9 +76,9 @@
 .ai-sidebar__close {
   display: inline-grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
   padding: 0;
   border: 0;
   border-radius: 8px;
@@ -293,7 +295,10 @@
   opacity: 0.7;
 }
 
-.ai-model-picker__button[data-state="loading"] .ai-model-picker__dot {
+/* Pulses only while the panel is open: closed, the sidebar is just
+   visibility:hidden, and an unscoped infinite animation kept running (and
+   repainting) for the life of the viewer page. */
+.ai-sidebar.is-open .ai-model-picker__button[data-state="loading"] .ai-model-picker__dot {
   animation: ai-model-pulse 1s ease-in-out infinite;
 }
 
@@ -326,7 +331,7 @@
 .ai-model-menu {
   position: absolute;
   left: 0;
-  bottom: calc(100% + 8px);
+  bottom: calc(100% + 6px);
   z-index: 4;
   width: min(286px, calc(100vw - 48px));
   max-height: 260px;
@@ -351,7 +356,7 @@
   padding: 6px 8px 7px;
   color: rgba(255, 255, 255, 0.43);
   font-family: var(--vp-mono, "JetBrains Mono", ui-monospace, monospace);
-  font-size: 9.5px;
+  font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.09em;
   text-transform: uppercase;
@@ -369,6 +374,12 @@
   border-radius: 8px;
   background: transparent;
   color: rgba(255, 255, 255, 0.76);
+  /* Set here because the bare "Refresh models" row would otherwise take the
+     global button size (16px) and read louder than the 12px note it relates to. */
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.3;
   cursor: pointer;
   text-align: left;
   transition: color 120ms ease, background 120ms ease;
@@ -390,7 +401,7 @@
 .ai-model-menu__item strong {
   overflow: hidden;
   font-family: var(--vp-mono, "JetBrains Mono", ui-monospace, monospace);
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 620;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -398,7 +409,7 @@
 
 .ai-model-menu__item small {
   color: rgba(255, 255, 255, 0.4);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.3;
 }
 
@@ -412,14 +423,14 @@
 .ai-model-menu__empty {
   padding: 12px 9px;
   color: rgba(255, 255, 255, 0.45);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* "Best for ..." line under each model name in the picker. */
 .ai-model-menu__desc {
   overflow: hidden;
   color: rgba(255, 255, 255, 0.42);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -439,7 +450,7 @@
   border-radius: 8px;
   background: rgba(110, 168, 254, 0.16);
   color: #a8c8ff;
-  font-size: 10.5px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -528,13 +539,36 @@
   outline: none;
 }
 
+/* Beside the docked toolbar, the header rule lines up with the toolbar's own
+   single-row height (12 + 36 + 12 + 1 rule). The height is fixed rather than measured: the toolbar wraps
+   taller while this sidebar narrows the page, and is hidden while a report is
+   open. Phones stack the sidebar over a wrapped toolbar, so they keep the
+   natural height. */
+@media (min-width: 900px) {
+  .ai-sidebar__header {
+    height: 61px;
+  }
+}
+
 @media (max-width: 899px) {
   .ai-sidebar {
     width: 100vw;
   }
 
+  /* iOS zooms the page into any focused field under 16px. */
+  .ai-composer__textarea {
+    font-size: 16px;
+  }
+
   .ai-sidebar__header {
-    padding-top: max(12px, env(safe-area-inset-top));
+    min-height: calc(48px + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .ai-sidebar__close {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
   }
 }
 
@@ -621,6 +655,34 @@
   height: 15px;
 }
 
+/* A failed reply keeps its row at full strength so Try again reads as the next step. */
+.ai-msg__actions:has(.ai-msg-retry) {
+  opacity: 1;
+}
+
+.ai-msg-retry {
+  height: 26px;
+  margin-left: 4px;
+  padding: 0 10px;
+  border: 1px solid var(--vp-border-strong, rgba(255, 255, 255, 0.16));
+  border-radius: 7px;
+  background: transparent;
+  color: var(--vp-text, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.ai-msg-retry:hover:not(:disabled) {
+  background: var(--vp-hover, rgba(255, 255, 255, 0.08));
+}
+
+.ai-msg-retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ---- Streaming status line (shown before the first token) ---- */
 .ai-status {
   display: inline-flex;
@@ -630,18 +692,11 @@
   font-size: 12.5px;
 }
 
+/* "Thinking" status text breathes in opacity. It used to sweep a gradient
+   across background-position, which repaints the text on every frame. */
 .ai-status__shimmer {
-  background: linear-gradient(
-    90deg,
-    rgba(255, 255, 255, 0.32) 0%,
-    rgba(255, 255, 255, 0.85) 50%,
-    rgba(255, 255, 255, 0.32) 100%
-  );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: ai-shimmer 1.6s linear infinite;
+  color: rgba(255, 255, 255, 0.85);
+  animation: ai-breathe 1.6s ease-in-out infinite;
 }
 
 .ai-status__dots {
@@ -650,12 +705,13 @@
   gap: 4px;
 }
 
-@keyframes ai-shimmer {
-  0% {
-    background-position: 200% 0;
-  }
+@keyframes ai-breathe {
+  0%,
   100% {
-    background-position: -200% 0;
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
   }
 }
 
@@ -703,6 +759,29 @@
   cursor: zoom-in;
 }
 
+/* Thumbnails open the lightbox, so each one sits in a real button. */
+.ai-thumb-button {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  line-height: 0;
+  cursor: zoom-in;
+}
+
+.ai-thumb-chip .ai-thumb-button {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+
+/* The chip clips its overflow, so its ring sits inside the edge. */
+.ai-thumb-chip .ai-thumb-button:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.8);
+  outline-offset: -2px;
+}
+
 /* ---- Lightbox (click a thumbnail to enlarge) ---- */
 .ai-lightbox {
   position: fixed;
@@ -725,6 +804,23 @@
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
 }
 
+/* On a phone a half-pane capture would sit at its own small size in a large
+   empty scrim, so it fills the width. The shadow follows the picture, not the
+   letterboxed box around it. The picture is wider than the padded content
+   box, so the grid centres its track instead of starting it at the padding. */
+@media (max-width: 899px) {
+  .ai-lightbox {
+    justify-content: center;
+  }
+
+  .ai-lightbox__img {
+    width: 94vw;
+    height: auto;
+    box-shadow: none;
+    filter: drop-shadow(0 24px 40px rgba(0, 0, 0, 0.6));
+  }
+}
+
 .ai-lightbox__close {
   position: fixed;
   top: 18px;
@@ -745,6 +841,12 @@
 
 .ai-lightbox__close:hover {
   background: rgba(255, 255, 255, 0.22);
+}
+
+/* Portaled to <body>, so the sidebar's own focus ring does not reach it. */
+.ai-lightbox__close:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  outline-offset: 2px;
 }
 
 .ai-lightbox__close svg {
@@ -775,6 +877,8 @@
   color: var(--vp-text, rgba(255, 255, 255, 0.86));
   font-size: 12px;
   line-height: 1.45;
+  /* A long unbroken file name in the sentence must wrap, not widen the composer. */
+  overflow-wrap: anywhere;
 }
 
 .ai-composer__warning code {
@@ -895,13 +999,14 @@
   transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
 }
 
-.ai-tool-btn:hover:not(:disabled) {
+.ai-tool-btn:hover:not(:disabled):not([aria-disabled="true"]) {
   color: var(--vp-text, rgba(255, 255, 255, 0.92));
   background: var(--vp-hover, rgba(255, 255, 255, 0.08));
   border-color: var(--vp-border-strong, rgba(255, 255, 255, 0.16));
 }
 
-.ai-tool-btn:disabled {
+.ai-tool-btn:disabled,
+.ai-tool-btn[aria-disabled="true"] {
   cursor: default;
   opacity: 0.4;
 }
@@ -1010,24 +1115,50 @@
   display: block;
 }
 
+/* A 24px target with the small 17px badge drawn in its top-right corner, so the
+   tap area is not the badge alone. It stops short of the thumbnail's centre, which
+   is where a tap to enlarge lands. The padding leaves the glyph centred on it. */
 .ai-thumb-chip__remove {
   position: absolute;
   top: 2px;
   right: 2px;
   display: inline-grid;
   place-items: center;
-  width: 17px;
-  height: 17px;
-  padding: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0 0 7px 7px;
   border: 0;
-  border-radius: 5px;
-  background: rgba(0, 0, 0, 0.6);
+  background: transparent;
   color: #fff;
   cursor: pointer;
   line-height: 0;
 }
 
+.ai-thumb-chip__remove::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* The ring follows the visible badge, not the larger transparent target, so
+   the chip's clipped edge does not cut it into an L-shape. The selector carries
+   the sidebar class so it outranks `.ai-sidebar button:focus-visible`. */
+.ai-sidebar .ai-thumb-chip__remove:focus-visible {
+  outline: none;
+}
+
+.ai-sidebar .ai-thumb-chip__remove:focus-visible::before {
+  outline: 1px solid rgba(255, 255, 255, 0.8);
+  outline-offset: 1px;
+}
+
 .ai-thumb-chip__remove svg {
+  position: relative;
   width: 11px;
   height: 11px;
 }
@@ -1081,14 +1212,19 @@
   white-space: nowrap;
 }
 
+/* A closed panel runs no animation at all (typing dots, caret and status
+   text included, should a reply still be streaming behind it). */
+.ai-sidebar:not(.is-open) * {
+  animation: none !important;
+}
+
+/* !important so this wins over every state-specific rule above, such as the
+   (0,4,0) loading-dot pulse, which a plain (0,1,0) override never beat. */
 @media (prefers-reduced-motion: reduce) {
   .ai-sidebar,
-  .ai-typing__dot,
-  .ai-model-picker__dot,
-  .ai-model-picker__button > svg,
-  .ai-status__shimmer,
-  .ai-caret {
-    animation: none;
-    transition: none;
+  .ai-sidebar *,
+  .ai-lightbox {
+    animation: none !important;
+    transition: none !important;
   }
 }
