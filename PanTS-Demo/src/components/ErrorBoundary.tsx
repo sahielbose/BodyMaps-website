@@ -1,6 +1,12 @@
 import { Component, type ReactNode } from "react";
 
-type Props = { fallback: ReactNode; children: ReactNode };
+type Props = {
+	fallback: ReactNode;
+	children: ReactNode;
+	onError?: (error: unknown) => void;
+	/** When this changes, a boundary that has caught an error tries its children again (the route boundary passes the location key, so a link to the current path also resets it). */
+	resetKey?: string;
+};
 type State = { hasError: boolean };
 
 // Minimal error boundary: if a child throws while rendering (e.g. the three.js
@@ -15,6 +21,11 @@ export default class ErrorBoundary extends Component<Props, State> {
 
 	componentDidCatch(error: unknown) {
 		console.error("ErrorBoundary caught:", error);
+		this.props.onError?.(error);
+	}
+
+	componentDidUpdate(prev: Props) {
+		if (this.state.hasError && prev.resetKey !== this.props.resetKey) this.setState({ hasError: false });
 	}
 
 	render() {

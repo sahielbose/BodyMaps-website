@@ -2,7 +2,18 @@
 @import "./styles/brand.css";
 
 #root {
-  width: 100vw;
+  /* 100%, not 100vw: on classic-scrollbar platforms 100vw includes the
+     vertical scrollbar's width, which forced a permanent horizontal
+     scrollbar on every window-scrolling page. */
+  width: 100%;
+}
+
+/* The sticky header (about 73px) and the sticky footer (--footer-h, set by
+   SiteFooter per breakpoint) cover the top and bottom of the window, so a
+   focused control must be scrolled clear of them. */
+html {
+  scroll-padding-top: 80px;
+  scroll-padding-bottom: var(--footer-h, 0px);
 }
 
 :root {
@@ -18,6 +29,9 @@
   /* ── Breakpoints: sm: 640px | md: 768px | lg: 1024px | xl: 1280px ── */
 
   /* Color/font tokens live in styles/brand.css (BodyMaps brand pack). */
+
+  /* ── Focus ── */
+  --focus-ring: #002d72;
 
   /* ── Layout ── */
   --control-h: 44px;
@@ -37,12 +51,17 @@
   --vp-border: rgba(255, 255, 255, 0.09);
   --vp-border-strong: rgba(255, 255, 255, 0.16);
   --vp-text: rgba(255, 255, 255, 0.92);
-  --vp-text-dim: rgba(255, 255, 255, 0.5);
-  --vp-text-faint: rgba(255, 255, 255, 0.36);
+  --vp-text-dim: rgba(255, 255, 255, 0.7);
+  /* The faintest white that keeps small labels at 4.5:1 on every viewer
+     surface, hovered flyout rows included (0.36 was about 3.2:1). */
+  --vp-text-faint: rgba(255, 255, 255, 0.5);
   --vp-hover: rgba(255, 255, 255, 0.1);
   --vp-accent: #6ea8fe;
   --vp-font: var(--font-sans);
   --vp-mono: var(--font-mono);
+}
+html.bm-dark-route {
+  --focus-ring: #6ea8fe;
 }
 
 
@@ -55,14 +74,22 @@ a:hover {
   color: #000000;
 }
 
+/* Light by default, like most pages, so a hard load paints white instead of
+   flashing dark before the app mounts. The dark routes (the viewer and the
+   other full-screen dark tools) get the class below from an inline script in
+   index.html before the first paint, and from App as the route changes. No
+   min-width: at 280px (a folded phone, or 400% zoom) it forced the whole
+   document to scroll sideways. */
 body {
   margin: 0;
   display: flex;
   place-items: center;
-  min-width: 320px;
   min-height: 100vh;
-  /* background:black */
-  background: var(--color-gray-900)
+  min-height: 100dvh;
+  background: var(--paper);
+}
+html.bm-dark-route body {
+  background: #08090b;
 }
 
 h1 {
@@ -81,12 +108,51 @@ button {
   cursor: pointer;
   transition: border-color 0.25s;
 }
-button:hover {
+/* :where() keeps this at the old (0,1,1) specificity, so every single-class
+   `.cls:hover` border rule still wins over it. */
+button:hover:where(:not(:disabled)) {
   border-color: #111111;
 }
-button:focus,
+/* One focus ring for every button: keyboard focus only (:focus-visible), so a
+   mouse click leaves no ring behind, in the JHU blue on light pages and the
+   viewer's light blue on the dark routes. */
 button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Skip link (App.tsx): off screen until keyboard focus, then a pill in the
+   top-left corner. Main is focused by script, so it takes no ring of its own. */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: calc(var(--z-modal) + 1);
+  transform: translateY(-200%);
+  padding: 0.6em 1em;
+  border: 2px solid var(--focus-ring);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #002d72;
+  font-weight: 600;
+}
+.skip-link:focus,
+.skip-link:hover {
+  color: #002d72;
+}
+.skip-link:focus {
+  transform: none;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+html.bm-dark-route .skip-link,
+html.bm-dark-route .skip-link:focus,
+html.bm-dark-route .skip-link:hover {
+  background: #08090b;
+  color: #ffffff;
+}
+main[tabindex="-1"]:focus {
+  outline: none;
 }
 
 /* @media (prefers-color-scheme: light) {
@@ -101,3 +167,22 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 } */
+
+/* Reduced motion, site-wide. Visitors who ask their OS for less motion get
+   no animation or transition anywhere, including infinite pulses, shimmers
+   and spinners (a frozen spinner still reads as loading). Durations go to
+   near zero rather than none so transitionend and animationend still fire
+   for code that waits on them. Motion started from JavaScript checks
+   helpers/motion.ts instead. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}

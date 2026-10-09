@@ -1,8 +1,20 @@
+/* How tall the sticky footer is, for anything fixed to the bottom of the page
+   (the compare tray) that has to sit above it. Set on :root because those
+   elements are siblings of the footer, not children. One line from 64em; two
+   below that; 0 once the footer is static (640px and below). */
+:global(:root) {
+  --footer-h: 57px;
+}
+
+/* Centred, one item per line, until there is room for both on one line
+   (below). The inquiry line is set in the same sans as the notice: in the
+   11px mono it needed 690px, which kept the footer on two lines up to
+   about 1140px wide. Sizes are rem so they follow the reader's text size. */
 .footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px 24px;
+  justify-content: center;
+  gap: 2px 24px;
   flex-wrap: wrap;
   width: 100%;
   box-sizing: border-box;
@@ -10,8 +22,9 @@
   border-top: 1px solid var(--rule);
   background: var(--paper);
   font-family: "IBM Plex Sans", system-ui, sans-serif;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.4;
+  text-align: center;
   color: var(--muted);
   flex: none;
   /* Ride the bottom edge of the viewport until the page's natural end, so the
@@ -21,14 +34,18 @@
   z-index: 1;
 }
 
-.notice {
+/* Balanced lines when either wraps on a phone, so the notice never leaves
+   "care." alone on a second line. */
+.notice,
+.partner {
   letter-spacing: 0.01em;
+  text-wrap: balance;
 }
 
-.partner {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 11px;
-  letter-spacing: 0.04em;
+/* Each sentence wraps as a unit, so a narrow screen breaks between them and
+   never inside "Not medical advice". */
+.sentence {
+  display: inline-block;
 }
 
 .link {
@@ -40,11 +57,35 @@
 .link:hover {
   color: #001d4a;
 }
+.link:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Both fit on one line from about 980px (notice 346px, inquiry 557px, the
+   gap and the padding). From 64em (1024px, with room to spare) the notice
+   goes left and the inquiry right; narrower, they stay centred whether they
+   share a line or not. In em so the switch moves with a larger default text
+   size. */
+@media (min-width: 64em) {
+  :global(:root) {
+    --footer-h: 38px;
+  }
+  .footer {
+    justify-content: space-between;
+    text-align: left;
+  }
+}
 
 @media (max-width: 640px) {
+  :global(:root) {
+    --footer-h: 0px;
+  }
   .footer {
-    justify-content: center;
-    text-align: center;
     padding: 8px 20px;
+    /* On a phone the footer is four lines: sticky, it would cover a tenth of
+       the screen on every page, so it sits at the end of the page instead. */
+    position: static;
   }
 }

@@ -10,7 +10,8 @@ import {
 describe("site footer", () => {
   it("shows the nonclinical notice and the inquiry link, nothing else", () => {
     render(<SiteFooter />);
-    expect(screen.getByText(NONCLINICAL_WARNING)).toBeInTheDocument();
+    // Two sentence spans in one notice, so the text is read from the wrapper.
+    expect(screen.getByText(/For nonclinical use only\./).parentElement?.textContent?.trim()).toBe(NONCLINICAL_WARNING);
     // The mission line moved to the landing subtitle; one-line footer.
     expect(screen.queryByText(/intelligence layer/)).not.toBeInTheDocument();
     const link = screen.getByRole("link", { name: CONTACT_LINK_TEXT });

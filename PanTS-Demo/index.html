@@ -9,7 +9,7 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="theme-color" content="#0F172A" />
     <meta name="description" content="Browse body CT scans in 2D and 3D, upload CT for AI segmentation, and annotate results. For nonclinical use only." />
-    <meta property="og:title" content="BodyMaps: CT Library, Segmentation, and Annotation" />
+    <meta property="og:title" content="BodyMaps: CT library, segmentation, and annotation" />
     <meta property="og:description" content="Browse body CT scans in 2D and 3D, upload CT for AI segmentation, and annotate results. For nonclinical use only." />
     <meta property="og:url" content="https://bodymaps.wse.jhu.edu/" />
     <meta property="og:type" content="website" />
@@ -20,14 +20,21 @@
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="BodyMaps: The intelligence layer for medical imaging AI" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="BodyMaps: CT Library, Segmentation, and Annotation" />
+    <meta name="twitter:title" content="BodyMaps: CT library, segmentation, and annotation" />
     <meta name="twitter:description" content="Browse body CT scans in 2D and 3D, upload CT for AI segmentation, and annotate results. For nonclinical use only." />
     <meta name="twitter:image" content="https://bodymaps.wse.jhu.edu/og-image-bodymaps-1200x630.png" />
     <meta name="twitter:image:alt" content="BodyMaps: The intelligence layer for medical imaging AI" />
+    <script>
+      /* Paint the first frame in the page's own colour: light by default, dark
+         for the viewer-type routes. Same pattern as src/helpers/routeSurface.ts. */
+      if (/\/(case|session|reconstruction|live)\/[^/]+\/*$|\/live\/challenge\/[^/]+\/*$|\/learn\/quiz\/[^/]+\/*$|\/(dicom|local-nifti|compare|compare-viewer)\/*$/i.test(location.pathname)) {
+        document.documentElement.classList.add("bm-dark-route");
+      }
+    </script>
     <link href="/src/index.css" rel="stylesheet">
     <link rel="preload" href="/fonts/ibm-plex-sans-v23-latin-normal-400.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/ibm-plex-sans-v23-latin-normal-600.woff2" as="font" type="font/woff2" crossorigin />
-    <title>BodyMaps: CT Library, Segmentation, and Annotation</title>
+    <title>BodyMaps: CT library, segmentation, and annotation</title>
   </head>
   <body>
     <div id="root"></div>

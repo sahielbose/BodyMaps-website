@@ -4,7 +4,8 @@
   justify-content: center;
 
   position: fixed;
-  bottom: 24px;
+  /* --footer-lift (set from the component) keeps it clear of the footer. */
+  bottom: calc(24px + var(--footer-lift, 0px));
   right: 20px;
   z-index: var(--z-dropdown);
 
@@ -18,16 +19,34 @@
   color: #ffffff;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
 
+  /* Hidden: faded out, then visibility: hidden once the fade has finished,
+     which takes it out of the tab order and the accessibility tree. */
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
   transform: translateY(8px);
-  transition: opacity 0.25s ease, transform 0.25s ease;
+  transition: opacity 0.25s ease, transform 0.25s ease, visibility 0s linear 0.25s;
+}
+
+/* The compare tray is a full-width bar below 768px, and this button would sit
+   on its right-hand buttons. --compare-tray-lift (how far the tray's top edge
+   is from the bottom of the window, set by the tray while it is open) lifts the
+   button clear of it; without a tray it is unset and nothing changes. */
+@media (max-width: 767px) {
+  .btn {
+    bottom: max(
+      calc(24px + var(--footer-lift, 0px)),
+      calc(var(--compare-tray-lift, 0px) + 12px)
+    );
+  }
 }
 
 .btn.visible {
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
   transform: translateY(0);
+  transition-delay: 0s;
 }
 
 .btn:hover {

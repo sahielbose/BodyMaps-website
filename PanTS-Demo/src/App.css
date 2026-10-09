@@ -64,9 +64,19 @@
 
 
 #root {
-  max-width: 100vw;
+  /* 100%, not 100vw: 100vw includes the scrollbar width on classic-scrollbar
+     platforms and made #root overflow the body horizontally. */
+  max-width: 100%;
+  /* clip, not hidden. hidden turns #root into a scroll container (overflow-y
+     computes to auto), and a scroll container that never scrolls quietly
+     disables position: sticky for everything inside it: the header scrolled
+     away and the footer never rode the bottom edge. clip trims the same
+     sideways overflow without that. hidden stays as the fallback for
+     browsers that predate clip. */
   overflow-x: hidden;
+  overflow-x: clip;
   min-height:100vh;
+  min-height:100dvh;
 }
 
 /* ── BodyMaps design system ───────────────────────────── */
@@ -145,3 +155,12 @@
   color: #888;
 }
 
+
+/* Route chunk loading fallback (see RouteFallback in App.tsx). */
+.route-fallback {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
