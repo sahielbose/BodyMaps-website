@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../../contexts/authContext";
 import BarList, { type Bar } from "./analytics/BarList";
 import Donut from "./analytics/Donut";
@@ -6,11 +6,11 @@ import TimeBars from "./analytics/TimeBars";
 import TrendLine from "./analytics/TrendLine";
 import WorldMap from "./analytics/WorldMap";
 import {
-	DashboardDisabled, DashboardForbidden, fetchMeta, fetchOverview,
+	DashboardDisabled, DashboardForbidden, DashboardSignedOut, fetchMeta, fetchOverview,
 	type Audience, type Filters, type Meta, type Overview,
 } from "./analytics/api";
 import {
-	count, dateInput, delta, duration, eventArea, eventLabel, titleCase,
+	count, dateInput, delta, duration, eventArea, eventLabel, lastDay, longDay, plural, serverTo, titleCase,
 } from "./analytics/format";
 import "./analytics/dashboard.css";
 
@@ -29,9 +29,9 @@ import "./analytics/dashboard.css";
 // feature-level detail this dashboard already had. Someone opening this page
 // wants the first four at a glance; the rest is what they came back for.
 
-const DEFAULT_FILTERS: Filters = {
-	from: dateInput(29),
-	to: dateInput(0),
+// The dates are worked out each time the page opens, not once at load: a tab
+// left open past midnight would otherwise start the window on a stale day.
+const BASE_FILTERS: Omit<Filters, "from" | "to"> = {
 	plan: "",
 	accountType: "",
 	audience: "all",
@@ -59,47 +59,133 @@ const LEAST_USED_SHOWN = 8;
 const COUNTRIES_SHOWN = 12;
 
 const AnalyticsSettings: React.FC = () => {
-	const { user } = useAuth();
+	const { user, promptAuth } = useAuth();
 	const isAdmin = !!user?.roles.includes("admin");
 
-	const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
+	const [filters, setFilters] = useState<Filters>(() => ({
+		...BASE_FILTERS, from: dateInput(29), to: dateInput(0),
+	}));
 	const [meta, setMeta] = useState<Meta | null>(null);
 	const [data, setData] = useState<Overview | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [fatal, setFatal] = useState(false);
+	const [signedOut, setSignedOut] = useState(false);
 	const [loading, setLoading] = useState(true);
+	// The country the response in `data` was fetched for. `data` stays on screen
+	// while the next request is out, so it can be about a different country than
+	// the one now in `filters`.
+	const [loadedCountry, setLoadedCountry] = useState("");
+	// The list beside the map stops at COUNTRIES_SHOWN; this lifts that cap so a
+	// country drawn on the map can also be picked from the keyboard.
+	const [allCountries, setAllCountries] = useState(false);
+	// Names seen so far, so the scope line can still name a country after a new
+	// range or filter leaves it with no rows.
+	const countryNames = useRef(new Map<string, string>());
+	const citiesHeading = useRef<HTMLHeadingElement>(null);
+	// Set when the list beside the map picked the country: its button is about
+	// to be replaced by the city list, so focus is handed to the heading.
+	const focusCities = useRef(false);
+	// Where focus goes when "Clear filters" or "Show the whole world" removes
+	// itself, so the next Tab continues from the filters, not the site header.
+	// "Show the whole world" sits under the range line, so that is where it
+	// lands; "Clear filters" is in the filter row, so it goes to the first filter.
+	const planSelect = useRef<HTMLSelectElement>(null);
+	const rangeNote = useRef<HTMLParagraphElement>(null);
 
 	const set = <K extends keyof Filters>(key: K, value: Filters[K]) =>
 		setFilters((f) => ({ ...f, [key]: value }));
 
+	// Filters change faster than the server answers (a date typed digit by
+	// digit, a country clicked and then cleared). Only the newest request may
+	// draw: an older one landing late would show figures, or an error, for a
+	// selection the controls no longer have.
+	const requestSeq = useRef(0);
+
+	// A date typed by hand can pass the other one (the inputs' min and max only
+	// limit the calendar popup). The server would refuse that range, and the
+	// refusal would blank every panel, so it is caught here: no request goes out
+	// and what is on screen stays until the dates agree again.
+	const badRange = !filters.allTime && filters.from > filters.to;
+	const rangeEnd = (end: string) => {
+		const sent = serverTo(filters.from, filters.to);
+		return !filters.allTime && sent !== filters.to && lastDay(end) === longDay(sent) ? longDay(filters.to) : lastDay(end);
+	};
+
 	const load = useCallback(async () => {
+		const id = ++requestSeq.current;
+		if (badRange) {
+			// Also drops a reply still out for the range before this one. A
+			// failure already on screen stays: a date typo must not hide it.
+			setLoading(false);
+			return;
+		}
 		setLoading(true);
 		setError(null);
 		try {
-			const [m, o] = await Promise.all([fetchMeta(), fetchOverview(filters)]);
+			const [m, o] = await Promise.all([fetchMeta(), fetchOverview({ ...filters, to: serverTo(filters.from, filters.to) })]);
+			if (id !== requestSeq.current) return;
 			setMeta(m);
+			for (const c of o.by_country) countryNames.current.set(c.country_code, c.country_name);
+			// A pick whose country never came back (an empty range) has no
+			// heading to hand focus to, so a later change must not claim it.
+			if (!o.by_country.some((c) => c.country_code === filters.country)) {
+				focusCities.current = false;
+			}
 			setData(o);
+			setLoadedCountry(filters.country);
 			setFatal(false);
+			setSignedOut(false);
 		} catch (e) {
+			if (id !== requestSeq.current) return;
 			// Switched off, or not yours: both are settled answers, so the page
 			// says so once instead of offering a retry that will fail the same way.
 			setFatal(e instanceof DashboardDisabled || e instanceof DashboardForbidden);
+			setSignedOut(e instanceof DashboardSignedOut);
+			focusCities.current = false;
 			setError(e instanceof Error ? e.message : "Something went wrong.");
 			setData(null);
 		} finally {
-			setLoading(false);
+			if (id === requestSeq.current) setLoading(false);
 		}
-	}, [filters]);
+	}, [filters, badRange]);
 
 	useEffect(() => {
 		if (isAdmin) load();
 	}, [isAdmin, load]);
 
+	// The country currently drilled into, if it's in the response. Read from the
+	// data rather than kept in its own state, so the heading can never name a
+	// country the figures below it aren't actually about. Only a response
+	// fetched for this country counts: the one still on screen after a pick is
+	// the world's, and has no cities in it.
+	const selectedCountry = filters.country && loadedCountry === filters.country
+		? data?.by_country.find((c) => c.country_code === filters.country)
+		: undefined;
+	const citiesOf = selectedCountry?.country_code;
+	useEffect(() => {
+		if (citiesOf && focusCities.current) {
+			focusCities.current = false;
+			citiesHeading.current?.focus();
+		}
+	}, [citiesOf]);
+
+	// Signing in again from the session-ended banner swaps the user object but
+	// not the admin flag or the filters, so the effect above would not run and
+	// the banner would outlive the sign-in until someone pressed Try again.
+	const lastUser = useRef(user);
+	useEffect(() => {
+		const changed = lastUser.current !== user;
+		lastUser.current = user;
+		if (changed && signedOut && isAdmin) load();
+	}, [user, signedOut, isAdmin, load]);
+
 	if (!isAdmin) {
 		return (
 			<div className="set-group">
-				<h2 className="set-heading">Usage</h2>
-				<p className="set-sub">You need an admin account to see this.</p>
+				<div className="set-head">
+					<h2 className="set-heading">Usage</h2>
+					<p className="set-sub">You need an admin account to see this.</p>
+				</div>
 			</div>
 		);
 	}
@@ -107,26 +193,20 @@ const AnalyticsSettings: React.FC = () => {
 	const totals = data?.totals;
 	const previous = data?.previous;
 
-	// The country currently drilled into, if it's in the response. Read from the
-	// data rather than kept in its own state, so the heading can never name a
-	// country the figures below it aren't actually about.
-	const selectedCountry = filters.country
-		? data?.by_country.find((c) => c.country_code === filters.country)
-		: undefined;
-
 	const countryBars: Bar[] = (data?.by_country ?? [])
-		.slice(0, COUNTRIES_SHOWN)
+		.slice(0, allCountries ? undefined : COUNTRIES_SHOWN)
 		.map((c) => ({
+			id: c.country_code,
 			label: c.country_name,
 			value: c.sessions,
-			note: `${count(c.people)} ${c.people === 1 ? "person" : "people"}`,
-			title: `${c.country_name}: ${count(c.sessions)} visits by ${count(c.people)} people`,
+			note: plural(c.people, "person", "people"),
+			title: `${c.country_name}: ${plural(c.sessions, "visit", "visits")} by ${plural(c.people, "person", "people")}`,
 		}));
 
 	const cityBars: Bar[] = (data?.by_city ?? []).map((c) => ({
 		label: [c.city, c.region].filter(Boolean).join(", "),
 		value: c.sessions,
-		note: `${count(c.people)} ${c.people === 1 ? "person" : "people"}`,
+		note: plural(c.people, "person", "people"),
 	}));
 
 	// Time is reported per route, and a route is how a feature is reached — so
@@ -135,15 +215,15 @@ const AnalyticsSettings: React.FC = () => {
 		label: r.route,
 		value: r.total_ms,
 		display: duration(r.total_ms),
-		note: `${count(r.views)} ${r.views === 1 ? "visit" : "visits"} · ${duration(r.avg_ms)} avg`,
-		title: `${r.route}: ${duration(r.total_ms)} across ${count(r.views)} visits by ${count(r.people)} people`,
+		note: `${plural(r.views, "visit", "visits")} · ${duration(r.avg_ms)} avg`,
+		title: `${r.route}: ${duration(r.total_ms)} across ${plural(r.views, "visit", "visits")} by ${plural(r.people, "person", "people")}`,
 	}));
 
 	const actionBars: Bar[] = (data?.top_actions ?? []).map((a) => ({
 		label: eventLabel(a.name),
 		value: a.count,
-		note: `${titleCase(eventArea(a.name))} · ${count(a.people)} ${a.people === 1 ? "person" : "people"}`,
-		title: `${a.name} — ${count(a.count)} times by ${count(a.people)} people`,
+		note: `${titleCase(eventArea(a.name))} · ${plural(a.people, "person", "people")}`,
+		title: `${a.name}: ${plural(a.count, "time", "times")} by ${plural(a.people, "person", "people")}`,
 	}));
 
 	// The least-used list has to be built against the full vocabulary, not
@@ -159,25 +239,30 @@ const AnalyticsSettings: React.FC = () => {
 				label: eventLabel(name),
 				value: hit?.count ?? 0,
 				note: hit
-					? `${titleCase(eventArea(name))} · ${count(hit.people)} ${hit.people === 1 ? "person" : "people"}`
+					? `${titleCase(eventArea(name))} · ${plural(hit.people, "person", "people")}`
 					: `${titleCase(eventArea(name))} · nobody`,
 				title: hit
-					? `${name} — ${count(hit.count)} times by ${count(hit.people)} people`
-					: `${name} — not used once in this range`,
+					? `${name}: ${plural(hit.count, "time", "times")} by ${plural(hit.people, "person", "people")}`
+					: `${name}: not used once in this range`,
 			}))
 		: [];
 
 	const planBars: Bar[] = (data?.by_plan ?? []).map((p) => ({
 		label: titleCase(p.plan),
 		value: p.events,
-		note: `${count(p.people)} ${p.people === 1 ? "person" : "people"}`,
+		note: plural(p.people, "person", "people"),
 	}));
 
 	const typeBars: Bar[] = (data?.by_account_type ?? []).map((t) => ({
 		label: titleCase(t.account_type),
 		value: t.events,
-		note: `${count(t.people)} ${t.people === 1 ? "person" : "people"}`,
+		note: plural(t.people, "person", "people"),
 	}));
+
+	const scopeName = filters.country
+		? countryNames.current.get(filters.country) ?? filters.country
+		: "";
+	const noVisitsHere = "No visits from this country in this range.";
 
 	const filtered = filters.plan || filters.accountType || filters.audience !== "all"
 		|| filters.country;
@@ -185,11 +270,13 @@ const AnalyticsSettings: React.FC = () => {
 	return (
 		<div className="dash">
 			<div className="set-group">
-				<h2 className="set-heading">Usage</h2>
-				<p className="set-sub">
-					Who comes to BodyMaps, where from, and what they do once they're here.
-					Visible to admins only.
-				</p>
+				<div className="set-head">
+					<h2 className="set-heading">Usage</h2>
+					<p className="set-sub">
+						Who comes to BodyMaps, where from, and what they do once they're here.
+						Visible to admins only.
+					</p>
+				</div>
 			</div>
 
 			{/* Filters sit in one row above everything they affect. */}
@@ -199,7 +286,9 @@ const AnalyticsSettings: React.FC = () => {
 					<input
 						type="date" className="set-input dash-input"
 						value={filters.from} max={filters.to} disabled={filters.allTime}
-						onChange={(e) => set("from", e.target.value)}
+						aria-invalid={badRange || undefined}
+						aria-describedby={badRange ? "dash-range-note" : undefined}
+						onChange={(e) => e.target.value && set("from", e.target.value)}
 					/>
 				</label>
 				<label className="dash-field">
@@ -208,12 +297,14 @@ const AnalyticsSettings: React.FC = () => {
 						type="date" className="set-input dash-input"
 						value={filters.to} min={filters.from} max={dateInput(0)}
 						disabled={filters.allTime}
-						onChange={(e) => set("to", e.target.value)}
+						aria-invalid={badRange || undefined}
+						aria-describedby={badRange ? "dash-range-note" : undefined}
+						onChange={(e) => e.target.value && set("to", e.target.value)}
 					/>
 				</label>
-				<div className="dash-field">
+				<div className="dash-field dash-field--full">
 					<span className="dash-field-label">Range</span>
-					<div className="set-segmented dash-segmented">
+					<div className="set-segmented dash-segmented" role="group" aria-label="Range">
 						{([false, true] as const).map((all) => (
 							<button
 								key={String(all)}
@@ -230,6 +321,7 @@ const AnalyticsSettings: React.FC = () => {
 				<label className="dash-field">
 					<span className="dash-field-label">Plan</span>
 					<select
+						ref={planSelect}
 						className="set-select dash-input" value={filters.plan}
 						onChange={(e) => set("plan", e.target.value)}
 					>
@@ -251,7 +343,7 @@ const AnalyticsSettings: React.FC = () => {
 						))}
 					</select>
 				</label>
-				<label className="dash-field">
+				<label className="dash-field dash-field--full">
 					<span className="dash-field-label">Audience</span>
 					<select
 						className="set-select dash-input" value={filters.audience}
@@ -262,12 +354,20 @@ const AnalyticsSettings: React.FC = () => {
 						))}
 					</select>
 				</label>
+				{badRange && (
+					<p id="dash-range-note" className="dash-range-note" role="alert">
+						The start date is after the end date.
+					</p>
+				)}
 				{filtered && (
 					<button
 						type="button" className="set-btn dash-reset"
-						onClick={() => setFilters((f) => ({
-							...f, plan: "", accountType: "", audience: "all", country: "",
-						}))}
+						onClick={() => {
+							setFilters((f) => ({
+								...f, plan: "", accountType: "", audience: "all", country: "",
+							}));
+							planSelect.current?.focus();
+						}}
 					>
 						Clear filters
 					</button>
@@ -275,10 +375,24 @@ const AnalyticsSettings: React.FC = () => {
 			</div>
 
 			{error && (
-				<div className="set-banner set-banner--error dash-banner">
+				<div className="set-banner set-banner--error dash-banner" role="alert">
 					{error}{" "}
-					{!fatal && (
-						<button type="button" className="dash-retry" onClick={load}>Try again</button>
+					{!fatal && !badRange && (
+						<button
+							type="button" className="dash-retry"
+							onClick={() => {
+								// The retry clears this banner, button and all, so focus goes
+								// to a control that stays rather than falling to the page.
+								planSelect.current?.focus();
+								load();
+							}}
+						>
+							Try again
+						</button>
+					)}
+					{!fatal && !badRange && signedOut && " "}
+					{signedOut && (
+						<button type="button" className="dash-retry" onClick={() => promptAuth()}>Sign in</button>
 					)}
 				</div>
 			)}
@@ -286,15 +400,29 @@ const AnalyticsSettings: React.FC = () => {
 			{loading && !data && !error && <p className="dash-empty">Loading…</p>}
 
 			{data && (
-				<>
+				<div className="dash-results" aria-busy={loading} data-busy={loading || undefined}>
+					{/* The span the server actually used: it caps a range at a year
+					    and falls back to 30 days, so the date fields alone can mislead.
+					    A range ending today goes out as the UTC day (see serverTo); when
+					    the server ran to that day, its end is named as the viewer's own
+					    today, like the To field. */}
+					<p className="dash-range" ref={rangeNote} tabIndex={-1}>
+						Showing {longDay(data.range.start)} to {rangeEnd(data.range.end)}.
+						{loading && " Updating…"}
+					</p>
+
 					{/* A country picked on the map filters everything below, so it
 					    is said once here rather than repeated on every panel. */}
-					{selectedCountry && (
+					{filters.country && (
 						<div className="dash-scope">
-							Showing <strong>{selectedCountry.country_name}</strong> only.{" "}
+							Showing <strong>{scopeName}</strong> only.{" "}
 							<button
 								type="button" className="dash-retry"
-								onClick={() => set("country", "")}
+								onClick={() => {
+									focusCities.current = false;
+									set("country", "");
+									rangeNote.current?.focus();
+								}}
 							>
 								Show the whole world
 							</button>
@@ -324,7 +452,7 @@ const AnalyticsSettings: React.FC = () => {
 					<section className="dash-panel">
 						<h2 className="set-heading">Activity</h2>
 						<p className="set-sub">Events per day across the selected range.</p>
-						<TrendLine points={data.daily} />
+						<TrendLine points={data.daily} start={data.range.start} end={data.range.end} />
 					</section>
 
 					<section className="dash-panel">
@@ -332,26 +460,55 @@ const AnalyticsSettings: React.FC = () => {
 						<p className="set-sub">
 							Worked out from each visitor's IP address on our own server.
 							Accurate to a city at best, and a VPN reports wherever it exits.
-							Click a country to see only its traffic.
+							Pick a country on the map or in the list to see only its traffic.
 						</p>
 						<div className="dash-map-row">
-							<WorldMap
-								rows={data.by_country}
-								selected={filters.country}
-								onSelect={(code) => set("country", code)}
-							/>
+							{/* An empty map under a country filter is not a server
+							    problem, so it gets its own sentence. */}
+							{filters.country && loadedCountry === filters.country && !data.by_country.length ? (
+								<p className="dash-empty">{noVisitsHere}</p>
+							) : (
+								<WorldMap
+									rows={data.by_country}
+									selected={filters.country}
+									onSelect={(code) => {
+										focusCities.current = false;
+										set("country", code);
+									}}
+								/>
+							)}
 							<div className="dash-map-side">
-								<h3 className="dash-subheading">
+								<h3 className="dash-subheading" ref={citiesHeading} tabIndex={-1}>
 									{selectedCountry ? `Cities in ${selectedCountry.country_name}` : "Top countries"}
 								</h3>
 								<BarList
 									bars={selectedCountry ? cityBars : countryBars}
+									onSelect={
+										selectedCountry
+											? undefined
+											: (code) => {
+												focusCities.current = code !== filters.country;
+												set("country", code === filters.country ? "" : code);
+											}
+									}
+									selected={filters.country}
 									empty={
 										selectedCountry
 											? "No city could be resolved for this country."
 											: "No locations recorded in this range."
 									}
 								/>
+								{!selectedCountry && data.by_country.length > COUNTRIES_SHOWN && (
+									<button
+										type="button" className="dash-retry dash-bars-more"
+										aria-expanded={allCountries}
+										onClick={() => setAllCountries((v) => !v)}
+									>
+										{allCountries
+											? `Show the top ${COUNTRIES_SHOWN} only`
+											: `Show all ${data.by_country.length} countries`}
+									</button>
+								)}
 							</div>
 						</div>
 					</section>
@@ -375,7 +532,7 @@ const AnalyticsSettings: React.FC = () => {
 							<h2 className="set-heading">New vs returning</h2>
 							<p className="set-sub">
 								"Returning" means this browser was seen here before the range
-								began — a cleared cookie starts someone over as new.
+								began. A cleared cookie starts someone over as new.
 							</p>
 							<Donut
 								slices={[
@@ -396,7 +553,7 @@ const AnalyticsSettings: React.FC = () => {
 					<section className="dash-panel">
 						<h2 className="set-heading">Most-used features</h2>
 						<p className="set-sub">
-							Counted per event, with the number of distinct people beside it —
+							Counted per event, with the number of distinct people beside it:
 							one person clicking forty times is not forty people.
 						</p>
 						<BarList bars={actionBars} empty="No actions recorded in this range." />
@@ -406,7 +563,7 @@ const AnalyticsSettings: React.FC = () => {
 						<h2 className="set-heading">Least-used features</h2>
 						<p className="set-sub">
 							The quietest {LEAST_USED_SHOWN} tracked actions. "Nobody" means not
-							once in this range — either it's hard to find, or it isn't wanted.
+							once in this range. Either it's hard to find, or it isn't wanted.
 						</p>
 						<BarList bars={leastBars} empty="Nothing is tracked yet." />
 					</section>
@@ -436,7 +593,7 @@ const AnalyticsSettings: React.FC = () => {
 							<BarList bars={typeBars} />
 						</section>
 					</div>
-				</>
+				</div>
 			)}
 		</div>
 	);
@@ -458,7 +615,8 @@ const Tile: React.FC<{
 				className={`dash-delta${change.up ? " dash-delta--up" : " dash-delta--down"}`}
 				title="Compared with the previous period of the same length"
 			>
-				{change.up ? "▲" : "▼"} {change.label}
+				<span aria-hidden="true">{change.up ? "▲" : "▼"}</span> {change.label}
+				<span className="dash-delta-sr"> compared with the previous period</span>
 			</span>
 		)}
 		{note && <span className="dash-tile-note">{note}</span>}

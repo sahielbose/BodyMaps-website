@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -152,14 +152,15 @@ describe("deleting an account", () => {
 		const dialog = await screen.findByRole("alertdialog");
 		const confirm = within(dialog).getByRole("button", { name: "Delete account" });
 
-		expect(confirm).toBeDisabled();
+		// aria-disabled rather than disabled, so it keeps keyboard focus.
+		expect(confirm).toHaveAttribute("aria-disabled", "true");
 
 		// Close, but not close enough.
 		await user.type(within(dialog).getByRole("textbox"), "someone@example.co");
-		expect(confirm).toBeDisabled();
+		expect(confirm).toHaveAttribute("aria-disabled", "true");
 
 		await user.type(within(dialog).getByRole("textbox"), "m");
-		expect(confirm).toBeEnabled();
+		expect(confirm).not.toHaveAttribute("aria-disabled");
 	});
 
 	it("says the deletion can be undone, because it can", async () => {
@@ -195,5 +196,49 @@ describe("deleting an account", () => {
 		await user.click(await screen.findByRole("button", { name: /Edit someone@example.com/ }));
 		expect(screen.queryByRole("button", { name: "Delete account" })).not.toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Restore account" })).toBeInTheDocument();
+	});
+});
+
+describe("focus around the confirmation", () => {
+	it("moves into the panel when an action is picked, and back to Edit on Cancel", async () => {
+		const user = userEvent.setup();
+		renderPage();
+		await choose(user, "Make admin");
+
+		const dialog = await screen.findByRole("alertdialog");
+		expect(document.activeElement).toBe(dialog);
+
+		await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+		expect(document.activeElement).toBe(screen.getByRole("button", { name: /Edit someone@example.com/ }));
+	});
+
+	it("gives focus back to Edit on Escape, from the menu and from the panel", async () => {
+		const user = userEvent.setup();
+		renderPage();
+		const edit = await screen.findByRole("button", { name: /Edit someone@example.com/ });
+
+		await user.click(edit);
+		screen.getByRole("button", { name: "Make admin" }).focus();
+		await user.keyboard("{Escape}");
+		expect(screen.queryByRole("group", { name: /Actions for/ })).toBeNull();
+		expect(document.activeElement).toBe(edit);
+
+		await choose(user, "Delete account");
+		expect(document.activeElement).toBe(screen.getByLabelText(/Type someone@example.com to confirm/));
+		await user.keyboard("{Escape}");
+		expect(screen.queryByRole("alertdialog")).toBeNull();
+		expect(document.activeElement).toBe(edit);
+	});
+
+	it("gives focus back to Edit once a change has gone through", async () => {
+		const user = userEvent.setup();
+		renderPage();
+		await choose(user, "Make admin");
+		await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Make admin" }));
+
+		await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+		await waitFor(() =>
+			expect(document.activeElement).toBe(screen.getByRole("button", { name: /Edit someone@example.com/ }))
+		);
 	});
 });

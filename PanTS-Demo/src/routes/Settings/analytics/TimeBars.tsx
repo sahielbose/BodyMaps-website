@@ -28,6 +28,9 @@ const TimeBars: React.FC<{
 	hour: { hour: number; sessions: number; people: number }[];
 }> = ({ weekday, hour }) => {
 	const [mode, setMode] = useState<Mode>("weekday");
+	// The slot whose figures are showing. Set by hover, focus or a tap, so the
+	// numbers are reachable without a mouse; a title attribute is not.
+	const [picked, setPicked] = useState<number | null>(null);
 
 	// Filled from a zeroed array rather than mapped from the response: a day
 	// with no visits has no row on the server, and it is precisely the gap the
@@ -51,32 +54,57 @@ const TimeBars: React.FC<{
 
 	if (!total) return <p className="dash-empty">No visits recorded in this range.</p>;
 
+	const slotName = (i: number) => (mode === "weekday" ? DAY_NAMES[i] : `${i}:00`);
+	const slotFigures = (i: number) =>
+		`${slotName(i)}: ${count(slots[i].sessions)} ${
+			slots[i].sessions === 1 ? "visit" : "visits"
+		} by ${count(slots[i].people)} ${slots[i].people === 1 ? "person" : "people"}`;
+
 	return (
 		<>
 			<div className="dash-timebars-head">
 				<select
 					className="set-select dash-input"
 					value={mode}
-					onChange={(e) => setMode(e.target.value as Mode)}
+					onChange={(e) => {
+						setMode(e.target.value as Mode);
+						setPicked(null);
+					}}
 					aria-label="Group visits by"
 				>
 					<option value="weekday">By day of the week</option>
 					<option value="hour">By hour of the day</option>
 				</select>
-				{mode === "hour" && (
-					// Not a footnote: an hour chart read in the wrong timezone is
-					// wrong in a way that looks perfectly plausible.
-					<span className="dash-timebars-note">Server time (UTC)</span>
-				)}
+				{/* Not a footnote: a chart read in the wrong timezone is wrong in a
+				    way that looks perfectly plausible. The server derives the
+				    weekday from the same UTC timestamps as the hour, so both
+				    views carry it. */}
+				<span className="dash-timebars-note">Server time (UTC)</span>
 			</div>
 
-			<div className={`dash-timebars${mode === "hour" ? " dash-timebars--dense" : ""}`}>
+			<div
+				className={`dash-timebars${mode === "hour" ? " dash-timebars--dense" : ""}`}
+				data-picked={picked !== null || undefined}
+			>
 				{slots.map((slot, i) => {
 					const label = mode === "weekday" ? DAY_NAMES[i] : hourLabel(i);
-					const full = mode === "weekday" ? DAY_NAMES[i] : `${i}:00`;
+					// The same sentence three times: the tooltip for a mouse, the
+					// accessible name for a screen reader, and the readout under the
+					// bars for touch and keyboard.
+					const figures = slotFigures(i);
 					return (
-						<div className="dash-timebar" key={i}>
-							<div
+						<button
+							type="button"
+							className={`dash-timebar${picked === i ? " dash-timebar--on" : ""}`}
+							key={i}
+							aria-label={figures}
+							aria-pressed={picked === i}
+							title={figures}
+							onMouseEnter={() => setPicked(i)}
+							onFocus={() => setPicked(i)}
+							onClick={() => setPicked(i)}
+						>
+							<span
 								className="dash-timebar-fill"
 								// A visited hour always shows something: a 1px sliver
 								// is the difference between "quiet" and "nobody", and
@@ -86,14 +114,19 @@ const TimeBars: React.FC<{
 										? `${Math.max(slot.sessions ? 2 : 0, (slot.sessions / max) * 100)}%`
 										: "0%",
 								}}
-								title={`${full}: ${count(slot.sessions)} ${
-									slot.sessions === 1 ? "visit" : "visits"
-								} by ${count(slot.people)} ${slot.people === 1 ? "person" : "people"}`}
 							/>
-							<span className="dash-timebar-label">{label}</span>
-						</div>
+							<span className="dash-timebar-label" aria-hidden="true">{label}</span>
+						</button>
 					);
 				})}
+			</div>
+
+			<div className="dash-trend-readout" aria-live="polite">
+				{picked !== null ? (
+					slotFigures(picked)
+				) : (
+					<span className="dash-trend-hint">Tap or hover a bar for its numbers</span>
+				)}
 			</div>
 		</>
 	);

@@ -3,7 +3,8 @@
 // Both need the server started with ANALYTICS_DASHBOARD=true *and* an admin
 // session. Those two refusals are different things and the page says so
 // differently: a 404 is "this deploy doesn't serve analytics at all", a 403 is
-// "you're signed in and this isn't yours". Neither is a bug to retry.
+// "you're signed in and this isn't yours". Neither is a bug to retry. A 401 is
+// neither: the session ended, and signing in again is the way forward.
 
 import { API_BASE } from "../../../helpers/constants";
 
@@ -74,6 +75,8 @@ export type Meta = {
 export class DashboardDisabled extends Error {}
 /** Signed in, but not an admin. */
 export class DashboardForbidden extends Error {}
+/** The session behind an admin's page has ended (cookie expired or revoked). */
+export class DashboardSignedOut extends Error {}
 
 const get = async <T,>(path: string): Promise<T> => {
 	let res: Response;
@@ -87,7 +90,10 @@ const get = async <T,>(path: string): Promise<T> => {
 			"This server isn't serving analytics. It needs to be started with ANALYTICS_DASHBOARD=true."
 		);
 	}
-	if (res.status === 401 || res.status === 403) {
+	if (res.status === 401) {
+		throw new DashboardSignedOut("Your session has ended. Sign in again.");
+	}
+	if (res.status === 403) {
 		throw new DashboardForbidden("You need an admin account to see usage data.");
 	}
 	if (!res.ok) {

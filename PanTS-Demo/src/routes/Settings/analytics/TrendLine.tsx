@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { count, shortDay } from "./format";
+import { useRef, useState } from "react";
+import { plural, shortDay } from "./format";
 
-// Activity over the range: one series, one line, hover for the day's numbers.
+// Activity over the range: one series, one line, hover (or arrow keys) for the
+// day's numbers.
 //
 // A line rather than bars because the question is the shape of the trend, not
 // the comparison of individual days. Single series, so no legend — the panel
@@ -13,8 +14,38 @@ const W = 720;
 const H = 160;
 const PAD = { top: 12, right: 12, bottom: 22, left: 12 };
 
-const TrendLine: React.FC<{ points: Point[] }> = ({ points }) => {
+const dayString = (d: Date): string =>
+	`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/** One entry per calendar day of the range. The server only has rows for days
+ *  with events, so a quiet day is filled in as zero: without it the line joins
+ *  the busy days as neighbours and a silent week reads as a gentle slope.
+ *  The end is exclusive when it is a picked "to" date (the next midnight),
+ *  the same reading `lastDay` gives it. */
+const everyDay = (points: Point[], start: string, end: string): Point[] => {
+	const byDay = new Map(points.map((p) => [p.day, p]));
+	const first = new Date(`${start.slice(0, 10)}T00:00:00`);
+	const last = new Date(`${end.slice(0, 10)}T00:00:00`);
+	if (Number.isNaN(first.getTime()) || Number.isNaN(last.getTime())) return points;
+	if (/T00:00:00(\.0+)?$/.test(end)) last.setDate(last.getDate() - 1);
+	const days: Point[] = [];
+	for (const d = first; d <= last; d.setDate(d.getDate() + 1)) {
+		const day = dayString(d);
+		days.push(byDay.get(day) ?? { day, events: 0, people: 0 });
+	}
+	// A row outside the stated range (a timezone edge) is kept, not dropped.
+	const shown = new Set(days.map((p) => p.day));
+	const extra = points.filter((p) => !shown.has(p.day));
+	return extra.length ? [...days, ...extra].sort((a, b) => (a.day < b.day ? -1 : 1)) : days;
+};
+
+const TrendLine: React.FC<{ points: Point[]; start: string; end: string }> = ({
+	points: rows, start, end,
+}) => {
 	const [hover, setHover] = useState<number | null>(null);
+	// Set when the chart took focus from a click or tap rather than the keyboard.
+	const pointerFocus = useRef(false);
+	const points = everyDay(rows, start, end);
 
 	if (points.length < 2) {
 		return <p className="dash-empty">Not enough days in this range to draw a trend.</p>;
@@ -39,9 +70,47 @@ const TrendLine: React.FC<{ points: Point[] }> = ({ points }) => {
 			<svg
 				viewBox={`0 0 ${W} ${H}`}
 				className="dash-trend-svg"
-				role="img"
+				// A slider rather than an image: the arrows, Home and End step
+				// through the days, and screen readers pass those keys through to
+				// a slider. One tab stop for the whole chart rather than one per
+				// day, since a range can be months long.
+				role="slider"
 				aria-label={`Events per day, ${shortDay(points[0].day)} to ${shortDay(points[points.length - 1].day)}`}
-				onMouseLeave={() => setHover(null)}
+				aria-orientation="horizontal"
+				aria-valuemin={1}
+				aria-valuemax={points.length}
+				aria-valuenow={(hover ?? 0) + 1}
+				aria-valuetext={active ? `${shortDay(active.day)}, ${plural(active.events, "event", "events")}, ${plural(active.people, "person", "people")}` : undefined}
+				tabIndex={0}
+				onFocus={() => setHover((h) => h ?? 0)}
+				// Only a mousedown that moves focus marks this as pointer focus. A click on
+				// a chart that is already focused leaves the mark alone, so a keyboard
+				// place is kept and a chart the mouse focused still clears on leave.
+				onMouseDown={(e) => {
+					if (document.activeElement !== e.currentTarget) pointerFocus.current = true;
+				}}
+				onKeyDown={(e) => {
+					const last = points.length - 1;
+					const next = e.key === "ArrowRight" ? Math.min((hover ?? -1) + 1, last)
+						: e.key === "ArrowLeft" ? Math.max((hover ?? last + 1) - 1, 0)
+						: e.key === "Home" ? 0
+						: e.key === "End" ? last
+						: null;
+					if (next === null) return;
+					e.preventDefault();
+					pointerFocus.current = false;
+					setHover(next);
+				}}
+				onBlur={() => {
+					pointerFocus.current = false;
+					setHover(null);
+				}}
+				// The same state holds the keyboard's place, so a pointer leaving a
+				// chart that still has keyboard focus must not take that place away.
+				// A chart focused by the click itself has no keyboard place to keep.
+				onMouseLeave={(e) => {
+					if (pointerFocus.current || document.activeElement !== e.currentTarget) setHover(null);
+				}}
 			>
 				<path d={area} className="dash-trend-area" />
 				<path d={line} className="dash-trend-line" />
@@ -88,11 +157,11 @@ const TrendLine: React.FC<{ points: Point[] }> = ({ points }) => {
 			<div className="dash-trend-readout" aria-live="polite">
 				{active ? (
 					<>
-						<strong>{shortDay(active.day)}</strong> · {count(active.events)} events ·{" "}
-						{count(active.people)} {active.people === 1 ? "person" : "people"}
+						<strong>{shortDay(active.day)}</strong> · {plural(active.events, "event", "events")} ·{" "}
+						{plural(active.people, "person", "people")}
 					</>
 				) : (
-					<span className="dash-trend-hint">Hover a day for its numbers</span>
+					<span className="dash-trend-hint">Hover or focus a day for its numbers</span>
 				)}
 			</div>
 		</div>

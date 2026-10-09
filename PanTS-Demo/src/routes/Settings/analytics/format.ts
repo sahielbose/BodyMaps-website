@@ -3,15 +3,22 @@
 /** "4m 12s", "1h 20m", "3.2s" — the largest unit that isn't a lie. */
 export const duration = (ms: number): string => {
 	if (!ms) return "0s";
-	const seconds = ms / 1000;
-	if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+	// A tenth of a second only while it still reads as under ten; past that the
+	// seconds are rounded first, so 59.6s carries into "1m 0s", not "60s".
+	if (ms < 9950) return `${(ms / 1000).toFixed(1)}s`;
+	const seconds = Math.round(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
 	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes}m ${Math.round(seconds % 60)}s`;
+	if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
 	const hours = Math.floor(minutes / 60);
 	return `${hours}h ${minutes % 60}m`;
 };
 
 export const count = (n: number): string => n.toLocaleString();
+
+/** "1 visit", "2 visits": a count with its noun agreeing with it. */
+export const plural = (n: number, one: string, many: string): string =>
+	`${count(n)} ${n === 1 ? one : many}`;
 
 /** First letter up, rest untouched — for plan names, account types, roles. */
 export const titleCase = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
@@ -42,11 +49,47 @@ export const shortDay = (iso: string): string => {
 	return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 };
 
-/** YYYY-MM-DD for an <input type="date">, n days back from today. */
+/** "8 Aug 2026": a day of the range the server actually used, where the year
+ *  matters. The server sends datetimes ("2026-09-01T00:00:00"), so only the
+ *  date part is read. */
+export const longDay = (iso: string): string => {
+	const d = new Date(`${iso.slice(0, 10)}T00:00:00`);
+	if (Number.isNaN(d.getTime())) return iso;
+	return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+};
+
+/** The last day a range covers. The server's end is exclusive when it is a
+ *  picked "to" date (the next midnight), so that reads as the day before. */
+export const lastDay = (iso: string): string => {
+	const midnight = /T00:00:00(\.0+)?$/.test(iso);
+	const d = new Date(`${iso.slice(0, 10)}T00:00:00`);
+	if (!midnight || Number.isNaN(d.getTime())) return longDay(iso);
+	d.setDate(d.getDate() - 1);
+	return longDay(dateString(d));
+};
+
+const dateString = (d: Date): string =>
+	`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/** YYYY-MM-DD for an <input type="date">, n days back from today, on the
+ *  viewer's own calendar (toISOString would read it in UTC, a day ahead of
+ *  evening viewers west of Greenwich). */
 export const dateInput = (daysAgo = 0): string => {
 	const d = new Date();
 	d.setDate(d.getDate() - daysAgo);
-	return d.toISOString().slice(0, 10);
+	return dateString(d);
+};
+
+/** The "to" date to send the server. It counts days in UTC and ends the range
+ *  at the end of that UTC day, so the viewer's own today (the default) would
+ *  stop at the next UTC midnight and drop the newest events for an evening
+ *  viewer west of Greenwich. Today is therefore sent as today's UTC date, which
+ *  runs through now; any other picked day goes as it is. */
+export const serverTo = (from: string, to: string): string => {
+	if (to !== dateInput(0)) return to;
+	const utcToday = new Date().toISOString().slice(0, 10);
+	// Ahead of Greenwich the UTC date can sit before a "from" picked as today.
+	return utcToday > from ? utcToday : to;
 };
 
 /** A figure against the same figure last period.

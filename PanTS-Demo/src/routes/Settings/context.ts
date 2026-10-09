@@ -8,8 +8,12 @@ import { createContext, useContext } from "react";
 
 export type SettingsContextValue = {
 	busy: boolean;
-	/** Runs an action, reporting failure in the shared banner. */
-	run: (fn: () => Promise<void>) => Promise<void>;
+	/**
+	 * Runs an action, reporting failure in the shared banner. `scope` names what
+	 * the action saves, so a queued retry of the same thing can clear the error
+	 * the earlier try left behind.
+	 */
+	run: (fn: () => Promise<void>, scope?: string) => Promise<void>;
 	notify: (message: string) => void;
 	fail: (message: string) => void;
 };

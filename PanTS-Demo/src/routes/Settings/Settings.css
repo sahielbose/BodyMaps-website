@@ -10,6 +10,9 @@
 	background: #fafafa;
 	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	color: #111111;
+	/* One height for every text field, select, date field and segmented toggle,
+	   so a row of mixed controls lines up. */
+	--set-control-h: 36px;
 }
 
 .set-main {
@@ -160,11 +163,12 @@
 	white-space: nowrap;
 	transition: background 0.15s, border-color 0.15s;
 }
-.set-btn:hover:not(:disabled) {
+.set-btn:hover:not(:disabled):not([aria-disabled="true"]) {
 	background: rgba(0, 0, 0, 0.04);
 	border-color: rgba(0, 0, 0, 0.28);
 }
-.set-btn:disabled {
+.set-btn:disabled,
+.set-btn[aria-disabled="true"] {
 	opacity: 0.5;
 	cursor: not-allowed;
 }
@@ -174,7 +178,7 @@
 	color: #ffffff;
 	font-weight: 600;
 }
-.set-btn--primary:hover:not(:disabled) {
+.set-btn--primary:hover:not(:disabled):not([aria-disabled="true"]) {
 	background: #00399a;
 	border-color: #00399a;
 }
@@ -182,7 +186,7 @@
 	color: #b91c1c;
 	border-color: rgba(239, 68, 68, 0.3);
 }
-.set-btn--danger:hover:not(:disabled) {
+.set-btn--danger:hover:not(:disabled):not([aria-disabled="true"]) {
 	background: rgba(239, 68, 68, 0.06);
 	border-color: rgba(239, 68, 68, 0.5);
 }
@@ -266,6 +270,11 @@
 	border-radius: 10px;
 	border: 1px solid rgba(239, 68, 68, 0.25);
 	background: rgba(239, 68, 68, 0.04);
+}
+/* Focus lands on the panel itself when it has no field to type in; it is the
+   boundary, not a control, so it takes no ring. */
+.set-confirm:focus {
+	outline: none;
 }
 .set-confirm-text {
 	font-size: 13px;
