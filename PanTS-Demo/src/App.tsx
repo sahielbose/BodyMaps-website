@@ -36,7 +36,6 @@ const ResetPassword = lazy(() => import("./routes/ResetPassword"));
 const VerifyEmail = lazy(() => import("./routes/VerifyEmail"));
 const LegalPage = lazy(() => import("./routes/LegalPage"));
 const SharePatientCard = lazy(() => import("./routes/SharePatientCard"));
-const RotatingHeartLoader = lazy(() => import("./components/Loading"));
 
 const BASENAME = import.meta.env.VITE_BASENAME;
 
@@ -119,7 +118,6 @@ function App() {
                     path="/reconstruction/:reconstructionId"
                     element={<VisualizationPage />}
                   />
-                  <Route path="/test" element={<RotatingHeartLoader />} />
                   <Route path="/upload" element={<UploadPage />} />
                   {/* Both sign in and sign up are the popup now. /login and
                       /signup stay routable so old links don't 404. */}
