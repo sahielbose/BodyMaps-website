@@ -38,6 +38,7 @@
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: #fb7185;
 }
 .vp-rec__clock {
@@ -69,6 +70,20 @@
   cursor: pointer;
 }
 .vp-rec__btn:hover { background: rgba(255, 255, 255, 0.16); }
+/* The key image count beside the camera. Up to 900px it is the only sign a
+   capture landed (the text counts are hidden there), so it shows at those
+   widths and re-plays a short pop with each new capture. */
+.vp-rec__shots {
+  display: none;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  animation: vp-rec-shot 260ms ease-out;
+}
+@keyframes vp-rec-shot {
+  from { transform: scale(1.5); }
+  to { transform: none; }
+}
 .vp-rec__stop {
   display: flex;
   align-items: center;
@@ -92,10 +107,29 @@
 }
 
 /* ---- Summary dialog ---- */
+/* Same entrance as the other viewer dialogs: the backdrop fades in and the
+   card rises a few pixels (opacity and transform only). */
+.vp-session-backdrop {
+  animation: vp-session-fade 160ms ease-out both;
+}
+.vp-session,
+.vp-report {
+  animation: vp-session-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes vp-session-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes vp-session-rise {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
 .vp-session-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 70;
+  /* Modal tier: above the AI sidebar (z 90), matching the other full-screen
+     viewer overlay (the annotation shortcut overlay, also 200). */
+  z-index: 200;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -107,6 +141,11 @@
 .vp-session {
   width: 520px;
   max-width: calc(100vw - 40px);
+  /* Short screens (a phone on its side): the card scrolls inside the backdrop
+     instead of being clipped top and bottom with Keep and Discard out of reach. */
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -117,6 +156,7 @@
   box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.9);
   color: var(--vp-text, rgba(255, 255, 255, 0.92));
 }
+.vp-session > * { flex-shrink: 0; } /* scroll the card, do not squash its rows */
 .vp-session__head {
   display: flex;
   align-items: flex-start;
@@ -129,9 +169,9 @@
   width: 40px;
   height: 40px;
   border-radius: 12px;
-  background: rgba(234, 179, 8, 0.14);
-  border: 1px solid rgba(234, 179, 8, 0.4);
-  color: #fbbf24;
+  background: rgba(110, 168, 254, 0.14);
+  border: 1px solid rgba(110, 168, 254, 0.4);
+  color: var(--vp-accent, #6ea8fe);
   flex: 0 0 auto;
 }
 .vp-session__headtext { flex: 1 1 auto; text-align: left; }
@@ -145,16 +185,30 @@
   font-size: 12.5px;
   color: var(--vp-text-dim, rgba(255, 255, 255, 0.5));
 }
+/* A 36px square target; the negative margin keeps the glyph where the old
+   bare "x" sat. Padding is set here because the global button padding would
+   otherwise swallow the glyph. */
 .vp-session__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  margin: -8px -8px 0 0;
+  padding: 0;
+  border-radius: 8px;
   background: transparent;
   border: none;
   color: var(--vp-text-dim, rgba(255, 255, 255, 0.5));
   font-size: 22px;
   line-height: 1;
   cursor: pointer;
-  padding: 0 4px;
 }
-.vp-session__close:hover { color: var(--vp-text, rgba(255, 255, 255, 0.92)); }
+.vp-session__close:hover {
+  background: var(--vp-hover, rgba(255, 255, 255, 0.08));
+  color: var(--vp-text, rgba(255, 255, 255, 0.92));
+}
 .vp-session__audio {
   width: 100%;
   height: 40px;
@@ -184,11 +238,11 @@
 .vp-session__t {
   font-family: var(--vp-mono, monospace);
   font-size: 10.5px;
-  color: var(--vp-text-faint, rgba(255, 255, 255, 0.36));
+  color: var(--vp-text-dim, rgba(255, 255, 255, 0.5));
   margin-right: 4px;
 }
 .vp-session__more {
-  color: var(--vp-text-faint, rgba(255, 255, 255, 0.36));
+  color: var(--vp-text-dim, rgba(255, 255, 255, 0.5));
   font-size: 11.5px;
 }
 .vp-session__actions {
@@ -211,27 +265,43 @@
   cursor: pointer;
 }
 .vp-session__btn:hover { background: var(--vp-hover, rgba(255, 255, 255, 0.1)); }
-.vp-session__btn:disabled { opacity: 0.55; cursor: default; }
+.vp-session__btn:disabled,
+.vp-session__btn[aria-disabled="true"] { opacity: 0.55; cursor: default; }
+/* The viewer's own accent, not a one-off amber. */
 .vp-session__btn--primary {
-  background: #fbbf24;
-  border-color: #fbbf24;
-  color: #1c1503;
+  background: var(--vp-accent, #6ea8fe);
+  border-color: var(--vp-accent, #6ea8fe);
+  color: #08090b;
 }
-.vp-session__btn--primary:hover { background: #f59e0b; }
+.vp-session__btn--primary:hover { background: #8fbcff; }
+.vp-session__btn--danger {
+  border-color: rgba(244, 63, 94, 0.55);
+  background: rgba(244, 63, 94, 0.14);
+  color: #fecdd3;
+}
+.vp-session__btn--danger:hover { background: rgba(244, 63, 94, 0.28); }
+.vp-session__note {
+  margin: -4px 0 0;
+  font-size: 12.5px;
+  color: var(--vp-text-dim, rgba(255, 255, 255, 0.5));
+  text-align: left;
+}
 .vp-session__foot {
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: 11.5px;
-  color: var(--vp-text-faint, rgba(255, 255, 255, 0.36));
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--vp-text-dim, rgba(255, 255, 255, 0.5));
   text-align: left;
 }
+.vp-session__ask { flex: 1 1 100%; }
 .vp-session__discard {
   background: transparent;
   border: none;
-  padding: 0;
+  padding: 6px 0;
   color: var(--vp-text-dim, rgba(255, 255, 255, 0.5));
-  font-size: 12px;
+  font-size: 12.5px;
   text-decoration: underline;
   cursor: pointer;
   white-space: nowrap;
@@ -243,6 +313,7 @@
   width: 900px;
   max-width: calc(100vw - 40px);
   height: calc(100vh - 60px);
+  height: calc(100dvh - 60px);
   display: flex;
   flex-direction: column;
   border-radius: 14px;
@@ -256,7 +327,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 10px 14px;
+  /* The same 24px side inset as the report document's body in the frame below
+     (helpers/sessionReport.ts), so the title lines up with the text. */
+  padding: 10px 24px;
   border-bottom: 1px solid var(--vp-border, rgba(255, 255, 255, 0.09));
   color: var(--vp-text, rgba(255, 255, 255, 0.92));
 }
@@ -269,9 +342,68 @@
   align-items: center;
   gap: 8px;
 }
+.vp-report__actions .vp-session__close { margin: 0; }
 .vp-report__frame {
   flex: 1 1 auto;
   width: 100%;
   border: none;
   background: #ffffff;
+}
+
+/* Keyboard focus on every control in the pill and the dialogs. */
+.vp-rec__btn:focus-visible,
+.vp-rec__stop:focus-visible,
+.vp-session__btn:focus-visible,
+.vp-session__close:focus-visible,
+.vp-session__discard:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  outline-offset: 2px;
+}
+
+/* Phones: the summary and report controls stack at one width. */
+@media (max-width: 640px) {
+  .vp-session {
+    padding: 16px;
+  }
+  .vp-session__actions {
+    flex-direction: column;
+  }
+  .vp-session__actions .vp-session__btn {
+    width: 100%;
+    justify-content: center;
+  }
+  /* The close button stays in the title row, pinned to the bar's top right
+     corner, so only the download buttons drop to the second row. */
+  .vp-report__bar {
+    position: relative;
+    flex-wrap: wrap;
+  }
+  /* No grow: the title stays clear of the close button pinned to its right,
+     even alone on its line once the actions wrap below it. */
+  .vp-report__title {
+    flex: 0 1 calc(100% - 44px);
+  }
+  .vp-report__actions {
+    flex: 1 1 100%;
+  }
+  .vp-report__actions .vp-session__btn {
+    padding: 7px 10px;
+  }
+  .vp-report__actions .vp-session__close {
+    position: absolute;
+    top: 2px;
+    right: 16px;
+    margin: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vp-rec__dot,
+  .vp-rec__dot::after,
+  .vp-rec__shots,
+  .vp-session-backdrop,
+  .vp-session,
+  .vp-report {
+    animation: none !important;
+  }
 }

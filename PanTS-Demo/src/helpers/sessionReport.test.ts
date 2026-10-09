@@ -63,11 +63,32 @@ describe("summarizeTechnique", () => {
 describe("buildReportMarkdown", () => {
 	it("includes dictation, measurements and timeline", () => {
 		const md = buildReportMarkdown(baseInput);
-		expect(md).toContain("# Draft reading report — case 42");
+		expect(md).toContain("# Draft reading report for case 42");
 		expect(md).toContain("small lesion in the liver dome");
 		expect(md).toContain("| 1 | Distance | lesion | 23.1 mm |");
 		expect(md).toContain("Applied Lung window");
 		expect(md).toContain("not medical advice");
+	});
+});
+
+describe("report template copy", () => {
+	// The fixture's own event and shot text is user data; strip it so only
+	// the template's words are checked.
+	const plain: ReportInput = {
+		...baseInput,
+		events: [{ t: 0, type: "session", detail: "Reading session started" }],
+		shots: [],
+		measurements: [{ tool: "Length", label: "", value: "12 mm" }],
+	};
+
+	it("uses no em dashes, even for a measurement with no label", () => {
+		const md = buildReportMarkdown(plain);
+		const html = buildReportHtml(plain);
+		expect(md).not.toMatch(/\u2014/);
+		expect(html).not.toMatch(/\u2014/);
+		expect(md).toContain("| 1 | Distance | No label | 12 mm |");
+		expect(html).toContain("<td>No label</td>");
+		expect(html).toContain("<h1>Draft reading report for case 42</h1>");
 	});
 });
 

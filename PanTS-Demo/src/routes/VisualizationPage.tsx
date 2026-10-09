@@ -53,6 +53,7 @@ import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
 import { captureMeshCanvas } from "../helpers/viewer/meshCapture";
 import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
+import { createCaptureTracker } from "../helpers/captureTracker";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
 import SessionSummary from "../components/ReadingSession/SessionSummary";
 import { dropStaleGuardEntry, guardLeaving, leavePageTo, pageNav } from "../helpers/leaveGuard";
@@ -233,6 +234,7 @@ import { classInSentence, filenameToName } from "../helpers/utils.name";
 import { decodeViewerState, encodeViewerState, VIEWER_STATE_PARAMS } from "../helpers/viewerShareState";
 import { scrollRowToActive } from "../helpers/scrollRowToActive";
 import { meshCheckStateFor, meshesHeldBack } from "../helpers/meshVisibility";
+import { caseFileSlug, isCaseId } from "../helpers/sessionReport";
 import { LiveRoomDock, LiveRoomHeader } from "../liveRooms/LiveRoomChrome";
 import LiveRoomCreateDialog from "../liveRooms/LiveRoomCreateDialog";
 import { appRootRelativeUrl } from "../liveRooms/protocol";
@@ -1946,9 +1948,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// Reading session (voice-assisted case review). The ref mirrors the state so event
 	// handlers and Cornerstone subscriptions can log without re-subscribing on start/stop.
 	const sessionRef = useRef<ReadingSession | null>(null);
+	// Captures still rasterising for the running session; Stop waits for them so the
+	// last key image lands before the session closes.
+	const [captureTracker] = useState(createCaptureTracker);
 	const [readingSession, setReadingSession] = useState<ReadingSession | null>(null);
 	const [sessionStarting, setSessionStarting] = useState(false);
 	const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
+	// Set once the finished session has been downloaded (bundle or report), after which
+	// leaving loses nothing.
+	const [sessionSaved, setSessionSaved] = useState(false);
 	const [sessionMeasurements, setSessionMeasurements] = useState<ReportMeasurement[]>([]);
 	// Friendly name shown in the toolbar in place of the raw session UUID. Reads
 	// from the SAME localStorage record the Upload page's "Completed Uploads"
@@ -1977,6 +1985,17 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		if (!sessionId) { setScanLabel(null); return; }
 		setScanLabel(ownScan()?.label ?? null);
 	}, [sessionId, ownScan]);
+	// What snapshots, reading sessions and their reports call this scan: a dataset case
+	// keeps its id, an upload its own name, and a local file says what it is.
+	const readingLabel = isLocalNifti
+		? "the local NIfTI scan"
+		: isDicom
+			? "the local DICOM scan"
+			: sessionId
+				? scanLabel ? (isCaseId(scanLabel) ? `scan ${scanLabel}` : scanLabel) : "the uploaded scan"
+				: String(caseId);
+	// An uploaded scan's exports carry its name, not its session id.
+	const statsFileStem = sessionId ? caseFileSlug(readingLabel) : undefined;
 	// Enter or Escape unmounts the focused rename input; the rename button takes
 	// focus back (a click elsewhere leaves focus where the person put it).
 	const scanRenameBtnRef = useRef<HTMLButtonElement>(null);
@@ -2173,24 +2192,34 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 	// Capture the visible panes (with annotations). During a session the shot joins the
 	// session's key images; outside one it downloads as a single side-by-side PNG.
-	const takeSnapshot = useCallback(async (label?: string) => {
-		const images = await captureViewportImages();
-		if (!images.length) return;
-		const session = sessionRef.current;
-		if (session) {
-			session.addShot(label ?? "Key image", images);
-			session.log("screenshot", label ?? `Key image (${images.map((im) => im.name).join(", ")})`);
-		} else {
-			const composite = await composeImagesSideBySide(images);
-			if (!composite) return;
-			const link = document.createElement("a");
-			link.href = composite;
-			link.download = `case${caseId}_snapshot.png`;
-			document.body.appendChild(link);
-			link.click();
-			document.body.removeChild(link);
-		}
-	}, [caseId]);
+	// `session` is read when the capture is asked for, not after the panes rasterise: a
+	// capture that began inside a session never falls through to a download, and Stop
+	// waits for it so the shot is added before the session closes.
+	const takeSnapshot = useCallback((label?: string, session: ReadingSession | null = sessionRef.current) => {
+		const capture = (async () => {
+			const images = await captureViewportImages();
+			if (!images.length) {
+				// Only a person's own Snapshot asks for a reply; the automatic key images stay quiet.
+				if (!label) showToolNotice("Snapshots capture the slice views. Switch to MPR or a single slice view.");
+				return;
+			}
+			if (session) {
+				session.addShot(label ?? "Key image", images);
+				session.log("screenshot", label ?? `Key image (${images.map((im) => im.name).join(", ")})`);
+			} else {
+				const composite = await composeImagesSideBySide(images);
+				if (!composite) return;
+				const link = document.createElement("a");
+				link.href = composite;
+				link.download = `${caseFileSlug(readingLabel)}_snapshot.png`;
+				document.body.appendChild(link);
+				link.click();
+				document.body.removeChild(link);
+			}
+		})();
+		captureTracker.track(capture);
+		return capture;
+	}, [readingLabel, captureTracker, showToolNotice]);
 
 	// Downscale a screenshot so the vision model gets a small, fast-to-process
 	// image (full-res panes make local vision models slow and prone to timeout).
@@ -2329,18 +2358,25 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		setAiWidth(aiWidthRef.current);
 	}, []);
 
+	const pageMountedRef = useRef(true);
 	const startReadingSession = async () => {
 		if (sessionRef.current || sessionStarting) return;
 		setSessionStarting(true);
 		try {
-			const session = await ReadingSession.start(String(caseId));
+			const session = await ReadingSession.start(readingLabel);
+			// The reader left while the microphone prompt was open: nothing is left to
+			// show or stop this session, so release the mic right away.
+			if (!pageMountedRef.current) {
+				void session.stop();
+				return;
+			}
 			sessionRef.current = session;
 			setReadingSession(session);
 			session.log(
 				"session",
 				session.micGranted
-					? "Reading session started — narration recording"
-					: "Reading session started — no microphone, events only"
+					? "Reading session started, recording narration"
+					: "Reading session started without a microphone, logging events only"
 			);
 		} finally {
 			setSessionStarting(false);
@@ -2358,14 +2394,19 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			label: m.label,
 			value: m.value,
 		}));
+		// Let a key image that is mid-capture finish first; addShot ignores a stopped session.
+		await captureTracker.settled();
 		const result = await session.stop();
 		setSessionMeasurements(measurements);
+		setSessionSaved(false);
 		setSessionResult(result);
 	};
 
 	// If the user navigates away mid-session, release the microphone.
 	useEffect(() => {
+		pageMountedRef.current = true;
 		return () => {
+			pageMountedRef.current = false;
 			void sessionRef.current?.stop();
 			sessionRef.current = null;
 		};
@@ -2373,7 +2414,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 	// A recording, or a finished one whose summary is still open, is thrown away when the
 	// viewer unmounts, so closing the tab, following a link or pressing Back asks first.
-	const hasUnsavedSession = readingSession !== null || sessionResult !== null;
+	// Once it has been downloaded, the summary no longer counts as unsaved.
+	const hasUnsavedSession = readingSession !== null || (sessionResult !== null && !sessionSaved);
 	// Mask edits and measurements live only in this page's memory and nothing here saves
 	// them, so they are lost the same way: the question toggleHd asks before it reloads.
 	// A live room keeps them as they are made, and a submitted solo challenge has already
@@ -2425,18 +2467,23 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			if (kind === "completed") {
 				track("viewer_measure");
 			}
-			if (kind === "completed" && sessionRef.current) {
+			const session = sessionRef.current;
+			if (kind === "completed" && session) {
 				// A tool with no value to show (an arrow note) is logged without one.
-				sessionRef.current.log("measure", m.value ? `${toolDisplayName(m.tool)} measured: ${m.value}` : `${toolDisplayName(m.tool)} added`);
-				requestAnimationFrame(() => {
-					void takeSnapshot(m.value ? `${toolDisplayName(m.tool)} — ${m.value}` : toolDisplayName(m.tool));
-				});
-			} else if (kind === "removed" && sessionRef.current) {
-				sessionRef.current.log("measure", `Removed a ${toolDisplayName(m.tool)} measurement`);
+				session.log("measure", m.value ? `${toolDisplayName(m.tool)} measured: ${m.value}` : `${toolDisplayName(m.tool)} added`);
+				// Tracked from now, not from the next frame, so a Stop in between still
+				// waits for the key image; the session is passed on for the same reason.
+				captureTracker.track(new Promise<void>((resolve) => {
+					requestAnimationFrame(() => {
+						void takeSnapshot(m.value ? `${toolDisplayName(m.tool)}: ${m.value}` : toolDisplayName(m.tool), session).finally(resolve);
+					});
+				}));
+			} else if (kind === "removed" && session) {
+				session.log("measure", `Removed a ${toolDisplayName(m.tool)} measurement`);
 			}
 		});
 		return unsubscribe;
-	}, [takeSnapshot, liveRoomConnected, sendLiveRoomDurable, isSoloChallenge, setSoloChallengeMeasurement]);
+	}, [takeSnapshot, captureTracker, liveRoomConnected, sendLiveRoomDurable, isSoloChallenge, setSoloChallengeMeasurement]);
 
 	useEffect(() => {
 		if (!soloChallenge || soloChallenge.result || soloChallenge.remainingSeconds > 0) return;
@@ -4154,7 +4201,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		const value = Number(event.target.value);
 		setOpacityValue(value);
 		setFillOpacity(value / 100);
-		sessionRef.current?.log("opacity", `Fill opacity set to ${value}%`, 1200);
+		sessionRef.current?.log("opacity-fill", `Fill opacity set to ${value}%`, 1200);
 	};
 
 	const handleOutlineOpacityChange = (
@@ -4163,7 +4210,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		const value = Number(event.target.value);
 		setOutlineOpacityValue(value);
 		setOutlineOpacity(value / 100);
-		sessionRef.current?.log("opacity", `Border opacity set to ${value}%`, 1200);
+		sessionRef.current?.log("opacity-border", `Border opacity set to ${value}%`, 1200);
 	};
 
 
@@ -5960,7 +6007,7 @@ const aiAvailableOrgans = useMemo(() => {
 								<button
 									type="button"
 									className="vp-panel-head__chip"
-									onClick={() => downloadStats(statRows, "csv", caseId)}
+									onClick={() => downloadStats(statRows, "csv", caseId, statsFileStem)}
 									title="Download as CSV"
 								>
 									CSV
@@ -5968,7 +6015,7 @@ const aiAvailableOrgans = useMemo(() => {
 								<button
 									type="button"
 									className="vp-panel-head__chip"
-									onClick={() => downloadStats(statRows, "json", caseId)}
+									onClick={() => downloadStats(statRows, "json", caseId, statsFileStem)}
 									title="Download as JSON"
 								>
 									JSON
@@ -6449,6 +6496,8 @@ const aiAvailableOrgans = useMemo(() => {
 				<SessionSummary
 					result={sessionResult}
 					measurements={sessionMeasurements}
+					saved={sessionSaved}
+					onSaved={() => setSessionSaved(true)}
 					onDiscard={() => {
 						// The Stop control that opened this is gone, so there is no
 						// opener to restore: hand focus back to the Capture button.
