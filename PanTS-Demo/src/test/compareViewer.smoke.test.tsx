@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AuthProvider } from "../contexts/authContext";
 
 // The dual viewer pulls the Cornerstone WebGL stack, which can't run under jsdom — mock
 // the isolated setup helper so we can verify the page mounts + lays out two panes.
@@ -59,13 +60,16 @@ beforeEach(() => {
 });
 afterEach(() => vi.clearAllMocks());
 
+// The missing-ids page carries the shared site header, which needs the auth context.
 const renderAt = (path: string) =>
 	render(
-		<MemoryRouter initialEntries={[path]}>
-			<Routes>
-				<Route path="/compare-viewer" element={<CompareViewerPage />} />
-			</Routes>
-		</MemoryRouter>
+		<AuthProvider>
+			<MemoryRouter initialEntries={[path]}>
+				<Routes>
+					<Route path="/compare-viewer" element={<CompareViewerPage />} />
+				</Routes>
+			</MemoryRouter>
+		</AuthProvider>
 	);
 
 describe("CompareViewerPage", () => {
@@ -74,19 +78,42 @@ describe("CompareViewerPage", () => {
 		expect(await screen.findByText("Case 1")).toBeTruthy();
 		expect(await screen.findByText("Case 2")).toBeTruthy();
 
-		// The toolbar (and its Sync group) is hidden by default, like the single viewer's
-		// top toolbar — reveal it via the floating gear, then open the Sync flyout.
-		fireEvent.click(await screen.findByRole("button", { name: /toggle toolbar/i }));
-		fireEvent.click(screen.getByRole("button", { name: /^sync$/i }));
+		// The toolbar opens shown, like the single viewer's top toolbar: open the Sync flyout.
+		fireEvent.click(await screen.findByRole("button", { name: /^sync$/i }));
 		expect(screen.getByText(/Link scroll/i)).toBeTruthy();
 
 		// The isolated Cornerstone setup is invoked once with both viewport elements.
 		await vi.waitFor(() => expect(setupCompare).toHaveBeenCalledTimes(1));
 	});
 
-	it("prompts when ids are missing", async () => {
+	it("explains a missing id in plain words, with a way to the dataset", async () => {
 		renderAt("/compare-viewer");
-		expect(await screen.findByText(/Provide two case ids/i)).toBeTruthy();
+		expect(await screen.findByRole("heading", { level: 1, name: "Choose two cases to compare" })).toBeTruthy();
+		expect(screen.getByRole("link", { name: "Browse the dataset" })).toHaveAttribute("href", "/dashboard");
+		expect(screen.getByRole("link", { name: "Open the compare page" })).toHaveAttribute("href", "/compare");
+		expect(screen.queryByText(/compare-viewer\?a=/)).toBeNull();
 		expect(setupCompare).not.toHaveBeenCalled();
+	});
+
+	it("keeps the one id it was given when sending the reader to the compare page", async () => {
+		renderAt("/compare-viewer?a=7");
+		expect(await screen.findByRole("link", { name: "Open the compare page" })).toHaveAttribute("href", "/compare?a=7");
+		expect(setupCompare).not.toHaveBeenCalled();
+	});
+
+	it("ends a failed load in an error naming the case, with a way back (no endless spinner)", async () => {
+		// What setupCompare throws when case A's CT answers 404.
+		setupCompare.mockRejectedValueOnce(Object.assign(new Error("HTTP 404"), { which: "a" }));
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		renderAt("/compare-viewer?a=99999999&b=2");
+
+		expect(await screen.findByRole("alert")).toHaveTextContent("Case 99999999 couldn't be loaded.");
+		expect(screen.queryByText(/Loading both cases/)).toBeNull();
+		expect(screen.getByRole("link", { name: "Back to the comparison" })).toHaveAttribute(
+			"href",
+			"/compare?a=99999999&b=2"
+		);
+		expect(screen.getByRole("link", { name: "Browse the dataset" })).toHaveAttribute("href", "/dashboard");
+		errorLog.mockRestore();
 	});
 });

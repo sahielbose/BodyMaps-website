@@ -1,5 +1,7 @@
 .cmv {
   height: 100vh;
+  /* The dynamic viewport excludes the phone browser's toolbar, which 100vh runs under. */
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   background: #08090b;
@@ -15,111 +17,77 @@
   --vp-border: rgba(255, 255, 255, 0.09);
   --vp-border-strong: rgba(255, 255, 255, 0.16);
   --vp-text: rgba(255, 255, 255, 0.92);
-  --vp-text-dim: rgba(255, 255, 255, 0.5);
-  --vp-text-faint: rgba(255, 255, 255, 0.36);
+  --vp-text-dim: rgba(255, 255, 255, 0.7);
+  --vp-text-faint: rgba(255, 255, 255, 0.5);
   --vp-hover: rgba(255, 255, 255, 0.1);
   --vp-accent: #6ea8fe;
   --vp-font: var(--font-sans);
   --vp-mono: var(--font-mono);
 }
 
-.cmv__bar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  flex-shrink: 0;
-  flex-wrap: wrap;
-}
-.cmv__home {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  color: #f4f5f7;
-  text-decoration: none;
-  font-size: 17px;
-}
-.cmv__home:hover { background: rgba(255, 255, 255, 0.08); }
-.cmv__title { font-size: 16px; font-weight: 600; margin: 0; }
-.cmv__ids {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 13px;
-  color: rgba(255, 255, 255, 0.5);
-  font-weight: 400;
-}
-.cmv__gear {
-  -webkit-appearance: none;
-  appearance: none;
-  outline: none;
-  padding: 0;
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.05);
-  color: #f4f5f7;
-  cursor: pointer;
-}
-.cmv__gear:hover { background: rgba(255, 255, 255, 0.1); }
-/* Active = subtle accent tint (not a white fill) so the light icon stays visible. */
-.cmv__gear.is-active { background: rgba(231, 111, 81, 0.3); border-color: var(--accent); }
-
-/* The toolbar is collapsed by default. Keep its reveal control in a small
-   dedicated chrome row instead of floating it over the first viewport, where
-   it could cover a case label or other viewer text. */
+/* When the toolbar is collapsed, keep its reveal control in a small dedicated
+   chrome row instead of floating it over the first viewport, where it could
+   cover a case label or other viewer text. Same padding and height as the
+   .vp-topbar it swaps with (12px + 36px button + 12px + 1px border), so the
+   panes do not shift when the toolbar opens. The button sits at the right, where
+   the open bar's toggle ends its row, so Home never moves under it. */
 .cmv__collapsedbar {
   flex: 0 0 auto;
-  min-height: 58px;
+  min-height: 61px;
   display: flex;
   align-items: center;
-  padding: 10px 18px;
+  justify-content: flex-end;
+  padding: 12px 20px;
   box-sizing: border-box;
   background: rgba(14, 15, 18, 0.96);
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .cmv__collapsedbar .vp-floating-gear {
   flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
 }
 
-/* Body = settings sidebar + the viewport grid. */
-.cmv__body { flex: 1; display: flex; min-height: 0; }
-/* Layout only — the vp-sidebar class (from the single viewer) supplies the backdrop,
-   border and scrollbar so the panel is visually identical to the single viewer. */
-.cmv__settings {
-  width: 256px;
-  flex-shrink: 0;
-  overflow-y: auto;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+/* The toggle is the last item in the open bar, after Home and the case ids; the
+   auto margin sends it to the end of the last row. */
+.cmv .vp-topbar .cmv__tbtoggle {
+  margin-left: auto;
 }
-.cmv__toggle {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 13px;
-  color: rgba(255, 255, 255, 0.8);
-  cursor: pointer;
-  user-select: none;
-}
-.cmv__toggle input { accent-color: var(--accent); width: 15px; height: 15px; }
 
-.cmv__msg { margin: auto; color: rgba(255, 255, 255, 0.55); font-size: 14px; }
-.cmv__msg code {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  background: rgba(255, 255, 255, 0.08);
-  padding: 2px 6px;
-  border-radius: 5px;
+/* The bar is not inside .vp-topbar, so it repeats that bar's rules by hand. */
+@media (max-width: 640px) {
+  .cmv__collapsedbar {
+    min-height: 51px;
+    padding: 8px 10px;
+  }
+  .cmv__collapsedbar .vp-floating-gear {
+    width: 34px;
+    height: 34px;
+  }
+}
+
+/* The bar wraps to a second row below 1160px (its own width, not the
+   window's), where the group dividers only dangle at row ends. The single
+   viewer scopes this same rule to .VisualizationPage, which this page is not. */
+@container vp-topbar (max-width: 1160px) {
+  .cmv .vp-tb-divider {
+    display: none;
+  }
+}
+
+/* Organs and Measurements are toggles, not menus, so the popover rule in
+   VisualizationPage.css (which needs aria-haspopup) does not cover them: a
+   pressed toggle opens a panel over the spot its tooltip points at. */
+.cmv .vp-tool[aria-pressed="true"] .vp-tool__tip {
+  visibility: hidden;
+}
+
+/* View labels: content-sized like the bar's own segmented controls. The
+   flyout is portaled out of .vp-topbar, so the equal-width segments would
+   otherwise squeeze "Sagittal" and "Coronal" out of their pills. */
+.cmv__viewseg .vp-seg__btn {
+  flex: 1 1 auto;
+  padding-inline: 12px;
 }
 
 .cmv__grid {
@@ -129,6 +97,9 @@
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  /* Lets the plane layout below follow the grid's width, which a dock narrows. */
+  container-type: inline-size;
+  container-name: cmvgrid;
 }
 /* One row per case; the divider between rows separates the two patients. */
 .cmv__caserow {
@@ -137,6 +108,8 @@
   grid-template-columns: 1fr 1fr 1fr;
   gap: 2px;
   min-height: 0;
+  /* Shows through the gap as a hairline between planes; the cells stay black. */
+  background: rgba(255, 255, 255, 0.14);
 }
 .cmv__caserow:first-child { border-bottom: 2px solid rgba(255, 255, 255, 0.14); }
 .cmv__cell {
@@ -153,7 +126,9 @@
   font-size: 12px;
   font-weight: 600;
   color: #fff;
-  background: rgba(37, 99, 235, 0.8);
+  /* JHU blue, with a light edge so it stays visible on the black CT canvas. */
+  background: #002d72;
+  border: 1px solid rgba(255, 255, 255, 0.4);
   padding: 3px 8px;
   border-radius: 6px;
   pointer-events: none;
@@ -166,8 +141,33 @@
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 10px;
   letter-spacing: 0.08em;
+  line-height: 15px;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.6);
+  color: rgba(255, 255, 255, 0.8);
+  /* A dark plate like the single viewer's pane label, so the name stays readable
+     over bright tissue instead of resting on the scan with only a shadow. */
+  background: rgba(14, 15, 18, 0.85);
+  border: 1px solid var(--vp-border);
+  border-radius: 6px;
+  padding: 2px 7px;
+  pointer-events: none;
+}
+/* Read-only slice counter, the single viewer's "129/256" chip at the opposite corner from
+   the plane plate. Same line box as the plate so the two sit on one baseline. */
+.cmv__slicecount {
+  position: absolute;
+  bottom: 8px;
+  right: 10px;
+  z-index: 2;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 15px;
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(14, 15, 18, 0.92);
+  border: 1px solid var(--vp-border);
+  border-radius: 6px;
+  padding: 2px 7px;
   pointer-events: none;
 }
 .cmv__viewport { width: 100%; height: 100%; }
@@ -188,7 +188,69 @@
   text-align: center;
   z-index: 3;
 }
-.cmv__overlay--err { color: #ff9db1; }
+.cmv__overlay--err {
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+  background: rgba(8, 9, 11, 0.9);
+}
+/* A failed load ends here: say which case, and offer a way back. */
+.cmv__error { max-width: 28rem; }
+.cmv__error-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+  color: #ffffff;
+  text-wrap: balance;
+}
+.cmv__error-text {
+  margin: 0;
+  text-wrap: balance;
+  font-size: 14px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.78);
+}
+.cmv__error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 8px;
+}
+.cmv__error-primary {
+  padding: 9px 16px;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #002d72;
+  font-weight: 600;
+  text-decoration: none;
+}
+.cmv__error-primary:hover { background: #e8eef8; }
+button.cmv__error-primary {
+  border: 0;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+/* Focus lands here when Try again unmounts; a status line is not a control, so no ring. */
+.cmv__overlay:focus { outline: none; }
+.cmv__error-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 12px;
+  color: #ffffff;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* The colour is repeated: the global a:hover (black) would otherwise vanish on the dark overlay. */
+.cmv__error-link:hover { color: #ffffff; }
+.cmv__error-primary:focus-visible,
+.cmv__error-link:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 3px;
+}
 .cmv__spinner {
   width: 18px;
   height: 18px;
@@ -198,3 +260,109 @@
   animation: cmv-spin 0.8s linear infinite;
 }
 @keyframes cmv-spin { to { transform: rotate(360deg); } }
+
+/* Phone width: three CT panes per case in one row left each scan ~110px wide
+   in a tall black cell. Give the axial plane the full width and put sagittal
+   and coronal side by side under it (single-plane views already fill the row).
+   A tall portrait tablet shares the plane labels below but has its own layout
+   after this block. A landscape tablet or a short window, which includes a
+   768px iPad whose browser chrome leaves under 900px of height, has rows too
+   low for either and keeps the three-across row. */
+@media (max-width: 640px), (max-width: 900px) and (orientation: portrait) and (min-height: 900px) {
+  .cmv__caserow--mpr {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 6fr 5fr;
+  }
+  .cmv__caserow--mpr .cmv__cell:first-child {
+    grid-column: 1 / -1;
+  }
+  /* Plane name top-left with its colour marker, as on the single viewer; the
+     case label moves to the opposite corner to leave room. */
+  .cmv__planelabel {
+    top: 8px;
+    bottom: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+  }
+  .cmv__planelabel::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--pane-accent, transparent);
+  }
+  .cmv__planelabel--axial { --pane-accent: #f43f5e; }
+  .cmv__planelabel--sagittal { --pane-accent: #eab308; }
+  .cmv__planelabel--coronal { --pane-accent: #22c55e; }
+  .cmv__caselabel {
+    left: auto;
+    right: 10px;
+  }
+}
+
+/* Tall portrait tablet: axial fills a left column and sagittal over coronal
+   fill the right, so the axial scan is ~384px wide and the other two are no
+   shorter than the row allows. The stacked rows above would leave every scan
+   about the size of the old three-across panes. */
+@media (min-width: 641px) and (max-width: 900px) and (orientation: portrait) and (min-height: 900px) {
+  .cmv__caserow--mpr {
+    grid-template-rows: 1fr 1fr;
+  }
+  .cmv__caserow--mpr .cmv__cell:first-child {
+    grid-column: 1;
+    grid-row: 1 / -1;
+  }
+}
+
+/* A dock (Organs or Measurements) narrows the grid, not the window, so the
+   viewport queries above still see a tablet: axial would be squeezed into a
+   tall sliver beside the other two. Below 560px of grid width, stack the planes
+   as on a phone. This follows the tablet block so it wins the cascade at equal
+   specificity; the plane labels keep the viewport rule above, which suits the
+   stacked cells too. Only in a tall window: a short one, such as a phone in
+   landscape, has rows too low for stacked planes and keeps three across. A
+   phone-width window already stacks through the first block. */
+@media (min-height: 900px) {
+  @container cmvgrid (max-width: 560px) {
+    .cmv__caserow--mpr {
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 6fr 5fr;
+    }
+    .cmv__caserow--mpr .cmv__cell:first-child {
+      grid-column: 1 / -1;
+      grid-row: auto;
+    }
+  }
+}
+
+@media (max-width: 640px) {
+  /* The Measurements tooltip can sit first in a wrapped row, where a centred
+     tip would run off the left edge; anchor it to the button instead. */
+  .cmv .vp-topbar .cmv__tool--tip-start .vp-tool__tip {
+    left: 0;
+    transform: none;
+  }
+}
+
+/* Why a jump to an organ did nothing; the single viewer's tool notice, on this page. */
+.cmv__notice {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 950;
+  /* A fixed box at left: 50% is offered only the room to its right, so without
+     max-content the toast wrapped into a half-width pill on a phone. */
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(12, 14, 18, 0.94);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13.5px;
+  pointer-events: none;
+}
