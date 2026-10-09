@@ -20,10 +20,11 @@ from services.label_scheme import (
 )
 from services.request_limits import trusted_client_ip
 from services.inference_job_queue import InferenceJobQueue, QueueFullError
-from services.intent_parser import parse_intent
+from services.intent_parser import MAX_ZOOM, MIN_ZOOM, parse_intent
 from services.ollama_client import (
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_VISION_MODEL,
+    OLLAMA_MAX_IMAGES,
     OLLAMA_THINK,
     OllamaModelMissing,
     OllamaUnavailable,
@@ -883,7 +884,7 @@ def explain_impressions():
     available in production. The frontend no longer calls this button, but
     the route stays as a stable no-op so old clients don't 404."""
     return jsonify({
-        "plain_language": ["Plain-language summary unavailable — please ask your doctor to walk through these findings with you."],
+        "plain_language": ["Plain-language summary unavailable. Please ask your doctor to walk through these findings with you."],
     }), 200
  
 @api_blueprint.route('/define-term', methods=['GET'])
@@ -899,7 +900,7 @@ def define_term():
 
     return jsonify({
         "term": term,
-        "definition": "Definition unavailable — try asking your doctor what this term means.",
+        "definition": "Definition unavailable. Try asking your doctor what this term means.",
         "source": "fallback",
     }), 200
  
@@ -1264,7 +1265,7 @@ def _patient_lesion_sentence(root, lesion, location_word, detail_text):
 def _patient_no_lesion_sentence(root):
     name = _plain_organ_name(root)
     return (f"Your {name} was flagged for your doctor to review, but the report "
-            f"doesn't describe a specific spot or growth \u2014 your doctor can "
+            f"doesn't describe a specific spot or growth. Your doctor can "
             f"tell you exactly what stood out.")
 
 
@@ -1321,7 +1322,7 @@ def _build_report_html(report_data):
             for lesion in entry["lesions"]:
                 loc_word = lesion["location"].replace(root, "").strip() or None
                 findings.append({
-                    "title": f"{root.title()}" + (f" \u2014 {loc_word.title()}" if loc_word else ""),
+                    "title": f"{root.title()}" + (f" ({loc_word.lower()})" if loc_word else ""),
                     "patient_html": _e(_patient_lesion_sentence(root, lesion, loc_word, detail_text)),
                     "doctor_html": _e(_doctor_lesion_sentence(root, lesion, loc_word)),
                     "metrics": [
@@ -1353,7 +1354,7 @@ def _build_report_html(report_data):
         base = _organ_base_stats(root, organ_volumes)
         clean_cards.append({
             "name": root.title(),
-            "volume": f"{base.get('volume', 0):.0f}" if base.get("volume") is not None else "\u2014",
+            "volume": f"{base.get('volume', 0):.0f}" if base.get("volume") is not None else "Not measured",
             "hu": f"Mean HU {base.get('mean_hu', 0):.1f}" if base.get("mean_hu") is not None else "",
         })
 
@@ -1402,7 +1403,7 @@ def _build_report_html(report_data):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CT Scan Report \u2014 Case {_e(case_id)}</title>
+<title>CT scan report, case {_e(case_id)}</title>
 <style>
 {_REPORT_CSS}
 </style>
@@ -1447,8 +1448,8 @@ def _build_report_html(report_data):
 <script>
 const findings = {findings_json};
 const disclaimers = {{
-  patient: "This is an easy-to-read summary of your CT scan, generated automatically. It has not been reviewed by a doctor yet \\u2014 your care team will go over the full results with you.",
-  doctor: "AI-generated report (RadGPT findings + automated segmentation measurements). Not reviewed by a radiologist. For research use only \\u2014 not for clinical decision-making.",
+  patient: "This is an easy-to-read summary of your CT scan, generated automatically. It has not been reviewed by a doctor yet. Your care team will go over the full results with you.",
+  doctor: "AI-generated report (RadGPT findings + automated segmentation measurements). Not reviewed by a radiologist. For research use only, not for clinical decision-making.",
 }};
 
 function renderFindings(view) {{
@@ -1733,7 +1734,7 @@ def _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path):
     disclaimer_y = write_wrapped_text(
         left_margin, height - 82,
         "AI-generated report (RadGPT findings + automated segmentation measurements). "
-        "Not reviewed by a radiologist. For research use only \u2014 not for clinical decision-making.",
+        "Not reviewed by a radiologist. For research use only, not for clinical decision-making.",
         font_size=8,
         color=MUTED,
     )
@@ -1873,7 +1874,7 @@ def _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path):
             # Location is typically "<root> tail" / "<root> body" — take just
             # the location word after the root for the callout title.
             loc_word = lesion['location'].replace(organ['root'], '').strip() or lesion['location']
-            title = f"{organ['root'].title()} Lesion \u2014 {loc_word.title()}"
+            title = f"{organ['root'].title()} lesion, {loc_word.lower()}"
             detail_lines = [
                 f"Size: {lesion['size']} cm (image) \u00b7 Volume: {lesion['volume']:.1f} cc",
                 f"{lesion['enhancement']} relative to {organ['root']}",
@@ -1922,7 +1923,7 @@ def _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path):
                 continue
 
             reset_page()
-            y_position = section_label(f"Key Image \u2014 {organ_root_key.title()} Lesion", y_position)
+            y_position = section_label(f"Key image: {organ_root_key.lower()} lesion", y_position)
             pdf.setStrokeColor(LINE)
             pdf.line(left_margin, y_position + 8, width - right_margin, y_position + 8)
             y_position -= 20
@@ -1944,7 +1945,7 @@ def _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path):
                 loc_word = lesion_detail['location'].replace(organ_root_key, '').strip() or lesion_detail['location']
                 pdf.setFillColor(ACCENT)
                 pdf.setFont("Helvetica-Bold", 11)
-                pdf.drawString(detail_x, dy, f"Lesion 1 \u2014 {organ_root_key.title()} {loc_word.title()}")
+                pdf.drawString(detail_x, dy, f"Lesion 1: {organ_root_key.lower()}, {loc_word.lower()}")
                 dy -= 20
                 for dl in [
                     f"Size: {lesion_detail['size']} cm \u00b7 Volume: {lesion_detail['volume']:.1f} cc",
@@ -2863,8 +2864,8 @@ def _start_reserved_segmentation(
             # library happens to raise.
             return jsonify({
                 "error": (
-                    "This file couldn't be read as a NIfTI (.nii/.nii.gz) scan "
-                    f"— it may be corrupted, incomplete, or not actually a CT "
+                    "This file couldn't be read as a NIfTI (.nii/.nii.gz) scan. "
+                    f"It may be corrupted, incomplete, or not actually a CT "
                     f"file ({type(e).__name__}). Please check the file and try "
                     "uploading it again."
                 ),
@@ -2872,7 +2873,7 @@ def _start_reserved_segmentation(
         if any(d > 1 for d in img_shape[3:]):
             return jsonify({
                 "error": (
-                    "This file isn't a single 3D CT scan — it has shape "
+                    "This file isn't a single 3D CT scan: it has shape "
                     f"{list(img_shape)}, which means it has extra data beyond "
                     "just X/Y/Z (for example a multi-phase scan or a vector "
                     "field). Please upload a single 3D CT phase."
@@ -4806,9 +4807,24 @@ def _ai_norm(value):
     return " ".join(str(value or "").lower().replace("_", " ").replace(".nii.gz", "").replace(".nii", "").split())
 
 
+# Organ keys are plain words apart from these, which keep their capitals
+# (mirrors ACRONYMS in PanTS-Demo/src/helpers/utils.name.ts).
+_AI_ACRONYMS = {"cbd": "CBD"}
+
+
 def _ai_display(value):
-    text = str(value or "").replace(".nii.gz", "").replace(".nii", "").replace("_", " ").strip()
-    return text.title() if text else "Structure"
+    """An organ key as it reads mid-sentence ("kidney left", "CBD stent"), the
+    site's sentence-case rule. Use _ai_cap where the name opens a sentence or
+    a bold label."""
+    text = str(value or "").replace(".nii.gz", "").replace(".nii", "")
+    words = [_AI_ACRONYMS.get(w.lower(), w.lower()) for w in re.split(r"[-_\s]+", text) if w]
+    return " ".join(words) if words else "structure"
+
+
+def _ai_cap(text):
+    """Capitalise the first letter of a display name that opens a sentence or a
+    bold label ("Kidney left"). An acronym already has its capitals."""
+    return text[:1].upper() + text[1:]
 
 
 def _ai_metric_valid(value):
@@ -4819,12 +4835,77 @@ def _ai_metric_valid(value):
     return np.isfinite(number) and number > 0 and number != 999999
 
 
+def _ai_volume_clipped(entry):
+    """True when the organ's mask reaches the first or last slice, so its volume
+    is only the part inside the scan. The Organ statistics table shows n/a for
+    these volumes, so the assistant must not give one as the full measurement."""
+    return bool(entry.get("truncated"))
+
+
+def _ai_clipped_volume_fact(display, volume):
+    """The sentence that replaces an exact volume for a mask cut off at the scan edge."""
+    return (
+        f"The segmented {display} reaches the edge of the scan, so its volume is cut off "
+        f"and at least **{float(volume):.2f} cm³** is shown."
+    )
+
+
+def _ai_clipped_keys(metrics):
+    """Normalised organ keys whose volume is clipped, from the client metrics."""
+    keys = set()
+    for entry in metrics or []:
+        organ = _ai_norm(entry.get("organ_name"))
+        if organ and _ai_volume_clipped(entry):
+            keys.add(organ)
+    return keys
+
+
+def _ai_join(names):
+    """"a", "a and b", "a, b and c"."""
+    names = list(names)
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _ai_ranking_caveat(metrics, winner_volume, largest):
+    """What to add to a largest or smallest answer that skipped clipped organs.
+
+    A clipped organ is left out of the ranking because its volume is only the
+    part inside the scan. That is wrong in a visible way when the clipped organ
+    is the real winner, so say so: for the largest, an organ whose partial
+    volume already exceeds the winner; for the smallest, one whose partial
+    volume is still below it. Returns "" when nothing was left out that matters.
+    """
+    clipped = [
+        entry for entry in metrics
+        if _ai_metric_valid(entry.get("volume_cm3")) and _ai_volume_clipped(entry)
+    ]
+    if largest:
+        decisive = [e for e in clipped if float(e["volume_cm3"]) > winner_volume]
+    else:
+        decisive = [e for e in clipped if float(e["volume_cm3"]) < winner_volume]
+    if largest and decisive:
+        names = _ai_join(_ai_display(e.get("organ_name")) for e in decisive)
+        verb = "reaches" if len(decisive) == 1 else "reach"
+        return (
+            f" The {names} {verb} the edge of the scan and already measure"
+            f"{'s' if len(decisive) == 1 else ''} more than this, so "
+            f"{'it is' if len(decisive) == 1 else 'they are'} larger, but "
+            f"{'its' if len(decisive) == 1 else 'their'} full volume cannot be measured."
+        )
+    if decisive or (clipped and largest):
+        return " This ranking leaves out organs that are cut off at the edge of the scan."
+    return ""
+
+
 def _ai_public_metric(entry):
     return {
         "organ_name": str(entry.get("organ_name") or ""),
         "display_name": _ai_display(entry.get("organ_name")),
         "volume_cm3": entry.get("volume_cm3"),
         "mean_hu": entry.get("mean_hu"),
+        "truncated": _ai_volume_clipped(entry),
     }
 
 
@@ -5201,18 +5282,28 @@ def _ai_component_facts(message, metrics, available_organs):
             continue  # segmented in its own right; nothing to add
 
         present = []
+        clipped = False
         for part in parts:
             entry = lookup.get(_ai_norm(part))
             if entry and _ai_metric_valid(entry.get("volume_cm3")):
                 present.append((_ai_display(part), float(entry["volume_cm3"])))
+                clipped = clipped or _ai_volume_clipped(entry)
         if not present:
             continue
 
         listing = ", ".join(f"{name} {volume:.2f} cm³" for name, volume in present)
         total = sum(volume for _name, volume in present)
+        if clipped:
+            facts.append(
+                f"SEGMENTATION FACT: the {parent} is not segmented as one structure "
+                f"in this case; it is segmented in parts: {listing}. At least one part "
+                f"reaches the edge of the scan, so the volume is cut off and the "
+                f"combined volume is at least **{total:.2f} cm³**."
+            )
+            continue
         facts.append(
             f"SEGMENTATION FACT: the {parent} is not segmented as one structure "
-            f"in this case; it is segmented in parts — {listing}. Their combined "
+            f"in this case; it is segmented in parts: {listing}. Their combined "
             f"volume is **{total:.2f} cm³**."
         )
 
@@ -5238,6 +5329,7 @@ def _ai_case_inventory(case_id, metrics):
     # Attenuation only exists in the computed metrics, so index them by name to
     # merge onto the labelmap-derived geometry.
     hu_by_key = {}
+    clipped_keys = _ai_clipped_keys(metrics)
     for entry in metrics or []:
         organ = _ai_norm(entry.get("organ_name"))
         value = entry.get("mean_hu")
@@ -5253,7 +5345,11 @@ def _ai_case_inventory(case_id, metrics):
             meta = MESH_LABELS.get(label_id) if MESH_LABELS else None
             if not meta or label_id in lesion_ids:
                 continue
-            bits = [f"{meta['name']}: {entry['volume_cm3']:.2f} cm³"]
+            name = _ai_cap(_ai_display(meta["key"]))
+            if _ai_norm(meta["key"]) in clipped_keys:
+                bits = [f"{name}: at least {entry['volume_cm3']:.2f} cm³ (reaches the edge of the scan, volume cut off)"]
+            else:
+                bits = [f"{name}: {entry['volume_cm3']:.2f} cm³"]
             rng = entry.get("slice_range")
             if rng:
                 bits.append(f"axial slices {rng[0]}-{rng[1]}")
@@ -5264,11 +5360,14 @@ def _ai_case_inventory(case_id, metrics):
     else:
         # No readable labelmap — fall back to whatever metrics exist.
         for entry in metrics or []:
-            name = entry.get("display_name") or _ai_display(entry.get("organ_name"))
+            name = _ai_cap(entry.get("display_name") or _ai_display(entry.get("organ_name")))
             volume = entry.get("volume_cm3")
             if not _ai_metric_valid(volume):
                 continue
-            bits = [f"{name}: {float(volume):.2f} cm³"]
+            if _ai_volume_clipped(entry):
+                bits = [f"{name}: at least {float(volume):.2f} cm³ (reaches the edge of the scan, volume cut off)"]
+            else:
+                bits = [f"{name}: {float(volume):.2f} cm³"]
             hu = entry.get("mean_hu")
             if _ai_metric_valid(hu) or hu == 0:
                 bits.append(f"mean {float(hu):.1f} HU")
@@ -5311,11 +5410,12 @@ def _ai_case_inventory(case_id, metrics):
     return "\n".join(block)
 
 
-def _ai_structure_facts(case_id, message):
+def _ai_structure_facts(case_id, message, metrics=None):
     """Exact inventory and slice-level answers, straight from the labelmap.
 
     Covers the two questions that previously returned nothing: what the
     segmentation contains, and where a named structure sits along the scan.
+    A volume the client metrics mark as clipped is given as a lower bound.
     """
     wants_inventory = ai_reasoning.asks_for_inventory(message)
     wants_slice = ai_reasoning.asks_for_slice_level(message)
@@ -5332,6 +5432,8 @@ def _ai_structure_facts(case_id, message):
     if not structures:
         return []
 
+    clipped_keys = _ai_clipped_keys(metrics)
+
     named = []
     for label_id, entry in sorted(structures.items()):
         meta = MESH_LABELS.get(label_id) if MESH_LABELS else None
@@ -5343,11 +5445,21 @@ def _ai_structure_facts(case_id, message):
 
     if wants_inventory and named:
         listing = ", ".join(
-            f"{name} {entry['volume_cm3']:.2f} cm³" for name, _key, entry in named
+            f"{_ai_display(key)} "
+            f"{'at least ' if _ai_norm(key) in clipped_keys else ''}"
+            f"{entry['volume_cm3']:.2f} cm³"
+            for _name, key, entry in named
+        )
+        note = (
+            " A volume marked \"at least\" is for an organ that reaches the edge "
+            "of the scan, so it is cut off."
+            if any(_ai_norm(key) in clipped_keys for _name, key, _entry in named)
+            else ""
         )
         facts.append(
             f"SEGMENTATION FACT: this case has **{len(named)} segmented "
-            f"structures**, with these measured volumes — {listing}."
+            f"{'structure' if len(named) == 1 else 'structures'}**, "
+            f"with these measured volumes: {listing}.{note}"
         )
 
     if wants_slice:
@@ -5365,11 +5477,17 @@ def _ai_structure_facts(case_id, message):
             rng = entry.get("slice_range")
             if not rng:
                 continue
+            if _ai_norm(key) in clipped_keys:
+                measured = (
+                    f"its volume is cut off at the edge of the scan, so at least "
+                    f"**{entry['volume_cm3']:.2f} cm³** is shown"
+                )
+            else:
+                measured = f"it measures **{entry['volume_cm3']:.2f} cm³**"
             facts.append(
-                f"SEGMENTATION FACT: the {name} spans axial slices "
+                f"SEGMENTATION FACT: the {_ai_display(key)} spans axial slices "
                 f"**{rng[0]}–{rng[1]}**, centred on slice "
-                f"**{entry.get('centre_slice', rng[0])}**, and measures "
-                f"**{entry['volume_cm3']:.2f} cm³**."
+                f"**{entry.get('centre_slice', rng[0])}**, and {measured}."
             )
             break
 
@@ -5626,11 +5744,11 @@ _AI_AGENT_SYSTEM_PROMPT = (
     "show_in_viewer when displaying an organ helps, set_window_preset when a "
     "different window would show the relevant tissue, and capture_views ONLY "
     "when the question is about how something LOOKS in the images. Call only "
-    "the tools you need — often one is enough. When you have enough "
+    "the tools you need, often one is enough. When you have enough "
     "information, write the final answer.\n"
     "IMPORTANT: if the conversation shows the question is really about a "
     "patient DESCRIBED IN THE CHAT (a typed case story) rather than the open "
-    "scan, do not use tools at all — answer from the conversation and your "
+    "scan, do not use tools at all: answer from the conversation and your "
     "medical knowledge, continuing the ongoing discussion.\n"
     "FINAL ANSWER RULES: start directly with the answer (no reasoning, no "
     "preamble); never mention tools, data blocks, or any internal machinery; "
@@ -5638,8 +5756,10 @@ _AI_AGENT_SYSTEM_PROMPT = (
     "answer the question that was asked and never substitute an unrelated "
     "measurement for an answer; 1-3 sentences for a simple question, one short "
     "readable paragraph for a clinical one; END with one short, specific "
-    "question — when the next useful step is something to LOOK at, ask for that "
-    "(a slice level, a plane, a window preset, a structure to isolate)."
+    "question, and when the next useful step is something to LOOK at, ask for "
+    "that (a slice level, a plane, a window preset, a structure to isolate). "
+    "Write plain sentences and never use em dashes; use a comma, colon or full "
+    "stop instead."
 )
 
 
@@ -5737,6 +5857,13 @@ def _ai_agent_tools(include_capture):
     return tools
 
 
+def _ai_ordinal(n: int) -> str:
+    """1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st, 22nd, ..."""
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+
+
 def _ai_agent_execute(name, args, *, metrics, metadata, available_organs, references):
     """Execute one agent tool server-side.
 
@@ -5754,7 +5881,7 @@ def _ai_agent_execute(name, args, *, metrics, metadata, available_organs, refere
         if not entry:
             names = ", ".join(available_organs[:40]) or "none"
             return (
-                f"Measuring the {display.lower()}",
+                f"Measuring the {display}",
                 f"No measurement for '{organ_raw}' in this case. Available structures: {names}.",
                 [],
                 False,
@@ -5763,27 +5890,31 @@ def _ai_agent_execute(name, args, *, metrics, metadata, available_organs, refere
         volume = entry.get("volume_cm3")
         mean_hu = entry.get("mean_hu")
         if _ai_metric_valid(volume):
-            parts.append(f"The segmented {display} volume is **{float(volume):.2f} cm³**.")
+            if _ai_volume_clipped(entry):
+                parts.append(_ai_clipped_volume_fact(display, volume))
+            else:
+                parts.append(f"The segmented {display} volume is **{float(volume):.2f} cm³**.")
         if _ai_metric_valid(mean_hu) or mean_hu == 0:
             parts.append(f"The segmented {display} mean attenuation is **{float(mean_hu):.1f} HU**.")
-        for ref in references or []:
+        # A percentile of a cut-off volume would compare part of an organ to whole ones.
+        for ref in [] if _ai_volume_clipped(entry) else references or []:
             if _ai_norm(ref.get("organ_name")) == _ai_norm(resolved):
                 pct = ref.get("percentile")
                 if isinstance(pct, (int, float)):
                     basis = str(ref.get("basis") or "").strip()
                     suffix = f" ({basis})" if basis else ""
                     parts.append(
-                        f"That volume is at the **{float(pct):.0f}th percentile** of the reference cohort{suffix}."
+                        f"That volume is at the **{_ai_ordinal(round(float(pct)))} percentile** of the reference cohort{suffix}."
                     )
                 break
         result = " ".join(parts) if parts else f"No valid measurements recorded for {display}."
-        return (f"Measuring the {display.lower()}", result, [], bool(parts))
+        return (f"Measuring the {display}", result, [], bool(parts))
 
     if name == "list_structures":
         names = ", ".join(available_organs) or "none"
         return (
             "Listing segmented structures",
-            f"This case has {len(available_organs)} segmented structures: {names}.",
+            f"This case has {len(available_organs)} segmented {'structure' if len(available_organs) == 1 else 'structures'}: {names}.",
             [],
             False,
         )
@@ -5797,7 +5928,7 @@ def _ai_agent_execute(name, args, *, metrics, metadata, available_organs, refere
                 False,
             )
         fields = ", ".join(f"{key}: {value}" for key, value in metadata.items())
-        return ("Checking patient information", f"Patient metadata — {fields}.", [], True)
+        return ("Checking patient information", f"Patient metadata: {fields}.", [], True)
 
     if name == "show_in_viewer":
         organs = args.get("organs")
@@ -5811,7 +5942,7 @@ def _ai_agent_execute(name, args, *, metrics, metadata, available_organs, refere
                 False,
             )
         shown = ", ".join(_ai_display(o) for o in actions[0].get("organs", []))
-        return ("Updating the viewer", f"Done — isolated {shown} in the viewer.", actions, False)
+        return ("Updating the viewer", f"Done. Isolated {shown} in the viewer.", actions, False)
 
     if name == "set_window_preset":
         preset = str(args.get("preset") or "").strip()
@@ -5820,7 +5951,7 @@ def _ai_agent_execute(name, args, *, metrics, metadata, available_organs, refere
         actions = [{"type": "set_window_preset", "preset": preset}]
         return (
             "Adjusting the window",
-            f"Done — applied the {preset.replace('_', ' ')} window preset.",
+            f"Done. Applied the {preset.replace('_', ' ')} window preset.",
             actions,
             False,
         )
@@ -5846,7 +5977,10 @@ def _ai_required_metric_facts(actions, metrics, available_organs):
         volume = entry.get("volume_cm3")
         mean_hu = entry.get("mean_hu")
         if metric in ("volume_cm3", "all") and _ai_metric_valid(volume):
-            facts.append(f"The segmented {organ} volume is **{float(volume):.2f} cm³**.")
+            if _ai_volume_clipped(entry):
+                facts.append(_ai_clipped_volume_fact(organ, volume))
+            else:
+                facts.append(f"The segmented {organ} volume is **{float(volume):.2f} cm³**.")
         if metric in ("mean_hu", "all") and (_ai_metric_valid(mean_hu) or mean_hu == 0):
             facts.append(f"The segmented {organ} mean attenuation is **{float(mean_hu):.1f} HU**.")
     return facts
@@ -5962,7 +6096,7 @@ def _ai_sanitize_actions(actions, available_organs):
             clean["preset"] = preset
         elif action_type == "set_zoom":
             try:
-                clean["value"] = max(0.1, min(20, float(action.get("value"))))
+                clean["value"] = max(MIN_ZOOM, min(MAX_ZOOM, float(action.get("value"))))
             except (TypeError, ValueError):
                 continue
         elif action_type == "set_view":
@@ -6028,7 +6162,10 @@ def _ai_metadata(case_id, supplied):
         entry = _METADATA_CACHE.get(get_panTS_id(str(case_id)), {})
         if entry.get("age") not in [None, ""]:
             try:
-                metadata["age"] = float(entry.get("age"))
+                age = float(entry.get("age"))
+                # The workbook stores 52.0; people say 52, so the fact and the
+                # number check in the safety net agree.
+                metadata["age"] = int(age) if age.is_integer() else round(age, 1)
             except (TypeError, ValueError):
                 metadata["age"] = entry.get("age")
         if entry.get("sex") not in [None, ""]:
@@ -6042,6 +6179,15 @@ def _ai_metadata(case_id, supplied):
         except (TypeError, ValueError):
             pass
     return metadata
+
+
+_AI_AGE_RE = re.compile(r"\bage\b|\bhow old\b")
+
+
+def _ai_asks_age(norm: str) -> bool:
+    # Whole words only: a substring test reads "average", "image" and "stage"
+    # as an age question.
+    return bool(_AI_AGE_RE.search(norm))
 
 
 def _ai_has_case_reference(norm: str) -> bool:
@@ -6135,7 +6281,7 @@ def _ai_question_mode(message, fallback_actions):
 
         return "general_education"
 
-    if "age" in norm or "how old" in norm:
+    if _ai_asks_age(norm):
         if has_case_reference or "patient age" in norm:
             return "case_metadata"
 
@@ -6229,7 +6375,7 @@ def _ai_case_metadata_reply(norm, metadata):
     has_case_reference = _ai_has_case_reference(norm)
 
     asks_case_age = (
-        ("age" in norm or "how old" in norm)
+        _ai_asks_age(norm)
         and (
             has_case_reference
             or "patient age" in norm
@@ -6323,7 +6469,7 @@ def _ai_case_facts(message, metrics, metadata):
     )
 
     for entry in relevant_metrics:
-        organ = (
+        organ = _ai_cap(
             entry.get("display_name")
             or _ai_display(entry.get("organ_name"))
         )
@@ -6334,9 +6480,15 @@ def _ai_case_facts(message, metrics, metadata):
         organ_facts = []
 
         if _ai_metric_valid(volume):
-            organ_facts.append(
-                f"segmented volume {float(volume):.2f} cm³"
-            )
+            if _ai_volume_clipped(entry):
+                organ_facts.append(
+                    f"segmented volume at least {float(volume):.2f} cm³ "
+                    "(the mask reaches the edge of the scan, so the volume is cut off)"
+                )
+            else:
+                organ_facts.append(
+                    f"segmented volume {float(volume):.2f} cm³"
+                )
 
         if _ai_metric_valid(mean_hu) or mean_hu == 0:
             organ_facts.append(
@@ -6408,6 +6560,13 @@ def _ai_structure_names(metrics, available_organs):
     return names
 
 
+def _ai_view_name(value):
+    """A view or tool name as it reads in a sentence: lower case, except the
+    MPR, 3D and ROI abbreviations."""
+    text = str(value or "").lower()
+    return {"mpr": "MPR", "3d": "3D", "roi": "ROI"}.get(text, text)
+
+
 def _ai_action_confirmation(actions):
     confirmations = []
     for action in actions:
@@ -6421,7 +6580,7 @@ def _ai_action_confirmation(actions):
         elif action_type == "focus_organ":
             confirmations.append("Focused on " + _ai_display(action.get("organ")) + ".")
         elif action_type == "set_view":
-            confirmations.append(f"Switched to {str(action.get('view')).upper()} view.")
+            confirmations.append(f"Switched to the {_ai_view_name(action.get('view'))} view.")
         elif action_type == "set_opacity":
             confirmations.append(f"Set overlay opacity to {float(action.get('value')):.0f}%.")
         elif action_type == "set_window_preset":
@@ -6429,14 +6588,18 @@ def _ai_action_confirmation(actions):
         elif action_type == "set_window":
             confirmations.append(f"Set the CT window to width {float(action.get('width')):.0f} and center {float(action.get('center')):.0f}.")
         elif action_type == "set_zoom":
-            confirmations.append(f"Set zoom to {float(action.get('value')):g}.")
+            confirmations.append(f"Set zoom to {float(action.get('value')):g}x.")
         elif action_type == "zoom_to_fit":
             confirmations.append("Reset zoom to fit.")
         elif action_type == "activate_measurement_tool":
-            confirmations.append(f"Activated the {str(action.get('tool')).upper()} tool.")
+            confirmations.append(f"Activated the {_ai_view_name(action.get('tool'))} tool.")
         elif action_type == "clear_measurements":
             confirmations.append("Cleared the current measurements.")
     return " ".join(confirmations)
+
+
+# What _ai_grounded_reply ends with when it has nothing measured to say.
+_AI_NO_ANSWER_REPLY = "I couldn't get an answer just now. Please try again in a moment."
 
 
 def _ai_grounded_reply(
@@ -6550,8 +6713,8 @@ def _ai_grounded_reply(
 
         if not entry or entry.get("missing"):
             return (
-                f"{organ_label} is not available in this segmentation, "
-                f"so no {organ_label.lower()} measurement is available "
+                f"{_ai_cap(organ_label)} is not available in this segmentation, "
+                f"so no {organ_label} measurement is available "
                 "for this case."
             )
 
@@ -6577,9 +6740,15 @@ def _ai_grounded_reply(
             parts = []
 
             if _ai_metric_valid(volume):
-                parts.append(
-                    f"volume **{float(volume):.2f} cm³**"
-                )
+                if _ai_volume_clipped(entry):
+                    parts.append(
+                        f"volume at least **{float(volume):.2f} cm³** "
+                        "(the mask reaches the edge of the scan, so the volume is cut off)"
+                    )
+                else:
+                    parts.append(
+                        f"volume **{float(volume):.2f} cm³**"
+                    )
 
             if _ai_metric_valid(mean_hu) or mean_hu == 0:
                 parts.append(
@@ -6597,6 +6766,13 @@ def _ai_grounded_reply(
             return (
                 f"{prefix}Metrics for **{organ_label}** are not "
                 "available for this case."
+            )
+
+        if _ai_metric_valid(volume) and _ai_volume_clipped(entry):
+            return (
+                f"{prefix}The segmented **{organ_label}** reaches the edge of "
+                "the scan, so its volume is cut off and at least "
+                f"**{float(volume):.2f} cm³** is shown."
             )
 
         if _ai_metric_valid(volume):
@@ -6619,6 +6795,7 @@ def _ai_grounded_reply(
             metric
             for metric in metrics
             if _ai_metric_valid(metric.get("volume_cm3"))
+            and not _ai_volume_clipped(metric)
         ]
 
         if valid:
@@ -6634,6 +6811,9 @@ def _ai_grounded_reply(
                 f"**{_ai_display(largest.get('organ_name'))}**, "
                 "with a measured volume of "
                 f"**{float(largest.get('volume_cm3')):.2f} cm³**."
+                + _ai_ranking_caveat(
+                    metrics, float(largest.get("volume_cm3")), True
+                )
             )
 
         return (
@@ -6649,6 +6829,7 @@ def _ai_grounded_reply(
             metric
             for metric in metrics
             if _ai_metric_valid(metric.get("volume_cm3"))
+            and not _ai_volume_clipped(metric)
         ]
 
         if valid:
@@ -6664,6 +6845,9 @@ def _ai_grounded_reply(
                 f"**{_ai_display(smallest.get('organ_name'))}**, "
                 "with a measured volume of "
                 f"**{float(smallest.get('volume_cm3')):.2f} cm³**."
+                + _ai_ranking_caveat(
+                    metrics, float(smallest.get("volume_cm3")), False
+                )
             )
 
         return (
@@ -6681,7 +6865,8 @@ def _ai_grounded_reply(
         )
 
         return (
-            f"This case has **{len(names)} segmented structures** "
+            f"This case has **{len(names)} segmented "
+            f"{'structure' if len(names) == 1 else 'structures'}** "
             "listed for the viewer."
         )
 
@@ -6697,7 +6882,7 @@ def _ai_grounded_reply(
         if names:
             return (
                 f"This case includes **{len(names)} segmented "
-                "structures**: "
+                f"{'structure' if len(names) == 1 else 'structures'}**: "
                 + ", ".join(names)
                 + "."
             )
@@ -6718,7 +6903,7 @@ def _ai_grounded_reply(
 
         return (
             f"The **{organ_name}** is not included in this abdominal "
-            f"segmentation, so no {organ_name.lower()} volume is "
+            f"segmentation, so no {organ_name} volume is "
             "available for this case."
         )
 
@@ -6738,7 +6923,7 @@ def _ai_grounded_reply(
     if confirmation:
         return confirmation
 
-    return "I couldn't get an answer just now — please try again in a moment."
+    return _AI_NO_ANSWER_REPLY
 
 
 # ---------------------------------------------------------------------------
@@ -6762,7 +6947,8 @@ direct answer (1-3 sentences); a complex or clinical question gets a fuller,
 well-organized answer. Always complete your answer and finish every sentence;
 never stop mid-thought. Output ONLY the final answer — never your reasoning,
 planning, or thought process, and never begin with words like "Okay", "Let me",
-"First", "I need to", or "The user". Start directly with the answer.
+"First", "I need to", or "The user". Start directly with the answer. Write in
+plain sentences and never use em dashes; use a comma, colon, or full stop instead.
 
 NEVER MENTION TECHNICAL / BACKEND DETAILS
 Never talk about missing files, empty metadata, unavailable datasets,
@@ -7014,6 +7200,130 @@ def _ai_gate():
     return jsonify({"error": blocked["message"], "code": "plan_limit", **blocked}), 402
 
 
+def _ai_record_answered(user):
+    """Count one assistant message against the daily allowance.
+
+    Called only once a turn has produced a model answer. One typed question can
+    reach the server several times (the capture follow-up, the non-streaming
+    fallback after a failed stream, Try again), and a turn that never answered
+    should not spend the allowance, so usage is recorded here and not on entry.
+    """
+    if user:
+        plan_store.record_ai_message(user["id"])
+
+
+# A turn that carried an attached document keeps the document's text (the
+# browser sends up to 6000 characters of it per file) so a follow-up question
+# can still be answered from it; every other turn stays short.
+_AI_DOCUMENT_MARKER = "Content of attached document"
+_AI_DOCUMENT_TURN_CHARS = 12000
+
+
+# The browser sends one string: what the person typed, then the attached file
+# names, then the extracted text of each document. Only the typed part is the
+# person's request. A report's own wording ("axial images", "IV contrast 100
+# mL", "a mass in the pancreatic head") is not an instruction to the viewer and
+# not a question about the open case, so the rules that read intent, move the
+# viewer or override an answer look at this part only. The model still gets the
+# whole message as reference material.
+_AI_ATTACHMENT_START = re.compile(
+    r"(?:^|\n\n)(?:\[Attached files:|" + re.escape(_AI_DOCUMENT_MARKER) + ")"
+)
+
+
+def _ai_typed_message(message):
+    """The part of a composed message the person actually typed."""
+    text = str(message or "")
+    found = _AI_ATTACHMENT_START.search(text)
+    return (text[: found.start()] if found else text).strip()
+
+
+def _ai_parse_typed(typed_message, **context):
+    """Rule-parse what the person typed.
+
+    A turn that is only an attachment has nothing typed, and the parser would
+    answer that with its "type a question" clarification. There is no rule to
+    apply then, so the model gets the document and answers from it.
+    """
+    if not typed_message:
+        return {"intent": None, "actions": [], "reply": None}
+    return parse_intent(message=typed_message, **context)
+
+
+def _ai_uploaded_count(body, total):
+    """How many of the attached images the person uploaded themselves.
+
+    The browser puts viewer screenshots first and uploads after them, so the
+    last N images are uploads. Anything unreadable counts as no uploads, which
+    is the old behavior.
+    """
+    try:
+        count = int(body.get("uploaded_images") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(count, total))
+
+
+def _ai_cap_images(body, images):
+    """Keep the images the model will read, and the uploaded count in step.
+
+    The client sends screenshots first and uploads last, and the model reads
+    only the first OLLAMA_MAX_IMAGES. Without trimming here the intro would
+    still say the last N images are uploads when some of those never get sent.
+    """
+    dropped = len(images) - OLLAMA_MAX_IMAGES
+    if dropped <= 0:
+        return images
+    body["uploaded_images"] = max(0, _ai_uploaded_count(body, len(images)) - dropped)
+    return images[:OLLAMA_MAX_IMAGES]
+
+
+def _ai_attachment_intro(total, uploaded):
+    """Tell the model what the attached images are.
+
+    Only viewer captures are CT panes with segmentation colors; a photo of a
+    report or an outside scan is neither, and saying otherwise has the model
+    reading mask colors into it.
+    """
+    screenshots = total - uploaded
+    parts = []
+    if screenshots:
+        parts.append(
+            f"{screenshots} CT viewer screenshot(s) are attached to this "
+            "message, in the viewer's pane order (axial, sagittal, coronal, "
+            "then the 3D surface rendering when present). Look at them before "
+            "answering."
+        )
+    if uploaded:
+        if screenshots:
+            parts.append(
+                f"The last {uploaded} image(s) were uploaded by the user. They "
+                "are not viewer panes and carry no segmentation mask colors."
+            )
+        else:
+            parts.append(
+                f"{uploaded} image(s) uploaded by the user are attached to this "
+                "message. They may be a photo of a document or a scan from "
+                "somewhere else, not a pane of the open viewer, and they carry "
+                "no segmentation mask colors. Look at them before answering."
+            )
+    return " ".join(parts)
+
+
+def _ai_is_document_turn(turn):
+    return turn["role"] == "user" and _AI_DOCUMENT_MARKER in turn["content"]
+
+
+def _ai_history_window(conversation, size=6):
+    """The last turns, plus the latest document turn if it has scrolled out, so
+    a long thread can still be questioned about the attached document."""
+    recent = conversation[-size:]
+    if any(_ai_is_document_turn(turn) for turn in recent):
+        return recent
+    older = [turn for turn in conversation[:-size] if _ai_is_document_turn(turn)]
+    return older[-1:] + recent
+
+
 def _ai_normalize_conversation(raw, limit=12, chars=2000):
     """Defensively normalize client-supplied chat history."""
     turns = []
@@ -7025,7 +7335,10 @@ def _ai_normalize_conversation(raw, limit=12, chars=2000):
         role = str(turn.get("role") or "").strip()
         content = str(turn.get("content") or "").strip()
         if role in {"user", "assistant"} and content:
-            turns.append({"role": role, "content": content[:chars]})
+            cap = chars
+            if role == "user" and _AI_DOCUMENT_MARKER in content:
+                cap = max(chars, _AI_DOCUMENT_TURN_CHARS)
+            turns.append({"role": role, "content": content[:cap]})
     return turns
 
 
@@ -7073,6 +7386,9 @@ def _ai_command_vision_reply(*, message, images, body, case_id, selected_model):
     tokens into one string instead of forwarding them.
     """
     mask_legend = _ai_normalize_legend(body.get("mask_legend"))
+    uploaded_images = _ai_uploaded_count(body, len(images))
+    if uploaded_images >= len(images):
+        mask_legend = []
     conversation = _ai_normalize_conversation(body.get("conversation"))
 
     vision_model = resolve_vision_model(selected_model)
@@ -7083,17 +7399,17 @@ def _ai_command_vision_reply(*, message, images, body, case_id, selected_model):
                 has_images=True,
                 vision_model_missing=True,
                 configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+                only_uploads=uploaded_images >= len(images),
             ),
             "actions": [],
             "source": "vision_model_unavailable",
             "model": None,
+            "grounded": False,
             "intent": "read_images",
         })
 
     user_prompt = (
-        f"{len(images)} CT viewer screenshot(s) are attached to this message, "
-        "in the viewer's pane order (axial, sagittal, coronal, then the 3D "
-        "surface rendering when present). Look at them before answering.\n\n"
+        f"{_ai_attachment_intro(len(images), uploaded_images)}\n\n"
         f"{message or 'Describe what is shown in the attached views.'}"
     )
 
@@ -7108,10 +7424,11 @@ def _ai_command_vision_reply(*, message, images, body, case_id, selected_model):
             system_prompt=ai_reasoning.build_system_prompt(
                 has_images=True,
                 has_case=bool(case_id),
+                has_screenshots=uploaded_images < len(images),
             ),
             user_prompt=user_prompt,
             images=images,
-            history=conversation[-6:],
+            history=_ai_history_window(conversation),
         ):
             if kind == "content" and text:
                 collected += text
@@ -7132,21 +7449,25 @@ def _ai_command_vision_reply(*, message, images, body, case_id, selected_model):
             "reply": ai_reasoning.model_offline_reply(
                 has_images=True,
                 configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+                only_uploads=uploaded_images >= len(images),
             ),
             "actions": [],
             "source": "rule_fallback",
             "model": None,
+            "grounded": False,
             "intent": "read_images",
         })
 
+    _ai_record_answered(current_user())
+
     return jsonify({
-        "reply": ai_reasoning.ensure_followup(
+        "reply": ai_reasoning.strip_em_dashes(ai_reasoning.ensure_followup(
             reply,
-            message,
-            has_images=True,
+            _ai_typed_message(message),
+            has_images=uploaded_images < len(images),
             has_case=bool(case_id),
             force=False,
-        ),
+        )),
         "actions": [],
         "source": "ollama",
         "model": vision_model,
@@ -7165,8 +7486,26 @@ def ai_command():
         message = str(
             body.get("message") or ""
         ).strip()
+        typed_message = _ai_typed_message(message)
 
-        if not message:
+        # Attached CT screenshots. This endpoint is what the browser retries on
+        # when the streaming call fails, so it has to be able to read images
+        # too: previously it dropped them silently and answered from text alone,
+        # producing a confident description of views it had never looked at.
+        raw_images = body.get("images") if isinstance(body.get("images"), list) else []
+        images = []
+        for item in raw_images:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            value = item.strip()
+            if value.startswith("data:"):
+                comma = value.find(",")
+                if comma != -1:
+                    value = value[comma + 1:]
+            images.append(value)
+        images = _ai_cap_images(body, images)
+
+        if not message and not images:
             return jsonify(
                 {
                     "reply": (
@@ -7180,12 +7519,6 @@ def ai_command():
         blocked = _ai_gate()
         if blocked is not None:
             return blocked
-        # The assistant is open to anonymous users; only record usage when a
-        # signed-in account is attached to the request.
-        gate_user = current_user()
-        if gate_user:
-            plan_store.record_ai_message(gate_user["id"])
-
         available_organs = body.get(
             "available_organs"
         ) or []
@@ -7229,22 +7562,6 @@ def ai_command():
             else DEFAULT_OLLAMA_MODEL
         )
 
-        # Attached CT screenshots. This endpoint is what the browser retries on
-        # when the streaming call fails, so it has to be able to read images
-        # too: previously it dropped them silently and answered from text alone,
-        # producing a confident description of views it had never looked at.
-        raw_images = body.get("images") if isinstance(body.get("images"), list) else []
-        images = []
-        for item in raw_images:
-            if not isinstance(item, str) or not item.strip():
-                continue
-            value = item.strip()
-            if value.startswith("data:"):
-                comma = value.find(",")
-                if comma != -1:
-                    value = value[comma + 1:]
-            images.append(value)
-
         if images:
             return _ai_command_vision_reply(
                 message=message,
@@ -7277,8 +7594,8 @@ def ai_command():
             ):
                 available_organs.append(organ_name)
 
-        fallback = parse_intent(
-            message=message,
+        fallback = _ai_parse_typed(
+            typed_message,
             available_organs=available_organs,
             viewer_state=viewer_state,
             case_id=case_id or None,
@@ -7290,7 +7607,7 @@ def ai_command():
         )
 
         question_mode = _ai_question_mode(
-            message,
+            typed_message,
             fallback_actions,
         )
 
@@ -7298,24 +7615,29 @@ def ai_command():
         # The model receives the fallback only as an action suggestion.
         rule_suggestion_reply = None
 
-        if question_mode in {
-            "viewer_command",
-            "case_measurement",
-        }:
+        # A viewer command's rule reply reads "Click below to ...", and this
+        # path shows no button. The action confirmation is the reply instead,
+        # as on the streaming endpoint.
+        if question_mode == "case_measurement":
             rule_suggestion_reply = fallback.get("reply")
 
         # Same measured lesion grounding as the streaming endpoint. Without it
         # the fallback path could answer a tumour question differently from the
         # primary one, which is exactly the inconsistency being fixed.
         cmd_lesion_ctx = (
-            _ai_lesion_context(case_id, message)
-            if (case_id and ai_reasoning.asks_about_lesion(message))
+            _ai_lesion_context(case_id, typed_message)
+            if (case_id and ai_reasoning.asks_about_lesion(typed_message))
             else None
         )
 
         prompt_payload = {
             "request_mode": question_mode,
             "user_message": message,
+            # The earlier turns, so a follow-up such as "and its mean HU?" is
+            # answered with the same context the streaming endpoint has.
+            "recent_conversation": _ai_history_window(
+                _ai_normalize_conversation(body.get("conversation"))
+            ),
             "segmentation_lesion_facts": (
                 cmd_lesion_ctx["facts"] if cmd_lesion_ctx else []
             ),
@@ -7399,23 +7721,24 @@ def ai_command():
                 or question_mode
             )
 
-        reply = ai_reasoning.ensure_followup(
-            _ai_reconcile_command_lesion(
-                _ai_grounded_reply(
-                message=message,
+        answer = _ai_reconcile_command_lesion(
+            _ai_grounded_reply(
+                message=typed_message,
                 actions=actions,
                 metrics=metrics,
                 available_organs=available_organs,
                 metadata=metadata,
                 candidate_reply=candidate_reply,
                 question_mode=question_mode,
-                ),
-                cmd_lesion_ctx,
             ),
-            message,
+            cmd_lesion_ctx,
+        )
+        reply = ai_reasoning.strip_em_dashes(ai_reasoning.ensure_followup(
+            answer,
+            typed_message,
             has_images=False,
             has_case=bool(case_id),
-        )
+        ))
 
         response = {
             "reply": reply,
@@ -7440,10 +7763,20 @@ def ai_command():
                 else None
             ),
             "intent": intent,
+            # With the model offline, a measured or viewer-action reply still
+            # stands as an answer; only the bare "no answer" line does not, and
+            # the browser offers Try again for that one.
+            "grounded": bool(
+                source != "ollama"
+                and answer != _AI_NO_ANSWER_REPLY
+            ),
         }
 
         if model_error:
             response["ollama_error"] = model_error
+
+        if source == "ollama":
+            _ai_record_answered(current_user())
 
         return jsonify(response)
 
@@ -7467,7 +7800,11 @@ def ai_command():
         ), 500
 
 
-def _ai_stream_system_prompt(has_images: bool, has_case: bool = False) -> str:
+def _ai_stream_system_prompt(
+    has_images: bool,
+    has_case: bool = False,
+    has_screenshots: bool | None = None,
+) -> str:
     """System prompt for the streaming endpoint.
 
     The text now lives in services/ai_reasoning.py so the vision instructions —
@@ -7480,6 +7817,7 @@ def _ai_stream_system_prompt(has_images: bool, has_case: bool = False) -> str:
     return ai_reasoning.build_system_prompt(
         has_images=has_images,
         has_case=has_case,
+        has_screenshots=has_screenshots,
     )
 
 
@@ -7502,6 +7840,7 @@ def ai_command_stream():
     body = request.get_json(force=True, silent=True) or {}
 
     message = str(body.get("message") or "").strip()
+    typed_message = _ai_typed_message(message)
 
     # Checked before the stream opens, so the client gets a plain 401/402 it can
     # act on rather than an error event buried in a 200 response body.
@@ -7509,8 +7848,6 @@ def ai_command_stream():
     if blocked is not None:
         return blocked
     stream_user = current_user()
-    if stream_user:
-        plan_store.record_ai_message(stream_user["id"])
 
     available_organs = body.get("available_organs") or []
     if not isinstance(available_organs, list):
@@ -7544,6 +7881,7 @@ def ai_command_stream():
             if comma != -1:
                 value = value[comma + 1:]
         images.append(value)
+    images = _ai_cap_images(body, images)
 
     supplied_metrics = body.get("organ_metrics")
     supplied_demographics = body.get("demographics")
@@ -7571,18 +7909,15 @@ def ai_command_stream():
             if organ and color:
                 mask_legend.append({"organ": organ, "color": color})
 
+    # Uploaded photos have no mask colors, and a legend sent with nothing but
+    # uploads would describe colors that are not in them.
+    uploaded_images = _ai_uploaded_count(body, len(images))
+    if uploaded_images >= len(images):
+        mask_legend = []
+
     # Recent turns for multi-turn continuity (role/content pairs, already
     # trimmed client-side). Kept small and defensively normalized.
-    raw_conversation = body.get("conversation")
-    conversation = []
-    if isinstance(raw_conversation, list):
-        for turn in raw_conversation[-12:]:
-            if not isinstance(turn, dict):
-                continue
-            role = str(turn.get("role") or "").strip()
-            content = str(turn.get("content") or "").strip()
-            if role in {"user", "assistant"} and content:
-                conversation.append({"role": role, "content": content[:2000]})
+    conversation = _ai_normalize_conversation(body.get("conversation"))
 
     def sse(event: dict) -> str:
         return json.dumps(event, ensure_ascii=False) + "\n"
@@ -7597,7 +7932,7 @@ def ai_command_stream():
             yield sse({"type": "status", "text": "Understanding your question"})
 
             metadata = _ai_metadata(case_id, supplied_demographics)
-            references_case = _ai_has_case_reference(_ai_norm(message))
+            references_case = _ai_has_case_reference(_ai_norm(typed_message))
 
             # A short reply to a question the ASSISTANT just asked (it asked
             # for the patient's ethnicity; the user answered "he is Han
@@ -7617,30 +7952,30 @@ def ai_command_stream():
                 "currently loaded", "in the viewer", "in this image",
                 "in these images", "shown here",
             )
-            _norm_message = _ai_norm(message)
+            _norm_message = _ai_norm(typed_message)
             explicitly_about_scan = any(w in _norm_message for w in _scan_words)
             conversational_reply = (
-                assistant_asked and len(message) < 200 and not explicitly_about_scan
+                assistant_asked and len(typed_message) < 200 and not explicitly_about_scan
             )
             if conversational_reply:
                 references_case = False
 
             # Parse intent first (cheap, no I/O) so we can decide whether the
             # question actually needs the (potentially slow) case metrics.
-            fallback = parse_intent(
-                message=message or "Describe what is shown.",
+            fallback = _ai_parse_typed(
+                typed_message,
                 available_organs=available_organs,
                 viewer_state=viewer_state,
                 case_id=case_id or None,
             )
             fallback_actions = _ai_sanitize_actions(fallback.get("actions", []), available_organs)
-            question_mode = _ai_question_mode(message, fallback_actions)
+            question_mode = _ai_question_mode(typed_message, fallback_actions)
 
             # "Where is the pancreatic lesion?" names no case, so the phrase test
             # above scored it as a general question and skipped every lookup —
             # leaving the model to invent a finding, differently in each model.
             # A lesion question about an open case is ALWAYS a case question.
-            lesion_question = bool(case_id) and ai_reasoning.asks_about_lesion(message)
+            lesion_question = bool(case_id) and ai_reasoning.asks_about_lesion(typed_message)
             if lesion_question:
                 references_case = True
 
@@ -7652,8 +7987,8 @@ def ai_command_stream():
                 "isolate_organs", "focus_organ", "show_organs",
             }
             structure_question = bool(case_id) and (
-                ai_reasoning.asks_for_inventory(message)
-                or ai_reasoning.asks_for_slice_level(message)
+                ai_reasoning.asks_for_inventory(typed_message)
+                or ai_reasoning.asks_for_slice_level(typed_message)
             )
             if structure_question:
                 references_case = True
@@ -7661,7 +7996,7 @@ def ai_command_stream():
             # Broad on purpose: an unrecognised question about the case is
             # exactly the failure mode being fixed, and a needless lookup is
             # cheap next to a blank or invented answer.
-            case_question = bool(case_id) and ai_reasoning.touches_case(message)
+            case_question = bool(case_id) and ai_reasoning.touches_case(typed_message)
 
             needs_metrics = bool(case_id) and (
                 lesion_question
@@ -7683,20 +8018,22 @@ def ai_command_stream():
                 # metrics existed, so with an empty organ catalog "what is the
                 # volume of the pancreas" matched no organ and produced no
                 # action at all — and re-sanitizing an empty list stays empty.
-                fallback = parse_intent(
-                    message=message or "Describe what is shown.",
+                fallback = _ai_parse_typed(
+                    typed_message,
                     available_organs=available_organs,
                     viewer_state=viewer_state,
                     case_id=case_id or None,
                 )
                 fallback_actions = _ai_sanitize_actions(fallback.get("actions", []), available_organs)
-                question_mode = _ai_question_mode(message, fallback_actions)
+                question_mode = _ai_question_mode(typed_message, fallback_actions)
             else:
                 metrics, metric_source = [], "skipped"
 
             # Send the viewer actions early so the viewer reacts immediately
             # (e.g. isolate the liver) while the text is still generating.
-            if fallback_actions:
+            # Only when the parser read the message as a command: a question
+            # never moves the viewer before the answer arrives.
+            if fallback_actions and fallback.get("intent") in {"viewer_action", "hybrid"}:
                 yield sse({"type": "actions", "actions": fallback_actions})
 
             # Exact measurement sentences that MUST appear when the user asked
@@ -7713,18 +8050,21 @@ def ai_command_stream():
             # relevance gate: a question that mentions a tumour is by definition
             # about them, and the negative ("no lesion is present") is the fact
             # that stops a model inventing one.
-            lesion_ctx = _ai_lesion_context(case_id, message) if lesion_question else None
-            structure_facts = _ai_structure_facts(case_id, message) if structure_question else []
+            lesion_ctx = _ai_lesion_context(case_id, typed_message) if lesion_question else None
+            structure_facts = _ai_structure_facts(case_id, typed_message, metrics) if structure_question else []
             case_inventory = _ai_case_inventory(case_id, metrics) if case_question else ""
             component_facts = (
-                _ai_component_facts(message, metrics, available_organs)
+                _ai_component_facts(typed_message, metrics, available_organs)
                 if case_question else []
             )
             if lesion_ctx:
                 yield sse({"type": "status", "text": "Checking the segmentation for lesions"})
 
-            conversation_text = " ".join(turn["content"] for turn in conversation[-4:])
-            candidate_facts = _ai_case_facts(message, metrics, metadata) if references_case else []
+            # A document's text would make every fact look relevant, so only what was typed counts.
+            conversation_text = " ".join(
+                turn["content"].split(_AI_DOCUMENT_MARKER)[0] for turn in conversation[-4:]
+            )
+            candidate_facts = _ai_case_facts(typed_message, metrics, metadata) if references_case else []
             if lesion_ctx:
                 # Drop the generic "Pancreatic Lesion: volume X" line. The lesion
                 # path already states the same volume with the context that
@@ -7742,13 +8082,13 @@ def ai_command_stream():
                 required_facts
                 if (
                     question_mode == "case_measurement"
-                    or ai_reasoning.asks_for_measurement(message)
+                    or ai_reasoning.asks_for_measurement(typed_message)
                 )
                 else []
             )
             exact_facts = ai_reasoning.relevant_facts(
                 candidate_facts + required_facts,
-                message,
+                typed_message,
                 conversation_text=conversation_text,
                 always_include=(
                     (lesion_ctx["facts"] if lesion_ctx else [])
@@ -7796,8 +8136,11 @@ def ai_command_stream():
                 yield sse({"type": "status", "text": "Looking into this case"})
                 agent_prompt = message
                 if conversation:
-                    recent = conversation[-4:]
-                    convo_str = "\n".join(f"{t['role']}: {t['content'][:800]}" for t in recent)
+                    recent = _ai_history_window(conversation, 4)
+                    convo_str = "\n".join(
+                        f"{t['role']}: {t['content'] if _ai_is_document_turn(t) else t['content'][:800]}"
+                        for t in recent
+                    )
                     agent_prompt = f"Recent conversation:\n{convo_str}\n\nQuestion: {agent_prompt}"
                 agent_prompt += (
                     f"\n\n(Open case: {case_id}. Segmented structures: "
@@ -7895,14 +8238,15 @@ def ai_command_stream():
             # structured-read prompt saying "identify every organ by its mask
             # color") must NOT hijack the message away from the vision model,
             # which previously reduced a five-part read to a legend dump.
-            norm_msg = _ai_norm(message)
+            norm_msg = _ai_norm(typed_message)
             asks_color = bool(
-                len(message) < 120
+                len(typed_message) < 120
                 and re.search(r"\b(what|which)\s+colou?r\b|\bcolou?r\s+is\b", norm_msg)
             )
             if images and mask_legend and asks_color:
-                legend_reply = _ai_legend_answer(message, mask_legend)
+                legend_reply = _ai_legend_answer(typed_message, mask_legend)
                 if legend_reply:
+                    legend_reply = ai_reasoning.strip_em_dashes(legend_reply)
                     yield sse({"type": "reply", "delta": legend_reply})
                     yield sse({
                         "type": "final", "reply": legend_reply,
@@ -7926,10 +8270,7 @@ def ai_command_stream():
                 # infer from the images alone which pane is which, and a request
                 # phrased "for each pane" gets answered as one blended image.
                 user_prompt = (
-                    f"{len(images)} CT viewer screenshot(s) are attached to this "
-                    "message, in the viewer's pane order (axial, sagittal, "
-                    "coronal, then the 3D surface rendering when present). Look "
-                    "at them before answering.\n\n"
+                    f"{_ai_attachment_intro(len(images), uploaded_images)}\n\n"
                     f"{user_prompt}"
                 )
             if case_inventory:
@@ -7941,7 +8282,7 @@ def ai_command_stream():
             # flattened into the prompt text: a model that can see its own last
             # reply continues the thread, which is what makes "here are the labs
             # you asked for" attach to the question that asked for them.
-            history = conversation[-6:]
+            history = _ai_history_window(conversation)
         except Exception as error:
             print("[ai_command_stream setup error]", type(error).__name__, str(error))
             yield sse({"type": "error", "message": "An internal error occurred while preparing the answer."})
@@ -7967,12 +8308,23 @@ def ai_command_stream():
             model_for_call = resolve_text_model(selected_model)
 
         model_ok = False
+        answer_recorded = False
+
+        def record_answer_once():
+            # Counted at the first model text, not at the final event: a client
+            # that reads the answer and drops the connection closes this
+            # generator before the final event is reached.
+            nonlocal answer_recorded
+            if not answer_recorded:
+                answer_recorded = True
+                _ai_record_answered(stream_user)
 
         if vision_missing:
             offline = ai_reasoning.model_offline_reply(
                 has_images=True,
                 vision_model_missing=True,
                 configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+                only_uploads=uploaded_images >= len(images),
             )
             yield sse({"type": "reply", "delta": offline})
             yield sse({
@@ -8001,9 +8353,11 @@ def ai_command_stream():
         if agent_final is not None:
             # The agent loop already wrote the answer (and it is already
             # think-stripped) — emit it directly instead of generating twice.
+            agent_final = ai_reasoning.strip_em_dashes(agent_final)
             raw_content = agent_final
             emitted = agent_final
             model_ok = True
+            record_answer_once()
             yield sse({"type": "reply", "delta": agent_final})
         else:
             try:
@@ -8012,6 +8366,7 @@ def ai_command_stream():
                     system_prompt=_ai_stream_system_prompt(
                         bool(images),
                         has_case=bool(case_id),
+                        has_screenshots=uploaded_images < len(images),
                     ),
                     user_prompt=user_prompt,
                     images=images or None,
@@ -8033,11 +8388,16 @@ def ai_command_stream():
                         and "</think>" not in raw_content
                     ):
                         continue
-                    cleaned = _ai_strip_think(raw_content, orphan_closer=hold_for_think)
-                    if len(cleaned) > len(emitted):
+                    # Em dashes are rewritten as the text streams, with the
+                    # tail held back, so the final reply matches what was shown.
+                    cleaned = ai_reasoning.strip_em_dashes_streaming(
+                        _ai_strip_think(raw_content, orphan_closer=hold_for_think)
+                    )
+                    if len(cleaned) > len(emitted) and cleaned.startswith(emitted):
                         delta = cleaned[len(emitted):]
                         emitted = cleaned
                         model_ok = True
+                        record_answer_once()
                         yield sse({"type": "reply", "delta": delta})
             except OllamaModelMissing as error:
                 stream_error = True
@@ -8065,13 +8425,38 @@ def ai_command_stream():
         ):
             raw_content = ""
 
-        streamed_reply = _ai_strip_think(raw_content, orphan_closer=hold_for_think).strip()
+        streamed_reply = ai_reasoning.strip_em_dashes(
+            _ai_strip_think(raw_content, orphan_closer=hold_for_think)
+        ).strip()
+        # The text held back at the end of the stream (a dash and the word after
+        # it, or an unclosed backtick) is sent now that nothing more is coming.
+        if agent_final is None and emitted and len(streamed_reply) > len(emitted) and streamed_reply.startswith(emitted):
+            yield sse({"type": "reply", "delta": streamed_reply[len(emitted):]})
+            emitted = streamed_reply
         # A held-back reasoning stream may finish without ever emitting a
         # delta; a non-empty cleaned reply still counts as a model answer.
         if streamed_reply:
             model_ok = True
+            record_answer_once()
 
-        if model_ok and streamed_reply:
+        # A stream that died part-way leaves real text behind, so it still counts
+        # as a model answer, but it is half a sentence, not a finished reply.
+        # It is sent as it stands (no follow-up question is bolted on, which
+        # would make it read as complete) and followed by an error event.
+        truncated = bool(stream_error and streamed_reply)
+
+        if truncated:
+            final_reply = streamed_reply
+            # Half a sentence still must not assert a lesion the segmentation
+            # measured as absent. Only the steps that would make it read as
+            # whole (the fact safety net and the closing question) are skipped.
+            if lesion_ctx and lesion_ctx["available"]:
+                final_reply = ai_reasoning.reconcile_lesion_answer(
+                    final_reply,
+                    absent_displays=lesion_ctx["absent"],
+                    present_displays=lesion_ctx["present"],
+                )
+        elif model_ok and streamed_reply:
             # Trust the model's conversational answer: it was given the exact
             # values and is instructed to end with a relevant follow-up
             # question, so keep that text (grounding would strip the follow-up).
@@ -8123,8 +8508,8 @@ def ai_command_stream():
 
             final_reply = ai_reasoning.ensure_followup(
                 final_reply,
-                message,
-                has_images=bool(images),
+                typed_message,
+                has_images=uploaded_images < len(images),
                 has_case=bool(case_id),
                 # Never force a question onto a complete answer. ensure_followup
                 # still adds one when the reply admits something is missing —
@@ -8143,6 +8528,7 @@ def ai_command_stream():
             parts = []
             if action_confirmation:
                 parts.append(action_confirmation)
+            grounded = False
 
             # The lesion answer is measured, not generated, so it stands on its
             # own when the model is offline. Saying it and THEN apologising for
@@ -8153,14 +8539,16 @@ def ai_command_stream():
                 else ""
             )
             if grounded_answer:
+                grounded = True
                 parts.append(grounded_answer)
                 parts.append(
                     "Would you like me to isolate that region in the viewer so "
                     "you can look through it slice by slice?"
                 )
-            if images and mask_legend and _ai_norm(message):
-                legend_reply = _ai_legend_answer(message, mask_legend)
+            if images and mask_legend and _ai_norm(typed_message):
+                legend_reply = _ai_legend_answer(typed_message, mask_legend)
                 if legend_reply:
+                    grounded = True
                     parts.append(legend_reply)
             if not grounded_answer:
                 parts.append(
@@ -8168,6 +8556,7 @@ def ai_command_stream():
                         has_images=bool(images),
                         vision_model_missing=stream_error_missing_model and bool(images),
                         configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+                        only_uploads=bool(images) and uploaded_images >= len(images),
                     )
                 )
             final_reply = " ".join(part for part in parts if part).strip()
@@ -8176,16 +8565,23 @@ def ai_command_stream():
             final_reply = ai_reasoning.model_offline_reply(
                 has_images=bool(images),
                 configured_vision_model=DEFAULT_OLLAMA_VISION_MODEL,
+                only_uploads=bool(images) and uploaded_images >= len(images),
             )
 
         yield sse({
             "type": "final",
-            "reply": final_reply,
+            "reply": ai_reasoning.strip_em_dashes(final_reply),
             "actions": fallback_actions,
             "source": "ollama" if model_ok else "rule_fallback",
             "model": model_for_call if model_ok else None,
             "intent": fallback.get("intent") or question_mode,
+            # Measured or legend facts that stand as an answer while the model
+            # is offline; the client keeps those and does not offer a retry.
+            "grounded": bool(not model_ok and grounded),
+            "truncated": truncated,
         })
+        if truncated:
+            yield sse({"type": "error", "message": "The answer was cut off."})
         yield sse({"type": "done"})
 
     return Response(
@@ -8292,7 +8688,7 @@ def list_edited_masks(case_id):
 # instead of queueing until the worker starves.
 _ANALYSIS_SLOTS = threading.BoundedSemaphore(2)
 _ANALYSIS_BUSY_RESPONSE = (
-    {"error": "The analysis service is busy — try again in a moment."},
+    {"error": "The analysis service is busy. Try again in a moment."},
     503,
 )
 

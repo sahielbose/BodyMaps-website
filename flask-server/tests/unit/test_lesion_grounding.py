@@ -170,6 +170,8 @@ def test_the_segmentation_fact_marker_is_stripped_for_display():
     )
     assert "SEGMENTATION FACT" not in shown
     assert shown.startswith("A pancreatic lesion")
+    assert "IS" not in shown.split()
+    assert "is present" in shown
 
 
 def test_instruction_only_facts_are_never_shown():

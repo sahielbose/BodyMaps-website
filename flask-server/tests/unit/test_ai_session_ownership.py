@@ -15,6 +15,7 @@ from api import api_blueprint as bp
 
 SESSION = "11111111-2222-3333-4444-555555555555"
 CV_SESSION = "CV-abc"
+QUESTION = "how many structures are segmented and is there a pancreatic lesion?"
 
 
 @pytest.fixture
@@ -50,6 +51,58 @@ def world(monkeypatch):
     monkeypatch.setattr(bp, "chat_with_tools", offline)
     state["seen"] = seen
     return state
+
+
+def _ask(path, case_id):
+    app = Flask(__name__)
+    app.add_url_rule("/api/ai-command", view_func=bp.ai_command, methods=["POST"])
+    app.add_url_rule("/api/ai-command-stream", view_func=bp.ai_command_stream, methods=["POST"])
+    response = app.test_client().post(path, json={"message": QUESTION, "session_id": case_id})
+    response.get_data()
+    return response
+
+
+def _case_ids(world):
+    return {case_id for _kind, case_id in world["seen"]}
+
+
+@pytest.mark.parametrize("path", ["/api/ai-command", "/api/ai-command-stream"])
+def test_the_owner_gets_their_own_session_read(world, path):
+    _ask(path, SESSION)
+    assert SESSION in _case_ids(world)
+
+
+@pytest.mark.parametrize("path", ["/api/ai-command", "/api/ai-command-stream"])
+def test_another_user_never_reaches_a_session_the_assistant_reads(world, path):
+    world["user"] = {"id": "someone-else"}
+    _ask(path, SESSION)
+    assert SESSION not in _case_ids(world)
+
+
+@pytest.mark.parametrize("path", ["/api/ai-command", "/api/ai-command-stream"])
+def test_a_cv_shaped_upload_id_is_still_owned_by_its_uploader(world, path):
+    world["user"] = {"id": "someone-else"}
+    _ask(path, CV_SESSION)
+    assert CV_SESSION not in _case_ids(world)
+    world["user"] = {"id": "owner"}
+    _ask(path, CV_SESSION)
+    assert CV_SESSION in _case_ids(world)
+
+
+@pytest.mark.parametrize("path", ["/api/ai-command", "/api/ai-command-stream"])
+def test_an_admin_can_ask_about_any_session(world, path):
+    world["user"] = {"id": "admin"}
+    world["admin"] = True
+    _ask(path, SESSION)
+    assert SESSION in _case_ids(world)
+
+
+@pytest.mark.parametrize("path", ["/api/ai-command", "/api/ai-command-stream"])
+@pytest.mark.parametrize("dataset_id", ["35", "CV0001"])
+def test_dataset_ids_stay_open_to_any_signed_in_user(world, path, dataset_id):
+    world["user"] = {"id": "someone-else"}
+    _ask(path, dataset_id)
+    assert dataset_id in _case_ids(world)
 
 
 def test_case_allowed_covers_owner_other_admin_and_dataset(world):

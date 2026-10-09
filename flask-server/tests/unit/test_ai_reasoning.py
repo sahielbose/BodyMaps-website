@@ -139,15 +139,21 @@ def test_a_mid_paragraph_question_does_not_count_as_a_closing_question():
 # Failure text
 # ---------------------------------------------------------------------------
 
-def test_a_missing_vision_model_says_what_to_pull():
+def test_a_missing_vision_model_reply_is_plain_language(capsys):
     reply = ai_reasoning.model_offline_reply(
         has_images=True,
         vision_model_missing=True,
         configured_vision_model="qwen3-vl:4b",
     )
 
-    assert "ollama pull qwen3-vl:4b" in reply
-    assert reply.rstrip().endswith("?")
+    # The bubble is read by a visitor who cannot pull a model or restart the
+    # backend; the admin hint goes to the server log.
+    assert "ollama" not in reply.lower()
+    assert "backend" not in reply
+    assert "`" not in reply
+    assert "?" not in reply
+    assert "without them" in reply
+    assert "ollama pull qwen3-vl:4b" in capsys.readouterr().out
 
 
 def test_the_offline_reply_never_recites_measurements():

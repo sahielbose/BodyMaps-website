@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 ALLOWED_ACTION_TYPES = {
@@ -26,6 +27,11 @@ ALLOWED_VIEW_MODES = {"mpr", "axial", "sagittal", "coronal", "3d"}
 ALLOWED_PRESETS = {"soft_tissue", "bone", "lung", "liver"}
 ALLOWED_METRICS = {"volume_cm3", "mean_hu", "all"}
 ALLOWED_TOOLS = {"distance", "probe", "roi"}
+# The viewer's zoom range, the same as MIN_ZOOM and MAX_ZOOM in
+# PanTS-Demo/src/helpers/viewer/useKeyboardShortcuts.ts. The confirmation sentence
+# quotes the value, so a wider range here would claim a zoom the panes never show.
+MIN_ZOOM = 0.2
+MAX_ZOOM = 8
 
 ORGAN_SYNONYMS = {
     "liver": ["liver", "hepatic"],
@@ -58,8 +64,11 @@ def _normalize(text: str) -> str:
     value = value.replace("hounsfield units", "hu").replace("hounsfield unit", "hu")
     value = value.replace("3 d", "3d")
     cleaned = []
-    for char in value:
-        if char.isalnum() or char.isspace() or char in {"%", ".", "-"}:
+    for index, char in enumerate(value):
+        # A "." stays in front of a digit ("0.5", ".5"); at the end of a sentence
+        # it would glue itself to the last word ("isolate the liver.").
+        decimal_point = char == "." and index < len(value) - 1 and value[index + 1].isdigit() and (index == 0 or not value[index - 1].isalpha())
+        if char.isalnum() or char.isspace() or char in {"%", "-"} or decimal_point:
             cleaned.append(char)
         else:
             cleaned.append(" ")
@@ -72,6 +81,127 @@ def _pretty_organ(value: str) -> str:
 
 def _contains_any(text: str, terms: list[str]) -> bool:
     return any(term in text for term in terms)
+
+
+def _has_word(text: str, words: list[str]) -> bool:
+    """Whole-word test, so "mpr" is not found in "comprehensive" or "roi" in "microinvasive"."""
+    return any(_has_phrase(text, word) for word in words)
+
+
+# Words that open a question. A message that starts with one asks about the
+# scan, it does not tell the viewer to change. "can", "could", "would" and
+# "will" are here too; "can you", "could we", "would you" and "will I" are
+# polite commands and are handled before this test.
+_QUESTION_OPENERS = {
+    "what", "whats", "is", "are", "was", "were", "does", "do", "did",
+    "how", "why", "which", "where", "when", "who",
+    "should", "would", "could", "can", "will", "shall", "has", "have", "had",
+    "any", "explain", "describe",
+}
+_COMMAND_LEADS = r"(?:(?:please|kindly|can you|could you|would you|will you|now|then|and|also|just)\s+)*"
+# Filler a person puts in front of a clause without changing what it is.
+_FILLER_LEAD = re.compile(r"^(?:(?:please|kindly|now|ok|okay|and|then|also|just|hey|hi|thanks|thank you|so|well)\s+)+")
+# "Can you ...", "Could we ...", "May I ..." and "Is there a way to ..." ask for
+# a change politely; what follows decides whether it is a command or a question.
+# "Would I ..." and "Will we ..." ask what would happen, so they stay questions.
+_POLITE_LEAD = re.compile(r"^(?:(?:can|could|would|will) you|(?:can|could|may) (?:we|i)|is there (?:a|any|some) way to)\b\s*")
+# Phrasings that ask for a change in question form ("what about only showing
+# the liver?"). They are commands, so the question rules leave them alone.
+_SUGGESTION_LEAD = re.compile(r"^(?:what about|how about|what if|is it possible to)\b")
+# A verb that tells the viewer what to do. A clause that opens with one is a
+# command even when it ends with a question mark ("Hide the spleen?").
+_COMMAND_OPENER = re.compile(
+    r"^(?:show|hide|isolate|zoom|display|highlight|switch|use|set|apply|enable|activate|turn|remove|segment|"
+    r"focus|center|centre|go|jump|navigate|reset|clear|measure|make|change|increase|decrease|raise|lower|"
+    r"reduce|select|open|start|fit|bring|only|keep|toggle)\b"
+)
+# A conjunction that starts a new clause because a question follows it
+# ("isolate the liver and tell me its volume"). "any" is left out: "and any
+# fat" is more often part of a list than a new question.
+_QUESTION_CLAUSE_SPLIT = re.compile(
+    r"\s*(?:[,;]|\b(?:and|then|but|also)\b)\s+(?=(?:what|how|why|which|where|when|who|is|are|does|did|tell me|explain|describe|give me)\b)",
+    re.IGNORECASE,
+)
+# Actions that change what the viewer shows. A question never runs these; the
+# read-only ones (counts, lists, organ metrics) still answer it.
+_VIEWER_CHANGING_ACTIONS = {
+    "isolate_organs", "show_organs", "hide_organs", "focus_organ",
+    "set_opacity", "set_window", "set_window_preset", "set_zoom", "zoom_to_fit",
+    "set_view", "activate_measurement_tool", "clear_measurements",
+}
+
+
+def _opens_question(text: str) -> bool:
+    tokens = text.split()
+    return bool(tokens) and (tokens[0] in _QUESTION_OPENERS or text.startswith("tell me"))
+
+
+def _strip_leads(norm: str) -> str:
+    """The clause without the filler and polite leads in front of it ("ok, could we remove the spleen" becomes "remove the spleen")."""
+    rest = _FILLER_LEAD.sub("", norm, count=1)
+    polite = _POLITE_LEAD.match(rest)
+    if polite:
+        rest = _FILLER_LEAD.sub("", rest[polite.end():], count=1)
+    return rest
+
+
+def _clause_kind(norm: str, asked: bool) -> str:
+    """"question", "command" or "other" for one clause of a message.
+
+    `asked` is true when a question mark ends the clause. It makes a clause with
+    no recognised opener a question, but never one that opens with a command verb.
+    """
+    rest = _FILLER_LEAD.sub("", norm, count=1)
+    if _SUGGESTION_LEAD.match(rest):
+        return "command"
+    polite = _POLITE_LEAD.match(rest)
+    if polite:
+        # "Can you show the liver?" is a command; "Can you tell me about the liver?" is not.
+        rest = _FILLER_LEAD.sub("", rest[polite.end():], count=1)
+        return "question" if _opens_question(rest) else "command"
+    if _opens_question(rest):
+        return "question"
+    if _COMMAND_OPENER.match(rest):
+        return "command"
+    return "question" if asked else "other"
+
+
+def _classified_clauses(message: str) -> list[tuple[str, str]]:
+    """Split a message into sentences, and a sentence into clauses at a conjunction that starts a question.
+
+    Returns (normalized clause, kind) pairs. The question mark belongs to the
+    last clause of its sentence.
+    """
+    clauses = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", message):
+        if not sentence.strip():
+            continue
+        asked = re.search(r"\?[\s!.\"')]*$", sentence) is not None
+        parts = _QUESTION_CLAUSE_SPLIT.split(sentence)
+        for index, part in enumerate(parts):
+            norm = _normalize(part)
+            if norm:
+                clauses.append((norm, _clause_kind(norm, asked and index == len(parts) - 1)))
+    return clauses
+
+
+def is_question(message: str, norm: str) -> bool:
+    """True when the message asks about the scan instead of telling the viewer what to do.
+
+    `message` is the original text, because `_normalize` strips the question mark.
+    A message that mixes a command with a question is not a question as a whole;
+    `parse_intent` keeps the viewer actions of its command clauses only.
+    """
+    kinds = [kind for _, kind in _classified_clauses(message)]
+    if not kinds:
+        return _clause_kind(norm, message.rstrip().endswith("?")) == "question"
+    return "question" in kinds and "command" not in kinds
+
+
+def _imperative(norm: str, verbs: list[str]) -> bool:
+    """A verb used as a command: the message opens with it, or it follows a filler or polite lead such as "ok", "could we" or "and"."""
+    alternatives = "|".join(re.escape(verb) for verb in verbs)
+    return re.search(rf"^{_COMMAND_LEADS}(?:{alternatives})\b", _strip_leads(norm)) is not None or re.search(rf"\b(?:and|then|also|please)\s+(?:{alternatives})\b", norm) is not None
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -258,9 +388,16 @@ def _parse_opacity(norm: str, viewer_state: dict[str, Any]) -> dict[str, Any] | 
 
 def _parse_window(norm: str, viewer_state: dict[str, Any]) -> list[dict[str, Any]]:
     actions = []
-    presets = {"soft tissue": "soft_tissue", "bone": "bone", "lung": "lung", "liver window": "liver"}
+    presets = {"soft tissue": "soft_tissue", "bone": "bone", "lung": "lung", "liver": "liver"}
     for phrase, preset in presets.items():
-        if phrase in norm and ("window" in norm or phrase != "liver window"):
+        # "bone" and "lung" are also ordinary anatomy words, so a preset needs
+        # the word "window" or "preset" beside it, or a command that names it.
+        named = (
+            re.search(rf"\b{phrase} (?:window|preset)\b", norm)
+            or re.search(rf"\b(?:window|preset) (?:preset )?(?:to |of |for )?{phrase}\b", norm)
+            or (phrase != "liver" and re.search(rf"\b(?:switch to|use|apply|set|change to|select) (?:the |a )?{phrase}(?: window| preset| setting)?$", norm))
+        )
+        if named:
             return [{"type": "set_window_preset", "preset": preset}]
     width = float(viewer_state.get("windowWidth", 400) or 400)
     center = float(viewer_state.get("windowCenter", 50) or 50)
@@ -272,23 +409,25 @@ def _parse_window(norm: str, viewer_state: dict[str, Any]) -> list[dict[str, Any
         actions.append({"type": "set_window", "width": max(1, width - 80), "center": center})
     if _contains_any(norm, ["decrease contrast", "less contrast", "lower contrast"]):
         actions.append({"type": "set_window", "width": width + 80, "center": center})
-    parsed_width = _number_after_terms(norm, ["window width", "ww", "contrast"])
-    parsed_center = _number_after_terms(norm, ["window center", "window level", "wc", "level", "brightness"])
+    # A bare "contrast 100 mL" or "level 3" is report wording, not a window
+    # value, so those words count only after a verb that sets them.
+    parsed_width = _number_after_terms(norm, ["window width", "ww", "set contrast", "use contrast", "contrast to"])
+    parsed_center = _number_after_terms(norm, ["window center", "window level", "wc", "set level", "use level", "level to", "set brightness", "brightness to"])
     if parsed_width is not None or parsed_center is not None:
         actions.append({"type": "set_window", "width": max(1, parsed_width if parsed_width is not None else width), "center": parsed_center if parsed_center is not None else center})
     return actions
 
 
 def _parse_view(norm: str) -> dict[str, Any] | None:
-    if "mpr" in norm or "multi planar" in norm or "multiplanar" in norm:
+    if _has_word(norm, ["mpr", "multi planar", "multiplanar"]):
         return {"type": "set_view", "view": "mpr"}
-    if "axial" in norm:
+    if _has_word(norm, ["axial"]):
         return {"type": "set_view", "view": "axial"}
-    if "sagittal" in norm or "side view" in norm:
+    if _has_word(norm, ["sagittal", "side view"]):
         return {"type": "set_view", "view": "sagittal"}
-    if "coronal" in norm or "front view" in norm:
+    if _has_word(norm, ["coronal", "front view"]):
         return {"type": "set_view", "view": "coronal"}
-    if "3d" in norm or "three dimensional" in norm or "volume view" in norm:
+    if _has_word(norm, ["3d", "three dimensional", "volume view"]):
         return {"type": "set_view", "view": "3d"}
     return None
 
@@ -297,24 +436,33 @@ def _parse_zoom(norm: str, viewer_state: dict[str, Any]) -> dict[str, Any] | Non
     current = float(viewer_state.get("zoomLevel", 1) or 1)
     explicit = _number_after_terms(norm, ["zoom"])
     if explicit is not None:
-        return {"type": "set_zoom", "value": _clamp(explicit, 0.1, 20)}
+        return {"type": "set_zoom", "value": _clamp(explicit, MIN_ZOOM, MAX_ZOOM)}
     if "zoom to fit" in norm or "fit to screen" in norm or "reset zoom" in norm:
         return {"type": "zoom_to_fit"}
-    if "zoom in" in norm:
-        return {"type": "set_zoom", "value": _clamp(current + 0.25, 0.1, 20)}
-    if "zoom out" in norm:
-        return {"type": "set_zoom", "value": _clamp(current - 0.25, 0.1, 20)}
+    if _has_word(norm, ["zoom in", "zoom into"]):
+        return {"type": "set_zoom", "value": _clamp(current + 0.25, MIN_ZOOM, MAX_ZOOM)}
+    if _has_word(norm, ["zoom out"]):
+        return {"type": "set_zoom", "value": _clamp(current - 0.25, MIN_ZOOM, MAX_ZOOM)}
     return None
 
 
 def _parse_measurement(norm: str) -> dict[str, Any] | None:
     if "clear measurement" in norm or "remove measurement" in norm or "delete measurement" in norm:
         return {"type": "clear_measurements"}
-    if "roi" in norm or "region of interest" in norm or "area tool" in norm:
+    if _has_word(norm, ["roi", "region of interest", "area tool"]):
         return {"type": "activate_measurement_tool", "tool": "roi"}
-    if "distance" in norm or "ruler" in norm or "measure length" in norm:
+    # "distance" and "probe" are ordinary words in a question about the scan,
+    # so they count only as a named tool or after a verb that turns one on.
+    use = r"(?:use|activate|enable|start|open|select|switch to|turn on|set)(?: the| a| an)?"
+    measure = r"measur(?:e|ing)(?: the| a)?"
+    turn_on = r"turn (?:the |a |an )?{tool}(?: tool)? on"
+    if (
+        _has_word(norm, ["ruler", "distance tool", "distance measurement"])
+        or re.search(rf"\b(?:{use}|{measure}) (?:length|distance)\b", norm)
+        or re.search(rf"\b{turn_on.format(tool='distance')}\b", norm)
+    ):
         return {"type": "activate_measurement_tool", "tool": "distance"}
-    if "hu probe" in norm or "probe" in norm or "point hu" in norm or "click hu" in norm:
+    if _has_word(norm, ["hu probe", "point hu", "click hu", "probe tool"]) or re.search(rf"\b{use} probe\b", norm) or re.search(rf"\b{turn_on.format(tool='probe')}\b", norm):
         return {"type": "activate_measurement_tool", "tool": "probe"}
     return None
 
@@ -324,22 +472,25 @@ def _parse_organ_actions(norm: str, available_organs: list[str]) -> list[dict[st
     organs = _match_organs(norm, available_organs)
     if not organs:
         return actions
-    if _contains_any(norm, ["volume", "how big", "size"]):
+    if _contains_any(norm, ["volume", "how big"]) or _has_word(norm, ["size"]):
         actions.append({"type": "get_organ_metric", "organ": organs[0], "metric": "volume_cm3"})
     if _contains_any(norm, ["mean hu", "average hu", "hu of", "hounsfield"]):
         actions.append({"type": "get_organ_metric", "organ": organs[0], "metric": "mean_hu"})
     if _contains_any(norm, ["statistics", "stats", "metrics"]):
         actions.append({"type": "get_organ_metric", "organ": organs[0], "metric": "all"})
-    if _contains_any(norm, ["only show", "show only", "isolate", "segment", "segmentation of", "just show", "display only"]):
+    # "segment" and "remove" are ordinary words in a question about the scan
+    # ("is the pancreas segmented correctly", "if the surgeon has to remove the
+    # spleen"), and "isolated" is not "isolate", so those count only as a command.
+    if _contains_any(norm, ["only show", "show only", "just show", "display only", "see only", "only see", "keep only", "only keep"]) or _has_word(norm, ["isolate"]) or _imperative(norm, ["segment", "segmentation of"]):
         actions.append({"type": "isolate_organs", "organs": organs})
         return actions
-    if _contains_any(norm, ["hide", "remove", "turn off"]):
+    if _has_word(norm, ["hide", "turn off"]) or _imperative(norm, ["remove"]):
         actions.append({"type": "hide_organs", "organs": organs})
         return actions
-    if _contains_any(norm, ["focus", "center", "go to", "jump to", "navigate to"]):
+    if _has_word(norm, ["focus", "center", "go to", "jump to", "navigate to"]):
         actions.append({"type": "focus_organ", "organ": organs[0]})
         return actions
-    if _contains_any(norm, ["show", "display", "highlight", "make visible"]):
+    if _has_word(norm, ["show", "display", "highlight", "make visible"]):
         actions.append({"type": "show_organs", "organs": organs})
     return actions
 
@@ -372,7 +523,7 @@ def _validate_action(action: dict[str, Any], available_organs: list[str]) -> boo
         value = action.get("value")
         if not isinstance(value, (int, float)):
             return False
-        action["value"] = _clamp(float(value), 0.1, 20)
+        action["value"] = _clamp(float(value), MIN_ZOOM, MAX_ZOOM)
         return True
     if action_type == "set_view":
         return action.get("view") in ALLOWED_VIEW_MODES
@@ -424,6 +575,28 @@ def _action_label(action: dict[str, Any]) -> str:
     return "Click below to apply this action."
 
 
+def _collect_actions(norm: str, available_organs: list[str], viewer_state: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = []
+    case_action = _parse_case_data_question(norm)
+    if case_action:
+        actions.append(case_action)
+    opacity_action = _parse_opacity(norm, viewer_state)
+    if opacity_action:
+        actions.append(opacity_action)
+    actions.extend(_parse_window(norm, viewer_state))
+    view_action = _parse_view(norm)
+    if view_action:
+        actions.append(view_action)
+    zoom_action = _parse_zoom(norm, viewer_state)
+    if zoom_action:
+        actions.append(zoom_action)
+    measurement_action = _parse_measurement(norm)
+    if measurement_action:
+        actions.append(measurement_action)
+    actions.extend(_parse_organ_actions(norm, available_organs))
+    return actions
+
+
 def parse_intent(message: str, available_organs: list[str], viewer_state: dict | None = None, case_id: str | None = None) -> dict[str, Any]:
     norm = _normalize(message[:1000])
     current_viewer_state = viewer_state or {}
@@ -432,24 +605,17 @@ def parse_intent(message: str, available_organs: list[str], viewer_state: dict |
         return {"reply": "Please type a question or viewer command.", "actions": [], "source": "hardcoded", "intent": "clarification_needed"}
     if _unsafe_medical_request(norm):
         return _unsafe_reply()
-    actions = []
-    case_action = _parse_case_data_question(norm)
-    if case_action:
-        actions.append(case_action)
-    opacity_action = _parse_opacity(norm, current_viewer_state)
-    if opacity_action:
-        actions.append(opacity_action)
-    actions.extend(_parse_window(norm, current_viewer_state))
-    view_action = _parse_view(norm)
-    if view_action:
-        actions.append(view_action)
-    zoom_action = _parse_zoom(norm, current_viewer_state)
-    if zoom_action:
-        actions.append(zoom_action)
-    measurement_action = _parse_measurement(norm)
-    if measurement_action:
-        actions.append(measurement_action)
-    actions.extend(_parse_organ_actions(norm, current_organs))
+    actions = _collect_actions(norm, current_organs, current_viewer_state)
+    clauses = _classified_clauses(message[:1000])
+    if any(kind == "question" for _, kind in clauses):
+        # A question never moves the viewer, but a command clause beside it still does.
+        command_actions = [
+            action
+            for clause, kind in clauses
+            if kind == "command"
+            for action in _collect_actions(clause, current_organs, current_viewer_state)
+        ]
+        actions = [a for a in actions if a["type"] not in _VIEWER_CHANGING_ACTIONS] + [a for a in command_actions if a["type"] in _VIEWER_CHANGING_ACTIONS]
     education = _educational_answer(norm)
     deduped = []
     seen = set()

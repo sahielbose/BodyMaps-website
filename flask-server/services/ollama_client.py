@@ -52,9 +52,10 @@ OLLAMA_VISION_NUM_CTX = int(
     os.getenv("OLLAMA_VISION_NUM_CTX", "12288")
 )
 
-# Hard ceiling on how many images are forwarded in one turn. The viewer sends at
-# most four (axial/sagittal/coronal/3D); more than that is a client bug and only
-# guarantees a context overflow.
+# Hard ceiling on how many images are forwarded in one turn. The viewer's own
+# panes are at most four (axial/sagittal/coronal/3D) and the composer stops at
+# this many images in all; more only guarantees a context overflow. The AI
+# endpoints trim to it first, so the prompt matches what is sent.
 OLLAMA_MAX_IMAGES = int(os.getenv("OLLAMA_MAX_IMAGES", "4"))
 
 # Ceiling on generated tokens. -1 means "no cap": the model generates until it
