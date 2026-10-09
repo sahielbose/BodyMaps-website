@@ -227,4 +227,14 @@ describe("Viewer shell layout", () => {
 		await waitFor(() => expect(trigger).toHaveAccessibleName("Measurement tools"));
 		expect(screen.getByRole("button", { name: "Crosshair mode" })).toHaveAttribute("aria-pressed", "true");
 	});
+
+	it("keeps the closed annotation ribbon and segments panel out of the tab order", () => {
+		renderViewer();
+		const ribbon = document.querySelector(".atb-shell");
+		const segpop = document.querySelector(".segpop");
+		expect(ribbon).toHaveClass("is-closed");
+		expect(segpop).toHaveClass("is-closed");
+		expect(ribbon).toHaveAttribute("inert");
+		expect(segpop).toHaveAttribute("inert");
+	});
 });

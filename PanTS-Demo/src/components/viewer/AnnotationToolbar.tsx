@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useLayoutEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useId, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import {
 	IconBrush,
@@ -18,14 +18,16 @@ import {
 import "./AnnotationToolbar.css";
 import NumberSliderField from "../NumberSliderField";
 import { FlyoutArrow, FlyoutPanel, MenuColumn, MenuRow, MenuDivider, useFlyout } from "./FlyoutPrimitives";
+import { tooltipSide } from "../../helpers/viewer/tooltipSide";
+import { ribbonHiddenStrip, snapRibbonScroll } from "../../helpers/viewer/ribbonSnap";
 import { MAX_DIAMETER_MM, MIN_DIAMETER_MM } from "../../helpers/viewer/brushSize";
-import type { GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
+import { useGuidedStepModalOpen, type GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
+import { focusableWithin, useDialogFocus } from "../../hooks/useDialogFocus";
 
-// sessionStorage keys: once the overview tour (or first-target hint) has
-// been seen, it won't auto-open again FOR THE REST OF THIS TAB SESSION.
-// Deliberately sessionStorage rather than localStorage — these are meant to
-// re-appear on every fresh page load/reload, not just once ever per browser.
-const OVERVIEW_WALKTHROUGH_SEEN_KEY = "mm_annotation_walkthrough_seen";
+// sessionStorage keys: once a hint has been seen, it won't auto-open again
+// FOR THE REST OF THIS TAB SESSION. Deliberately sessionStorage rather than
+// localStorage — these are meant to re-appear on every fresh page
+// load/reload, not just once ever per browser.
 // Guided-flow (Continue / Start over / Exit) explainer. Each guided tool
 // (Grow from Seeds, Copy across slices, Fill between slices, Islands) gets
 // its OWN "seen" flag — so seeing the explainer for one doesn't suppress it
@@ -86,8 +88,6 @@ interface AnnotationToolbarProps {
 	onGuidedPickingChange?: (active: boolean) => void;
 
 	popupRef?: React.RefObject<HTMLDivElement | null>;
-	popupDragRef?: React.RefObject<HTMLDivElement | null>;
-	popupMinRef?: React.RefObject<HTMLButtonElement | null>;
 	sliceJumpRef?: React.RefObject<HTMLDivElement | null>;
 
 	/** The pencil/Annotate button in the main toolbar (VisualizationPage)
@@ -103,12 +103,12 @@ const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon
 	{ id: "paint", label: "Brush", Icon: IconBrush, description: "Paint freehand with a round brush." },
 	{ id: "erase", label: "Erase", Icon: IconEraser, description: "Erase parts of a shape manually." },
 	{ id: "scissors", label: "Scissors", Icon: IconScissors, description: "Lasso tool using anchor points." },
-	{ id: "levelTracing", label: "Level Tracing", Icon: IconRipple, description: "Traces the boundary of similar intensity around cursor." },
+	{ id: "levelTracing", label: "Level tracing", Icon: IconRipple, description: "Traces the boundary of similar intensity around cursor." },
 	{ id: "margin", label: "Margin", Icon: IconArrowsDiagonal, description: "Grow or shrink by a specified margin size." },
 	{ id: "smoothing", label: "Smoothing", Icon: IconWaveSine, description: "Smooth class boundaries." },
 	{ id: "islands", label: "Islands", Icon: IconDroplet, description: "Edit islands (connected components) in a class." },
 	{ id: "logicalOperators", label: "Logical operators", Icon: IconMathFunction, description: "Apply logical operators or combine classes." },
-	{ id: "growFromSeeds", label: "Grow from seeds", Icon: IconWand, description: "Grow a class from user-placed scribbles." },
+	{ id: "growFromSeeds", label: "Grow from seeds", Icon: IconWand, description: "Grow a class from points you click inside and outside it." },
 	{ id: "fillBetweenSlices", label: "Fill between slices", Icon: IconStack2, description: "Interpolate a class's shape between two annotated slices." },
 	{ id: "copyAcrossSlices", label: "Copy across slices", Icon: IconCopy, description: "Copy a class's shape from first to last slice." },
 	{ id: "hollow", label: "Hollow", Icon: IconCircleDashed, description: "Make the class hollow by replacing it with a uniform-thickness shell." },
@@ -138,33 +138,30 @@ function guidedHintGroup(tool: PrimaryEditTool): GuidedHintGroup | null {
 }
 const GUIDED_HINT_COPY: Record<GuidedHintGroup, string> = {
 	growSeeds:
-		"Continue moves on once you've placed your seed scribbles. Start over clears every seed and lets you begin again. Exit leaves Grow from Seeds without changing anything.",
+		"Continue moves on once you've placed your seed points. Start over clears every seed and lets you begin again. Exit leaves Grow from seeds without changing anything.",
 	sliceOps:
 		"Start over clears any choices made and lets you pick again. Exit leaves the tool without changing anything.",
 };
 
+// Height of the strip under the ribbon that the guided-flow controls hang in
+// (the pill is about 45px tall, 6px below the ribbon, and the viewer already
+// leaves 10px), kept in --atb-panel-h while that pill is showing. On a phone
+// or touch screen its buttons are 36px tall rather than 28px, which makes the
+// pill 8px taller, so the strip grows by the same 8px. Keep the query and the
+// 8px in step with the .atb-guided__btn touch rule in the CSS.
+const GUIDED_STRIP_H = 44;
+const GUIDED_STRIP_H_TOUCH = GUIDED_STRIP_H + 8;
+const GUIDED_TOUCH_QUERY = "(max-width: 640px), (pointer: coarse)";
+
+// Phone ribbon start fade: a tool group at least this far in from the row's
+// edge is shown whole (the 32px scroll padding less the 6px group gap), and
+// the gap is that 6px. Keep both in step with .atb__tools in the CSS.
+const RIBBON_FADE_MIN = 26;
+const RIBBON_GROUP_GAP = 6;
+
 // Ribbon height, matches --atb-ribbon-h in CSS. Exported so SegmentsPopup
 // can dock directly beneath the ribbon without duplicating the constant.
 export const ANNOTATION_DOCK_WIDTH = 60;
-
-function MagnetIcon({ active: _active }: { active?: boolean }) {
-	// Always white — this row's background never goes solid light like an
-	// .is-active MenuRow, so a dark stroke would be invisible here.
-	const stroke = "#fff";
-	return (
-		<svg width="16" height="16" viewBox="0 0 20 20" fill="none">
-			<path
-				d="M6 3 L6 10 A4 4 0 0 0 14 10 L14 3"
-				stroke={stroke}
-				strokeWidth="2"
-				strokeLinecap="round"
-			/>
-			<path d="M6 3 H3 V7 H6" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-			<path d="M14 3 H17 V7 H14" stroke={stroke} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-			<path d="M2.5 12.5 L4.5 11.2 M17.5 12.5 L15.5 11.2" stroke={stroke} strokeWidth="1.3" strokeLinecap="round" opacity="0.6" />
-		</svg>
-	);
-}
 
 function DiameterFlyout({
 	title, diameterMm, onDiameterChange, onPreviewChange, fieldRef,
@@ -187,7 +184,7 @@ function DiameterFlyout({
 					max={MAX_DIAMETER_MM}
 					step={0.5}
 					unit="mm"
-					ariaLabel={`${title} diameter`}
+					ariaLabel={title}
 					onPreviewChange={onPreviewChange}
 				/>
 			</div>
@@ -208,19 +205,31 @@ function ScissorsFlyout({ options, onChange, onCloseSettings }: {
 		onChange({ ...options, [key]: value });
 
 	// Brief "picked" state on the row before the settings flyout collapses.
+	// onCloseSettings closes whichever tool's settings are open, so the
+	// pending close is dropped when this unmounts (Scissors deselected, or
+	// another tool picked within the beat, whose flyout it would otherwise
+	// shut) and a second pick replaces the first rather than stacking.
+	const closeTimerRef = useRef<number | null>(null);
+	useEffect(() => () => {
+		if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
+	}, []);
 	const pickOperation = (op: ScissorsOperation) => {
 		set("operation", op);
-		window.setTimeout(() => onCloseSettings(), 320);
+		if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
+		closeTimerRef.current = window.setTimeout(() => {
+			closeTimerRef.current = null;
+			onCloseSettings();
+		}, 320);
 	};
 
 	return (
 		<div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 190 }}>
 			<MenuColumn>
 				<label className="atb-menu-row atb-menu-row--checkbox" title="Snap each point to the nearest strong intensity edge, like Photoshop's magnetic lasso">
-					<span className="atb-menu-row__label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-						<MagnetIcon active={options.magnetEnabled} />
-						Magnetic snap
-					</span>
+					<span className="atb-menu-row__label">Magnetic snap</span>
+					{/* The native input stays (hidden by the stylesheet) for the
+					    label's toggling, focus and screen readers; the box beside
+					    it is the shared custom checkbox. */}
 					<input
 						type="checkbox"
 						className="atb-menu-row__checkbox-input"
@@ -238,11 +247,12 @@ function ScissorsFlyout({ options, onChange, onCloseSettings }: {
 
 			<MenuDivider />
 
-			<MenuColumn>
+			<MenuColumn role="radiogroup" ariaLabel="Scissors operation">
 				{SCISSORS_OPERATIONS.map((op) => (
 					<MenuRow
 						key={op.value}
 						label={op.label}
+						radio
 						// Reflects `options.operation` directly (not some local
 						// "just picked" flag), so re-opening later always shows
 						// the operation that's actually active.
@@ -257,16 +267,51 @@ function ScissorsFlyout({ options, onChange, onCloseSettings }: {
 
 
 
+// Same box as last time? Lets the live-measured hints skip a state update,
+// and the re-render of this whole toolbar, when nothing moved.
+function sameRect(a: DOMRect | null, b: DOMRect | null): boolean {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	return a.top === b.top && a.left === b.left && a.width === b.width && a.height === b.height;
+}
+
+// Gap between a ribbon icon and its tooltip.
+const TOOLTIP_GAP = 10;
+
+// A tooltip follows keyboard focus, not focus a closing dialog hands back to
+// the button after a mouse click. (Environments without :focus-visible
+// support fall back to showing it.)
+const isFocusVisible = (el: Element): boolean => {
+	try {
+		return el.matches(":focus-visible");
+	} catch {
+		return true;
+	}
+};
+
 // Portal-rendered tooltip — rendered to document.body and positioned via
 // getBoundingClientRect of the hovered icon, so it's never clipped by the
 // dock's own overflow:hidden/auto rules.
 function IconTooltip({
-	label, description, anchorRect,
+	id, label, description, anchorRect,
 }: {
+	id: string;
 	label: string;
 	description: string;
 	anchorRect: DOMRect | null;
 }) {
+	const boxRef = useRef<HTMLDivElement>(null);
+	const [side, setSide] = useState<"above" | "below">("above");
+	// Its height is only known once rendered, so measure before paint and
+	// flip below the icon when it would run off the top of the window.
+	useLayoutEffect(() => {
+		const box = boxRef.current;
+		if (!box || !anchorRect) return;
+		const topbar = document.querySelector(".vp-topbar");
+		const ceiling = topbar ? Math.max(0, topbar.getBoundingClientRect().bottom) : 0;
+		const next = tooltipSide(anchorRect, box.offsetHeight, window.innerHeight, undefined, undefined, ceiling);
+		if (next !== side) setSide(next);
+	}, [anchorRect, label, description, side]);
 	if (!anchorRect) return null;
 	// Tooltip is centered above its icon by default (so it reads as an
 	// annotation on the icon rather than colliding with whatever settings
@@ -284,26 +329,18 @@ function IconTooltip({
 	);
 	return createPortal(
 		<div
+			ref={boxRef}
+			id={id}
+			role="tooltip"
+			className="atb-icon-tip"
 			style={{
-				position: "fixed",
-				top: anchorRect.top - 10,
+				top: side === "above" ? anchorRect.top - TOOLTIP_GAP : anchorRect.bottom + TOOLTIP_GAP,
 				left: clampedCenter,
-				transform: "translate(-50%, -100%)",
-				background: "#fff",
-				color: "#111",
-				borderRadius: 8,
-				padding: "8px 10px",
-				minWidth: 160,
-				maxWidth: 240,
-				boxShadow: "0 8px 24px -6px rgba(0,0,0,0.45)",
-				zIndex: 500,
-				pointerEvents: "none",
-				fontFamily: "system-ui, sans-serif",
-				whiteSpace: "normal",
+				transform: side === "above" ? "translate(-50%, -100%)" : "translate(-50%, 0)",
 			}}
 		>
-			<div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 2 }}>{label}</div>
-			<div style={{ fontSize: 11.5, lineHeight: 1.35, color: "#333" }}>{description}</div>
+			<div className="atb-icon-tip__label">{label}</div>
+			<div className="atb-icon-tip__desc">{description}</div>
 		</div>,
 		document.body
 	);
@@ -314,10 +351,13 @@ export default function AnnotationToolbar({
 	diameterMm, onDiameterChange, onDiameterPreviewChange, scissorsOptions, onScissorsOptionsChange,
 	renderFlyout, scissorsPointCount, onScissorsCancel,
 	targetKey,
-	popupRef, popupDragRef, popupMinRef, onGuidedPickingChange, anchorRef,
+	popupRef, onGuidedPickingChange, anchorRef,
 }: AnnotationToolbarProps) {
-	const [hoveredTool, setHoveredTool] = useState<string | null>(null);
-	const [hoveredRect, setHoveredRect] = useState<DOMRect | null>(null);
+	// The hovered tool and its anchor rect live in one object so leaving one
+	// tile can never null the rect that the next tile's enter just queued.
+	const [hover, setHover] = useState<{ id: string; rect: DOMRect | null } | null>(null);
+	const hoveredTool = hover?.id ?? null;
+	const tipIdBase = useId();
 	const iconRefs = useRef<Record<string, HTMLElement | null>>({});
 	// Just the icon <button> itself, keyed the same as iconRefs — needed
 	// only for LIVE_COMMIT_TOOLS, whose wrapper div also contains the
@@ -329,9 +369,7 @@ export default function AnnotationToolbar({
 	// the icon regardless of the arrow sitting beside it.
 	const btnRefs = useRef<Record<string, HTMLElement | null>>({});
 
-	// --- Walkthrough ----------------------------------------------------------
-	// One overview tour that auto-opens on first visit (see effect below).
-	const [overviewWalkthroughOpen, setOverviewWalkthroughOpen] = useState(false);
+	// --- Hints -----------------------------------------------------------------
 	// "Pick a class first" hint — shown when a disabled tool icon is clicked
 	// (disabled buttons don't fire onClick, so this replaces that silent no-op).
 	const [pickClassHintOpen, setPickClassHintOpen] = useState(false);
@@ -344,30 +382,17 @@ export default function AnnotationToolbar({
 	const [guidedHintText, setGuidedHintText] = useState<string>("");
 	const guidedControlsBoxRef = useRef<HTMLDivElement>(null);
 	const prevGuidedControlsRef = useRef<GuidedFlowControls | null>(null);
-	const [, setPanelRect] = useState<DOMRect | null>(null);
-	const [, setPanelDragRect] = useState<DOMRect | null>(null);
-	const [, setDockRect] = useState<DOMRect | null>(null);
-	const [, setDockDragRect] = useState<DOMRect | null>(null);
-	const [, setDockMinRect] = useState<DOMRect | null>(null);
-	const [, setPanelMinRect] = useState<DOMRect | null>(null);
-	// Measured from refs the parent (VisualizationPage) hands in, since the
-	// popup and slice-jump overlay live outside this component.
-	const [, setPopupRectMeasured] = useState<DOMRect | null>(null);
-	const [, setPopupDragRectMeasured] = useState<DOMRect | null>(null);
-	const [, setPopupMinRectMeasured] = useState<DOMRect | null>(null);
 
 	const fieldRef = useRef<HTMLDivElement>(null);
 	const panelBodyRef = useRef<HTMLDivElement>(null);
 	// Unstyled inner wrapper measured for --atb-panel-h (see JSX usage below
 	// for why measuring the styled body directly caused runaway growth).
 	const panelBodyContentRef = useRef<HTMLDivElement>(null);
-	const panelMinRef = useRef<HTMLButtonElement>(null);
 	const dockElRef = useRef<HTMLDivElement>(null);
 	// Unstyled inner wrapper measured for --atb-ribbon-h. Observing the
 	// styled dock element itself (which has `min-height: var(--atb-ribbon-h)`)
 	// would be self-referential and grow without bound.
 	const dockContentRef = useRef<HTMLDivElement>(null);
-	const dockDragRef = useRef<HTMLDivElement>(null);
 
 	// Measures the ribbon's real height into --atb-ribbon-h (consumed by
 	// VisualizationPage.css to reserve space above the CT viewport), since a
@@ -378,7 +403,16 @@ export default function AnnotationToolbar({
 		const el = dockContentRef.current;
 		if (!el) return;
 		const sync = () => {
-			const h = Math.ceil(el.getBoundingClientRect().height) + 1;
+			// The wrapper sits inside the ribbon's padding and border, so add
+			// those back: the viewer reserves the ribbon's full height, else a
+			// ribbon that wraps to two rows overlaps the stage below it.
+			const dock = dockElRef.current;
+			const cs = dock ? getComputedStyle(dock) : null;
+			const chrome = cs
+				? parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+					+ parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth)
+				: 0;
+			const h = Math.ceil(el.getBoundingClientRect().height + (chrome || 0)) + 1;
 			document.documentElement.style.setProperty("--atb-ribbon-h", `${h}px`);
 		};
 		sync();
@@ -387,6 +421,58 @@ export default function AnnotationToolbar({
 		return () => ro.disconnect();
 		// `open` is a dependency (not `[]`) so this re-runs and picks up the
 		// real element once the ribbon actually mounts.
+	}, [open]);
+
+	// On a phone the icon row scrolls sideways with most tools out of sight
+	// and no scrollbar, so the edges that still have tools beyond them are
+	// flagged here and CSS fades those edges (a half-cut tile alone reads as
+	// a rendering glitch). Both stay false whenever the row fits. The start
+	// fade also hides whatever tool group the edge cuts (--atb-fade-hide, see
+	// the CSS): the furthest scroll cannot be moved on to a group start, so
+	// there the cut group would otherwise show as a half tile or lone chevron.
+	// That strip is only measured once the row rests. Measured on every scroll
+	// event it jumped a whole group at a time mid-drag, so whole tiles popped
+	// out; while the row moves the plain 26px fade applies.
+	const toolsRef = useRef<HTMLDivElement>(null);
+	const [toolsMore, setToolsMore] = useState({ start: false, end: false });
+	useLayoutEffect(() => {
+		const el = toolsRef.current;
+		if (!el) return;
+		let settleTimer = 0;
+		const flag = () => {
+			const start = el.scrollLeft > 1;
+			const end = el.scrollWidth - el.clientWidth - el.scrollLeft > 1;
+			setToolsMore((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
+			return start;
+		};
+		const measureStrip = (start: boolean) => {
+			window.clearTimeout(settleTimer);
+			const rowLeft = el.getBoundingClientRect().left;
+			const hidden = start
+				? ribbonHiddenStrip(Array.from(el.children, (child) => child.getBoundingClientRect().left - rowLeft), RIBBON_FADE_MIN, RIBBON_GROUP_GAP)
+				: null;
+			if (hidden === null) el.style.removeProperty("--atb-fade-hide");
+			else el.style.setProperty("--atb-fade-hide", `${hidden}px`);
+		};
+		const sync = () => measureStrip(flag());
+		const onScroll = () => {
+			flag();
+			el.style.removeProperty("--atb-fade-hide");
+			// scrollend settles it where supported; the timer covers the rest.
+			window.clearTimeout(settleTimer);
+			settleTimer = window.setTimeout(sync, 150);
+		};
+		sync();
+		el.addEventListener("scroll", onScroll, { passive: true });
+		el.addEventListener("scrollend", sync);
+		const ro = new ResizeObserver(() => sync());
+		ro.observe(el);
+		return () => {
+			window.clearTimeout(settleTimer);
+			el.removeEventListener("scroll", onScroll);
+			el.removeEventListener("scrollend", sync);
+			ro.disconnect();
+		};
 	}, [open]);
 
 	// Pointer-arrow tracking — keeps the little up-chevron
@@ -402,9 +488,12 @@ export default function AnnotationToolbar({
 	// and the CSS agree on how far it should straddle the ribbon's own
 	// top border (half on each side, same technique FlyoutPrimitives uses
 	// for `.atb-pop__pointer`).
-	const POINTER_NOTCH_SIZE = 13;
+	const POINTER_NOTCH_SIZE = 10;
 	const [pointerPos, setPointerPos] = useState<{ left: number; top: number } | null>(null);
 	useLayoutEffect(() => {
+		// Closed: keep the last position so the notch can fade out with the
+		// ribbon (is-closed hides it once the fade ends); the next open
+		// re-measures here before paint.
 		if (!open) return;
 		const sync = () => {
 			const anchorEl = anchorRef?.current;
@@ -437,18 +526,15 @@ export default function AnnotationToolbar({
 		const ro = new ResizeObserver(sync);
 		if (anchorRef?.current) ro.observe(anchorRef.current);
 		if (dockElRef.current) ro.observe(dockElRef.current);
+		// The top bar can wrap (a REC pill joining it on a narrow window) and
+		// move the fixed ribbon down without resizing the pencil or the ribbon.
+		const topbarEl = anchorRef?.current?.closest(".vp-topbar");
+		if (topbarEl) ro.observe(topbarEl);
 		return () => {
 			window.removeEventListener("resize", sync);
 			ro.disconnect();
 		};
 	}, [open, anchorRef]);
-
-	// The per-tool settings panel floats over the viewer (anchored under
-	// whichever icon opened it — see `toolFlyout` below), so it never needs
-	// to reserve space below the ribbon.
-	useEffect(() => {
-		document.documentElement.style.setProperty("--atb-panel-h", "0px");
-	}, []);
 
 	// Settings flyout — the small rectangle that opens under a tool's arrow.
 	// Only one tool's settings are open at a time, always for whichever tool
@@ -490,8 +576,11 @@ export default function AnnotationToolbar({
 		toolFlyout.setOpen(false);
 		toolFlyout.anchorRef.current = null;
 		setGuidedControls(null);
-		setHoveredTool(null);
-		setHoveredRect(null);
+		setHover(null);
+		// The hint is non-modal, so the pencil can close the ribbon while it is
+		// showing; drop it so it doesn't reappear on its own at the next open.
+		setPickClassHintOpen(false);
+		setPickClassHintRect(null);
 		onToolChange(null);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
@@ -507,8 +596,7 @@ export default function AnnotationToolbar({
 		guidedControlsRef.current?.onExit();
 		toolFlyout.setOpen(false);
 		setGuidedControls(null);
-		setHoveredTool(null);
-		setHoveredRect(null);
+		setHover(null);
 		onToolChange(null);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [targetKey, open]);
@@ -524,70 +612,23 @@ export default function AnnotationToolbar({
 	};
 	const showTooltip = useCallback((id: string) => {
 		const el = iconRefs.current[id];
-		setHoveredRect(el ? el.getBoundingClientRect() : null);
-		setHoveredTool(id);
+		setHover({ id, rect: el ? el.getBoundingClientRect() : null });
 	}, []);
 	const hideTooltip = useCallback((id: string) => {
-		setHoveredTool((cur) => (cur === id ? null : cur));
-		setHoveredRect((cur) => (hoveredTool === id ? null : cur));
-	}, [hoveredTool]);
+		setHover((cur) => (cur?.id === id ? null : cur));
+	}, []);
 
 
-	// Recompute every spotlight target while the overview walkthrough is
-	// open. Runs on every render while open (cheap: a handful of
-	// getBoundingClientRect calls) so it stays correct across panel drags,
-	// minimize/expand, and window resizes — none of which have one single
-	// event to hook reliably given both panels are freely draggable.
-	useLayoutEffect(() => {
-		if (!overviewWalkthroughOpen) return;
-		const measure = () => {
-			setPanelRect(panelBodyRef.current ? panelBodyRef.current.getBoundingClientRect() : null);
-			setPanelDragRect(null);
-			setDockRect(dockElRef.current ? dockElRef.current.getBoundingClientRect() : null);
-			setDockDragRect(dockDragRef.current ? dockDragRef.current.getBoundingClientRect() : null);
-			// The dock's minimize button doesn't have its own dedicated ref —
-			// it's already tracked in iconRefs (keyed "__min") for the tooltip
-			// system, so reuse that instead of threading through a second ref.
-			const dockMinEl = iconRefs.current["__min"];
-			setDockMinRect(dockMinEl ? dockMinEl.getBoundingClientRect() : null);
-			setPanelMinRect(panelMinRef.current ? panelMinRef.current.getBoundingClientRect() : null);
-			setPopupRectMeasured(popupRef?.current ? popupRef.current.getBoundingClientRect() : null);
-			setPopupDragRectMeasured(popupDragRef?.current ? popupDragRef.current.getBoundingClientRect() : null);
-			setPopupMinRectMeasured(popupMinRef?.current ? popupMinRef.current.getBoundingClientRect() : null);
-		};
-		measure();
-		window.addEventListener("resize", measure);
-		window.addEventListener("scroll", measure, true);
-		const id = window.setInterval(measure, 200); // catches drag moves without their own event hook
-		return () => {
-			window.removeEventListener("resize", measure);
-			window.removeEventListener("scroll", measure, true);
-			window.clearInterval(id);
-		};
-	}, [overviewWalkthroughOpen, activeTool, popupRef, popupDragRef, popupMinRef]);
-
-	// First-run auto-open: the moment this toolbar is opened (Annotate
-	// pressed) with no target picked yet, show the overview tour once per
-	// browser. Reopening the dock later (or already having a target) never
-	// re-triggers it — there's no manual launcher to bring it back after.
-	useEffect(() => {
-		if (!open) return;
-		if (hasActiveTarget) return;
-		let alreadySeen = false;
-		try {
-			alreadySeen = typeof window !== "undefined" && window.sessionStorage.getItem(OVERVIEW_WALKTHROUGH_SEEN_KEY) === "1";
-		} catch { /* sessionStorage unavailable — just show it */ }
-		if (!alreadySeen) setOverviewWalkthroughOpen(true);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [open]);
-
-	// Same reasoning as the overview walkthrough's own measuring effect just
-	// above: the popup can be dragged, so there's no single event to hook —
+	// The popup can be dragged, so there's no single event to hook:
 	// recompute on a short interval plus resize/scroll while the hint is
-	// showing.
+	// showing. Only a box that actually moved is stored, so the polling
+	// doesn't re-render this whole toolbar five times a second.
 	useLayoutEffect(() => {
 		if (!pickClassHintOpen) return;
-		const measure = () => setPickClassHintRect(popupRef?.current ? popupRef.current.getBoundingClientRect() : null);
+		const measure = () => {
+			const next = popupRef?.current ? popupRef.current.getBoundingClientRect() : null;
+			setPickClassHintRect((prev) => (sameRect(prev, next) ? prev : next));
+		};
 		measure();
 		window.addEventListener("resize", measure);
 		window.addEventListener("scroll", measure, true);
@@ -655,6 +696,69 @@ export default function AnnotationToolbar({
 		onGuidedPickingChange?.(guidedControls != null);
 	}, [guidedControls, onGuidedPickingChange]);
 
+	// The pill's buttons unmount as the flow moves on (Exit, Continue giving
+	// way to the next step, the buttons becoming "Applying…"), and the browser
+	// drops focus to <body> with them. Track whether keyboard focus was inside
+	// the pill, and hand it to whatever replaces the button it was on. A
+	// pointer press elsewhere or focus landing elsewhere clears the flag, so a
+	// click on the canvas is never followed by focus jumping back here.
+	const guidedFocusInsideRef = useRef(false);
+	const lastGuidedToolRef = useRef<PrimaryEditTool>(null);
+	useEffect(() => {
+		const inside = (t: EventTarget | null) => t instanceof Node && !!guidedControlsBoxRef.current?.contains(t);
+		const onFocusIn = (e: FocusEvent) => { guidedFocusInsideRef.current = inside(e.target); };
+		const onPointerDown = (e: PointerEvent) => { if (!inside(e.target)) guidedFocusInsideRef.current = false; };
+		document.addEventListener("focusin", onFocusIn, true);
+		document.addEventListener("pointerdown", onPointerDown, true);
+		return () => {
+			document.removeEventListener("focusin", onFocusIn, true);
+			document.removeEventListener("pointerdown", onPointerDown, true);
+		};
+	}, []);
+	const guidedPresent = !!guidedControls;
+	const guidedBusy = !!guidedControls?.busy;
+	const guidedHasContinue = !!guidedControls?.onContinue;
+	useLayoutEffect(() => {
+		if (guidedPresent) lastGuidedToolRef.current = activeTool;
+		if (!guidedFocusInsideRef.current) return;
+		const active = document.activeElement;
+		if (active && active !== document.body && active.isConnected) return;
+		const box = guidedControlsBoxRef.current;
+		let next: HTMLElement | null = null;
+		if (guidedPresent && box) {
+			next = guidedBusy ? box : box.querySelector<HTMLElement>(".atb-guided__btn--exit, .atb-guided__btn--startover");
+		} else if (lastGuidedToolRef.current) {
+			next = iconRefs.current[lastGuidedToolRef.current]?.querySelector<HTMLElement>("button.atb__btn") ?? null;
+		}
+		if (!next?.isConnected) { guidedFocusInsideRef.current = false; return; }
+		next.focus({ preventScroll: true });
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [guidedPresent, guidedBusy, guidedHasContinue]);
+
+	// The per-tool settings panel floats over the viewer (anchored under
+	// whichever icon opened it — see `toolFlyout` below), so it never needs
+	// to reserve space below the ribbon. The one exception is the strip the
+	// guided-flow controls (.atb-guided) hang in: it is reserved for exactly
+	// as long as that pill is rendered, so choosing a guided-capable tool
+	// does not leave an empty band or shift the panes before the flow starts.
+	const guidedStripReserved = open && !!guidedControls;
+	const [guidedTouch, setGuidedTouch] = useState(
+		() => typeof window.matchMedia === "function" && window.matchMedia(GUIDED_TOUCH_QUERY).matches,
+	);
+	useEffect(() => {
+		if (typeof window.matchMedia !== "function") return;
+		const mq = window.matchMedia(GUIDED_TOUCH_QUERY);
+		const sync = () => setGuidedTouch(mq.matches);
+		sync();
+		mq.addEventListener?.("change", sync);
+		return () => mq.removeEventListener?.("change", sync);
+	}, []);
+	useEffect(() => {
+		const stripH = guidedTouch ? GUIDED_STRIP_H_TOUCH : GUIDED_STRIP_H;
+		document.documentElement.style.setProperty("--atb-panel-h", guidedStripReserved ? `${stripH}px` : "0px");
+		return () => { document.documentElement.style.setProperty("--atb-panel-h", "0px"); };
+	}, [guidedStripReserved, guidedTouch]);
+
 	// Small non-blocking hint shown right next to the cursor when Continue
 	// is clicked while `continueDisabled` — e.g. "Mark at least one point
 	// first" for Grow-from-seeds before any seed scribble exists. Cleared
@@ -706,9 +810,31 @@ export default function AnnotationToolbar({
 		if (!guidedControls || guidedControls.busy) setGuidedHintOpen(false);
 	}, [guidedControls]);
 
+	// The explainer waits for any step card to be acknowledged (both are
+	// "Got it" dialogs, and stacking them made two dismissals in a row). If a
+	// later step card opens while it is already showing, the person has
+	// moved on, so it closes rather than popping back afterwards.
+	const stepModalOpen = useGuidedStepModalOpen();
+	const guidedHintShown = guidedHintOpen && !stepModalOpen;
+	const guidedHintSeenRef = useRef(false);
+	useEffect(() => {
+		if (!guidedHintOpen) { guidedHintSeenRef.current = false; return; }
+		if (stepModalOpen) {
+			if (guidedHintSeenRef.current) setGuidedHintOpen(false);
+			return;
+		}
+		// Not "seen" until it has stayed up a beat: the flow's first step
+		// card mounts in the same tick that arms the explainer.
+		const t = window.setTimeout(() => { guidedHintSeenRef.current = true; }, 120);
+		return () => window.clearTimeout(t);
+	}, [guidedHintOpen, stepModalOpen]);
+
 	useLayoutEffect(() => {
-		if (!guidedHintOpen) return;
-		const measure = () => setGuidedHintRect(guidedControlsBoxRef.current ? guidedControlsBoxRef.current.getBoundingClientRect() : null);
+		if (!guidedHintShown) return;
+		const measure = () => {
+			const next = guidedControlsBoxRef.current ? guidedControlsBoxRef.current.getBoundingClientRect() : null;
+			setGuidedHintRect((prev) => (sameRect(prev, next) ? prev : next));
+		};
 		measure();
 		window.addEventListener("resize", measure);
 		window.addEventListener("scroll", measure, true);
@@ -718,9 +844,53 @@ export default function AnnotationToolbar({
 			window.removeEventListener("scroll", measure, true);
 			window.clearInterval(id);
 		};
-	}, [guidedHintOpen]);
+	}, [guidedHintShown]);
 
 	const dismissGuidedHint = useCallback(() => setGuidedHintOpen(false), []);
+
+	// Both hint cards point at controls outside themselves (the class list,
+	// the guided flow buttons), so focus lands on "Got it" without being
+	// trapped there, and Escape closes the card without also disarming the tool.
+	const pickHintRef = useRef<HTMLDivElement>(null);
+	const pickHintBtnRef = useRef<HTMLButtonElement>(null);
+	const pickHintTextId = useId();
+	useDialogFocus(open && pickClassHintOpen && !!pickClassHintRect, pickHintRef, {
+		initialFocus: pickHintBtnRef,
+		onEscape: dismissPickClassHint,
+		lockScroll: false,
+		trapFocus: false,
+	});
+	const guidedHintRef = useRef<HTMLDivElement>(null);
+	const guidedHintBtnRef = useRef<HTMLButtonElement>(null);
+	const guidedHintTextId = useId();
+	useDialogFocus(open && guidedHintShown && !!guidedHintRect, guidedHintRef, {
+		initialFocus: guidedHintBtnRef,
+		onEscape: dismissGuidedHint,
+		lockScroll: false,
+		trapFocus: false,
+	});
+
+	// On a phone the fade above washes out whatever tile sits at an edge, and
+	// picking a tool (or opening it from a sheet or shortcut) can leave the
+	// active one right there, so bring it to the middle of the scrolling row.
+	// The row is scrolled directly, not with scrollIntoView, so nothing
+	// outside it ever moves; when the row fits (wider screens) there is
+	// nothing to scroll and this does nothing. The centred position is then
+	// moved on to the nearest tool-group start (as far in as the CSS scroll
+	// padding), so the neighbour is either whole or wholly under the fade
+	// instead of leaving its settings chevron peeking in at the edge.
+	useEffect(() => {
+		const row = toolsRef.current;
+		const icon = activeTool ? iconRefs.current[activeTool] : null;
+		if (!open || !row || !icon || row.scrollWidth <= row.clientWidth) return;
+		const rowRect = row.getBoundingClientRect();
+		const iconRect = icon.getBoundingClientRect();
+		const shift = iconRect.left + iconRect.width / 2 - (rowRect.left + rowRect.width / 2);
+		const padding = parseFloat(getComputedStyle(row).scrollPaddingLeft) || 0;
+		const starts = Array.from(row.children, (el) => row.scrollLeft + el.getBoundingClientRect().left - rowRect.left - padding);
+		const left = snapRibbonScroll(row.scrollLeft + shift, starts, row.scrollWidth - row.clientWidth);
+		if (Math.abs(left - row.scrollLeft) > 1) row.scrollTo({ left });
+	}, [open, activeTool, toolFlyout.open]);
 
 	// Signals "applied" from one-shot tool flyouts — closes settings and
 	// clears the tool's active highlight, same as clicking the icon again.
@@ -729,6 +899,89 @@ export default function AnnotationToolbar({
 		onToolChange(null);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [onToolChange]);
+
+	// Keyboard access: the ribbon is portaled to the end of <body>, so left
+	// alone it is the last thing Tab reaches. Opening it from the pencil moves
+	// focus to its first tool, and Tab runs from the pencil into the ribbon and
+	// out of its last control to whatever follows the pencil, as if the ribbon
+	// sat right after it (the same hand-off FlyoutPanel does for its panels).
+	// The Segments panel is the other half of the ribbon (every tool stays off
+	// until a class is targeted there), so it sits in the same ring: out of the
+	// ribbon's last control into the panel's first, and out of the panel's last
+	// control to what follows the pencil. Shift+Tab out of the first control
+	// goes back to the pencil, and out of the panel's first to the ribbon's last.
+	const wasOpenRef = useRef(open);
+	useEffect(() => {
+		const justOpened = open && !wasOpenRef.current;
+		wasOpenRef.current = open;
+		if (!justOpened) return;
+		const anchor = anchorRef?.current;
+		const active = document.activeElement;
+		const dock = dockElRef.current;
+		if (!anchor || !dock || !(active instanceof Node) || !anchor.contains(active)) return;
+		focusableWithin(dock)[0]?.focus({ preventScroll: true });
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
+	// Closing while focus is inside (a letter shortcut or Escape from a ribbon
+	// tool) would otherwise leave it on a control that is about to go inert and
+	// hidden, so it drops to <body>. Hand it back to the pencil first; this runs
+	// in a layout effect so it lands before the browser's inert focus fix-up.
+	// A tool's settings flyout and the Segments panel are portaled out of the
+	// shell, so focus inside either (the size slider Brush moves focus to, or a
+	// class row reached by Tab) counts as inside the ribbon too.
+	useLayoutEffect(() => {
+		if (open) return;
+		const anchor = anchorRef?.current;
+		const shell = dockElRef.current?.closest(".atb-shell");
+		const active = document.activeElement;
+		if (!anchor || !shell || !anchor.isConnected || !(active instanceof Node)) return;
+		if (!shell.contains(active) && !toolFlyout.panelRef.current?.contains(active) && !popupRef?.current?.contains(active)) return;
+		if (anchor instanceof HTMLButtonElement && anchor.disabled) return;
+		anchor.focus({ preventScroll: true });
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
+	useEffect(() => {
+		if (!open) return;
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key !== "Tab" || e.defaultPrevented) return;
+			const anchor = anchorRef?.current;
+			const dock = dockElRef.current;
+			const active = document.activeElement;
+			if (!anchor || !dock || !(active instanceof HTMLElement)) return;
+			const items = focusableWithin(dock);
+			if (items.length === 0) return;
+			const popup = popupRef?.current ?? null;
+			const panelItems = popup ? focusableWithin(popup) : [];
+			const afterAnchor = () => {
+				const order = focusableWithin(document.body).filter((el) => !dock.contains(el) && !popup?.contains(el));
+				const at = order.indexOf(anchor);
+				return at >= 0 ? order[at + 1] : undefined;
+			};
+			if (!e.shiftKey && active === anchor) {
+				e.preventDefault();
+				items[0].focus({ preventScroll: true });
+			} else if (e.shiftKey && active === items[0]) {
+				e.preventDefault();
+				anchor.focus({ preventScroll: true });
+			} else if (!e.shiftKey && active === items[items.length - 1]) {
+				const next = panelItems[0] ?? afterAnchor();
+				if (!next) return;
+				e.preventDefault();
+				next.focus({ preventScroll: true });
+			} else if (e.shiftKey && panelItems.length > 0 && active === panelItems[0]) {
+				e.preventDefault();
+				items[items.length - 1].focus({ preventScroll: true });
+			} else if (!e.shiftKey && panelItems.length > 0 && active === panelItems[panelItems.length - 1]) {
+				const next = afterAnchor();
+				if (!next) return;
+				e.preventDefault();
+				next.focus({ preventScroll: true });
+			}
+		};
+		document.addEventListener("keydown", onKeyDown);
+		return () => document.removeEventListener("keydown", onKeyDown);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open]);
 
 	const activeDef = activeTool ? TOOL_DEFS.find((t) => t.id === activeTool) : null;
 	// Portal straight to <body>: VisualizationPage's root has
@@ -760,41 +1013,61 @@ export default function AnnotationToolbar({
 			flashes at a wrong default location. */}
 		{pointerPos !== null && (
 			<div
-				className="atb--horizontal__pointer"
+				className={`atb--horizontal__pointer ${open ? "is-open" : "is-closed"}`}
 				style={{ left: pointerPos.left, top: pointerPos.top }}
 				aria-hidden="true"
 			/>
 		)}
-		<div className={`atb-shell ${open ? "is-open" : "is-closed"}`}>
+		{/* inert while closed: the faded-out ribbon (and any settings panel
+		    inside it) stays mounted for its exit animation, but can't be
+		    tabbed to, clicked or read out. */}
+		<div className={`atb-shell ${open ? "is-open" : "is-closed"}`} inert={!open}>
 		<div
 			ref={dockElRef}
 			className={`atb atb--horizontal ${!enabled ? "atb--disabled" : ""}`}
 			role="toolbar"
+			aria-label="Annotation tools"
 			aria-orientation="horizontal"
 		>
-			<div ref={dockContentRef} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
-			<div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 13}}>
+			<div ref={dockContentRef} className="atb__content">
+			<div
+				ref={toolsRef}
+				className="atb__tools"
+				data-more-start={toolsMore.start || undefined}
+				data-more-end={toolsMore.end || undefined}
+			>
 				{TOOL_DEFS.map(({ id, label, Icon, description }) => {
 					// Only equip-and-use tools (paint/erase/scissors/level tracing)
 					// get a settings arrow; other tools open settings on icon click.
 					const hasSettingsArrow =
 						LIVE_COMMIT_TOOLS.includes(id) && id !== "pointSegment" && id !== "boxSegment";
 					const settingsOpenHere = toolFlyout.open && activeTool === id;
+					// The tip is only in the page while it shows, so the button
+					// points at it only then; that puts the description in the
+					// button's accessible description.
+					const tipShown = hoveredTool === id && !toolFlyout.open && !!hover?.rect;
+					const tipId = `${tipIdBase}-tip-${id}`;
 					return (
 						<div
 							key={id}
 							ref={(el) => { iconRefs.current[id] = el; }}
 							style={{ position: "relative", display: "inline-flex", alignItems: "center" }}
-							onMouseEnter={() => showTooltip(id)}
+							// A touch tap fires an emulated mouseenter that no mouseleave
+							// follows until the next tap elsewhere, which left the tip
+							// stuck over the flyout it had just opened. Only a real
+							// pointer hover (or keyboard focus) shows it.
+							onPointerEnter={(e) => { if (e.pointerType !== "touch") showTooltip(id); }}
 							onMouseLeave={() => hideTooltip(id)}
 						>
 							<button
 								ref={(el) => { if (hasSettingsArrow) btnRefs.current[id] = el; }}
 								className={`atb__btn ${activeTool === id ? "is-active" : ""}`}
-								onClick={() => { if (enabled) selectTool(id); else setPickClassHintOpen(true); }}
+								onClick={() => { hideTooltip(id); if (enabled) selectTool(id); else setPickClassHintOpen(true); }}
 								aria-label={label}
+								aria-pressed={activeTool === id}
 								aria-disabled={!enabled}
-								onFocus={() => showTooltip(id)}
+								aria-describedby={tipShown ? tipId : undefined}
+								onFocus={(e) => { if (isFocusVisible(e.currentTarget)) showTooltip(id); }}
 								onBlur={() => hideTooltip(id)}
 							>
 								<Icon size={20} />
@@ -815,17 +1088,18 @@ export default function AnnotationToolbar({
 									label={`${label} settings`}
 								/>
 							)}
-							{hoveredTool === id && (
+							{hoveredTool === id && !toolFlyout.open && (
 								<IconTooltip
+									id={tipId}
 									label={label}
 									description={
 										!hasSegments
-											? `${description} (no volume loaded)`
+											? `${description} Create a class first.`
 											: !hasActiveTarget
-												? `${description}`
+												? `${description} Pick a class first.`
 												: description
 									}
-									anchorRect={hoveredRect}
+									anchorRect={hover?.rect ?? null}
 								/>
 							)}
 						</div>
@@ -834,8 +1108,8 @@ export default function AnnotationToolbar({
 			</div>
 
 			{/* Exit / Start over / Continue for the running guided flow
-			    (Grow-from-seeds, Copy/Fill-across-slices, Islands) — fixed in
-			    the ribbon, not floating over the canvas. No title/label text
+			    (Grow-from-seeds, Copy/Fill-across-slices, Islands) — an overlay
+			    hanging under the ribbon, out of its measured height. No title/label text
 			    identifying which guided flow is running is shown here — just
 			    the controls themselves (see guidedControlsBoxRef below, used
 			    only to anchor the one-time Continue/Start over/Exit explainer
@@ -843,15 +1117,8 @@ export default function AnnotationToolbar({
 			{guidedControls && (
 				<div
 					ref={guidedControlsBoxRef}
-					style={{
-						flexShrink: 0,
-						display: "flex",
-						alignItems: "center",
-						gap: 15,
-						marginLeft: 14,
-						paddingLeft: 14,
-						borderLeft: "1px solid rgba(255, 255, 255, 0.09)",
-					}}
+					className="atb-guided"
+					tabIndex={-1}
 				>
 					{/* Local, self-contained keyframes for the Continue button's
 					    glow-pulse below — kept here rather than in the shared
@@ -868,6 +1135,7 @@ export default function AnnotationToolbar({
 						// Once the commit is running there's nothing left to cancel
 						// or restart, so swap to the same pulsing-dot indicator.
 						<span
+							role="status"
 							style={{
 								display: "inline-flex",
 								alignItems: "center",
@@ -905,9 +1173,13 @@ export default function AnnotationToolbar({
 									onClick={(e) => {
 										if (guidedControls.continueDisabled) {
 											if (continueBlockedHintTimeoutRef.current != null) window.clearTimeout(continueBlockedHintTimeoutRef.current);
+											// A keyboard-synthesized click reports 0,0, so anchor to the
+											// button itself instead of the window's top-left corner.
+											const fromKeyboard = e.detail === 0;
+											const rect = e.currentTarget.getBoundingClientRect();
 											setContinueBlockedHint({
-												x: e.clientX,
-												y: e.clientY,
+												x: fromKeyboard ? rect.left : e.clientX,
+												y: fromKeyboard ? rect.bottom - 14 : e.clientY,
 												message: guidedControls.continueHint || "Mark at least one point first",
 											});
 											continueBlockedHintTimeoutRef.current = window.setTimeout(() => setContinueBlockedHint(null), 1800);
@@ -985,7 +1257,7 @@ export default function AnnotationToolbar({
 										// NumberSliderField's own `label` prop already shows
 										// "Brush"/"Erase" above the slider.
 										<DiameterFlyout
-											title={activeTool === "paint" ? "Brush Size" : "Eraser Size"}
+											title={activeTool === "paint" ? "Brush size" : "Eraser size"}
 											diameterMm={diameterMm}
 											onDiameterChange={onDiameterChange}
 											onPreviewChange={onDiameterPreviewChange}
@@ -1029,13 +1301,23 @@ export default function AnnotationToolbar({
 					}}
 				/>
 				<div
+					ref={pickHintRef}
 					role="dialog"
 					aria-label="Pick a class first"
+					aria-describedby={pickHintTextId}
 					style={{
 						position: "fixed",
-						top: pickClassHintRect.top,
-						left: Math.max(12, pickClassHintRect.left - 300),
-						width: 260,
+						// Beside the class panel normally. On a phone the panel is a
+						// full-width bottom sheet with no room to its left, and the
+						// card would sit on the very list it points at, so it goes
+						// above the sheet instead (as it does for a panel dragged to
+						// the left edge).
+						// Above only when it fits: a panel dragged near the top would
+						// push the card off-screen with its Got it button.
+						...((window.innerWidth <= 640 || pickClassHintRect.left <= 0) && pickClassHintRect.top >= (pickHintRef.current?.offsetHeight || 130) + 12
+							? { bottom: window.innerHeight - pickClassHintRect.top + 12, left: 12 }
+							: { top: Math.max(12, pickClassHintRect.top), left: Math.max(12, pickClassHintRect.left - 300) }),
+						width: Math.min(260, window.innerWidth - 24),
 						background: "#16181d",
 						border: "1px solid rgba(255,255,255,0.14)",
 						borderRadius: 12,
@@ -1045,10 +1327,11 @@ export default function AnnotationToolbar({
 						color: "#fff",
 					}}
 				>
-					<div style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
+					<div id={pickHintTextId} style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
 						Select an existing class or create a custom one to start annotating.
 					</div>
 					<button
+						ref={pickHintBtnRef}
 						type="button"
 						onClick={dismissPickClassHint}
 						style={{
@@ -1070,7 +1353,7 @@ export default function AnnotationToolbar({
 			</>
 		)}
 
-		{open && guidedHintOpen && guidedHintRect && (
+		{open && guidedHintShown && guidedHintRect && (
 			<>
 				{/* Same dashed-spotlight treatment as the pick-class/first-target
 				    hints above, but wrapping the Continue/Start over/Exit cluster
@@ -1091,8 +1374,10 @@ export default function AnnotationToolbar({
 					}}
 				/>
 				<div
+					ref={guidedHintRef}
 					role="dialog"
 					aria-label="Guided flow controls"
+					aria-describedby={guidedHintTextId}
 					style={{
 						position: "fixed",
 						top: guidedHintRect.bottom + 10,
@@ -1107,10 +1392,11 @@ export default function AnnotationToolbar({
 						color: "#fff",
 					}}
 				>
-					<div style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
+					<div id={guidedHintTextId} style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
 						{guidedHintText}
 					</div>
 					<button
+						ref={guidedHintBtnRef}
 						type="button"
 						onClick={dismissGuidedHint}
 						style={{

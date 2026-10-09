@@ -5653,8 +5653,6 @@ const aiAvailableOrgans = useMemo(() => {
 				onScissorsCancel={scissors.cancel}
 				targetKey={activeCatalogOrganId ?? activeSegment}
 				popupRef={annotationPopupRef}
-				popupDragRef={annotationPopupDragRef}
-				popupMinRef={annotationPopupMinRef}
 				sliceJumpRef={sliceJumpWrapRef}
 			/>
 			{/* Point/box-segment SUCCESS/ERROR overlay. Reuses the exact same centered
