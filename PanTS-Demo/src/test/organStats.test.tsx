@@ -82,11 +82,6 @@ vi.mock("../helpers/CornerstoneNifti2", async (importOriginal) => {
 		resetMprOrientation: vi.fn(),
 	};
 });
-vi.mock("../helpers/NiiVueNifti", () => ({
-	create3DVolume: vi.fn().mockResolvedValue(undefined),
-	moveNiiVueCrosshairToMm: vi.fn(),
-	updateVisibilities: vi.fn(),
-}));
 
 import VisualizationPage from "../routes/VisualizationPage";
 import { __resetOrganNormsCache } from "../helpers/organNorms";

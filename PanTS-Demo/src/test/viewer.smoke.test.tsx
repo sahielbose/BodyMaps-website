@@ -90,12 +90,6 @@ vi.mock("../helpers/CornerstoneNifti2", async (importOriginal) => {
 	};
 });
 
-vi.mock("../helpers/NiiVueNifti", () => ({
-	create3DVolume: vi.fn().mockResolvedValue(undefined),
-	moveNiiVueCrosshairToMm: vi.fn(),
-	updateVisibilities: vi.fn(),
-}));
-
 import { applyRemoteMeasurement, clearMeasurements, LENGTH_TOOL, renderVisualization } from "../helpers/CornerstoneNifti2";
 import VisualizationPage from "../routes/VisualizationPage";
 import type { QuizPracticeController } from "../education/types";
