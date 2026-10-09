@@ -2,12 +2,22 @@
   display: grid;
   grid-template-columns: 20vw 80vw;
   grid-template-rows: 100vh;
+  /* The dynamic viewport excludes the phone browser's toolbar, which 100vh runs under. */
+  grid-template-rows: 100dvh;
   background-color: #08090b;
   color: white;
+  /* One surface for every pane (the three CT views and the 3D pane), so the
+     3D pane is not a shade lighter than its neighbours. */
+  --vp-pane-bg: #000;
   /* Width reserved for the BodyMaps AI sidebar. Shared by the sidebar itself
      (src/components/AIAssistant/AISidebar.css) and by the content shift below,
      so the CT views sit flush against the panel with no overlap. */
   --vp-ai-width: 400px;
+  /* The viewer's own box never animates. Opening the AI sidebar, the
+     annotation ribbon or the segments panel snaps the stage to its new size
+     in one frame, because every size change reallocates and redraws all four
+     WebGL viewports (see the stage ResizeObserver in VisualizationPage.tsx).
+     The panels themselves still fade and slide in. */
   box-sizing: border-box;
 }
 
@@ -40,11 +50,9 @@
      everything docked in that row starts below it, not just the stage (it
      used to cover the Organs panel's header). The stage shrinks
      automatically (flex: 1 1 auto, overflow:hidden) by the ribbon+panel
-     height plus 10px breathing room below. */
+     height plus 10px breathing room below. Snaps rather than animates, for
+     the same reason as the root above. */
   margin-top: calc(var(--atb-ribbon-h, 49px) + var(--atb-panel-h, 0px) + 10px);
-  /* Kept in sync with .atb-shell's / .segpop's own open/close transitions
-     so the ribbon, popup, and viewport resize move together. */
-  transition: margin-top 0.2s ease;
 }
 
 @media (max-width: 899px) {
@@ -65,6 +73,10 @@
    instead of pushing the stage off screen, and annotate mode stacks the
    segments panel under the stage rather than beside it. */
 @media (max-width: 640px) {
+  .vp-stage {
+    min-width: 0;
+  }
+
   .vp-organs.vp-organs--open,
   .vp-body>.vp-stats,
   .vp-body>.vp-measure {
@@ -131,12 +143,17 @@
   align-items: stretch;
   min-height: 0;
   overflow: hidden;
+  /* At extreme narrowness (docks open on a small window) the row scrolls
+     sideways instead of crushing the CT grid below .vp-stage's floor. */
+  overflow-x: auto;
 }
 
 .vp-stage {
   flex: 1 1 auto;
   position: relative;
-  min-width: 0;
+  /* Usable floor so the viewports never collapse to a sliver when the
+     fixed-width docks eat the row; .vp-body scrolls past this point. */
+  min-width: 260px;
   min-height: 0;
   overflow: hidden;
   background: #000;
@@ -422,6 +439,11 @@
   transform: scale(1.15);
 }
 
+.vp-range:focus-visible {
+  outline: 2px solid var(--vp-accent);
+  outline-offset: 4px;
+}
+
 .vp-range::-moz-range-thumb {
   width: 15px;
   height: 15px;
@@ -495,6 +517,42 @@
      tooltips render on top of the annotation ribbon when it's open. */
   z-index: 55;
   transition: background 0.25s ease, border-color 0.25s ease;
+  /* Lets the dividers below react to the bar's own width, which the AI
+     sidebar changes independently of the window. */
+  container: vp-topbar / inline-size;
+}
+
+/* Once the bar is too narrow for one row, drop the group dividers: they
+   buy the room that keeps it on one row a little longer (the AI sidebar
+   open at 1440 wide), and on a wrapped bar they only dangle at row ends. */
+@container vp-topbar (max-width: 1160px) {
+  .VisualizationPage .vp-tb-divider {
+    display: none;
+  }
+}
+
+/* The Home button matches the 36px tool and dropdown buttons beside it (declared
+   before the phone block below so its 34px override still wins there). */
+.vp-topbar .vp-iconbtn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+}
+
+/* Phone width: tighter gaps, and the tool icons flow in the same wrapping
+   rows as the triggers instead of starting a block of their own, so the bar
+   takes about three rows rather than a quarter of the screen. The control
+   sizes for this width are set after the base .vp-topbar .vp-tool rule below,
+   which has the same specificity and would otherwise win. */
+@media (max-width: 640px) {
+  .vp-topbar {
+    gap: 6px 4px;
+    padding: 8px 10px;
+  }
+
+  .vp-topbar .vp-tb-tools {
+    display: contents;
+  }
 }
 
 /* While the annotation ribbon is open, the main toolbar steps back —
@@ -655,6 +713,9 @@
   flex-direction: column;
   align-items: flex-start;
   line-height: 1.1;
+  /* A long unbroken scan name truncates instead of pushing the rename pencil off screen. */
+  min-width: 0;
+  max-width: min(100%, 60vw);
 }
 
 .vp-tb-id__eyebrow {
@@ -670,12 +731,18 @@
   font-size: 15px;
   font-weight: 700;
   color: var(--vp-text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .vp-tb-id__val-row {
   display: flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .vp-tb-id__rename-btn {
@@ -703,6 +770,12 @@
   padding: 1px 4px;
   max-width: 220px;
   outline: none;
+}
+
+/* iOS zooms the page into any focused field under 16px, which would throw the
+   fixed viewer layout off for the rest of the visit. */
+@media (max-width: 640px) {
+  .vp-tb-id__rename-input { font-size: 16px; }
 }
 
 .vp-tb-divider {
@@ -754,17 +827,29 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Same height and corner radius as the icon buttons beside them (.vp-tool),
+   so the dropdown triggers read as part of the same row. */
 .vp-tb-mini {
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  box-sizing: border-box;
   font-family: var(--vp-font);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--vp-text-dim);
+  color: rgba(255, 255, 255, 0.8);
   background: var(--vp-panel-strong);
   border: 1px solid var(--vp-border);
-  border-radius: 7px;
-  padding: 5px 9px;
+  border-radius: 10px;
+  padding: 0 11px;
   cursor: pointer;
   white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .vp-tb-mini {
+    height: 32px;
+  }
 }
 
 .vp-tb-mini:hover {
@@ -774,9 +859,23 @@
 
 /* Flyout trigger variant (Layout ▾ / Window ▾): label + chevron, same pill shell. */
 .vp-tb-mini--flyout {
-  display: inline-flex;
-  align-items: center;
   gap: 5px;
+}
+
+/* The trigger's label stacks every label it can show in one grid cell, so
+   it is always as wide as the longest and the icons after it never move
+   when the choice changes (TriggerLabel in VisualizationPage.tsx). */
+.vp-tb-mini__label {
+  display: inline-grid;
+  text-align: left;
+}
+
+.vp-tb-mini__label>span {
+  grid-area: 1 / 1;
+}
+
+.vp-tb-mini__sizer {
+  visibility: hidden;
 }
 
 .vp-tb-mini--active {
@@ -801,15 +900,38 @@
   height: 36px;
 }
 
+/* Nine 32px controls and their 4px gaps are 320px, so a full row of icons fits
+   a 360px phone (34px at 6px gaps was 354px, and the ninth control wrapped onto
+   a row of its own). After the rule above: equal specificity, so order decides. */
+@media (max-width: 640px) {
+  .vp-topbar .vp-tool,
+  .vp-topbar .vp-iconbtn {
+    width: 32px;
+    height: 32px;
+  }
+}
+
 .vp-topbar .vp-tool__tip {
   top: calc(100% + 8px);
   bottom: auto;
   transform-origin: top center;
 }
 
+/* In a 32 to 36px button the 20px icon reaches within a few pixels of the corner,
+   so the caret sat on the lowest knob of Adjust and crowded Ruler and Sync. It is a
+   little smaller and tighter to the corner, and the icon of a button that has one
+   steps up a pixel or two (padding-bottom 4px moves the centred icon 2px), which
+   leaves a clear gap above it. */
 .vp-topbar .vp-tool__caret {
-  right: 3px;
-  bottom: 3px;
+  right: 2px;
+  bottom: 2px;
+  border-left-width: 3px;
+  border-right-width: 3px;
+  border-top-width: 4px;
+}
+
+.vp-topbar .vp-tool:has(> .vp-tool__caret) {
+  padding-bottom: 4px;
 }
 
 /* ---- Tool row (crosshair / download / report) ---- */
@@ -841,9 +963,25 @@
   border-color: var(--vp-border-strong);
 }
 
+/* A hovered button lifts its tooltip above the rows of buttons that follow it
+   in the bar, which would otherwise paint over it. */
+.vp-tool:hover,
+.vp-tool:focus-visible {
+  z-index: 5;
+}
+
 .vp-tool--active {
   background: #ffffff;
   border-color: #ffffff;
+  color: #08090b;
+}
+
+/* Hovering an active tool must not swap its white face for the dark hover
+   fill: the icon is drawn dark on purpose, so it would vanish. A slightly
+   dimmer white still reads as hovered. */
+.vp-tool.vp-tool--active:hover {
+  background: #d9dde4;
+  border-color: #d9dde4;
   color: #08090b;
 }
 
@@ -863,11 +1001,17 @@
   position: absolute;
   left: 50%;
   bottom: calc(100% + 8px);
-  transform: translateX(-50%) scale(0.9);
+  /* --tip-dx is set from script (clampToolTip in VisualizationPage.tsx) to keep
+     the tip inside the window. */
+  transform: translateX(calc(-50% + var(--tip-dx, 0px))) scale(0.9);
   transform-origin: bottom center;
   opacity: 0;
   pointer-events: none;
-  white-space: nowrap;
+  /* Full width of its text (max-content) but never wider than the window, so a
+     long tip wraps instead of running off the screen. */
+  white-space: normal;
+  width: max-content;
+  max-width: calc(100vw - 16px);
   font-family: var(--vp-mono);
   font-size: 10px;
   letter-spacing: 0.04em;
@@ -879,9 +1023,27 @@
   transition: opacity 0.12s, transform 0.12s;
 }
 
-.vp-tool:hover .vp-tool__tip {
+.vp-tool:hover .vp-tool__tip,
+.vp-tool:focus-visible .vp-tool__tip {
   opacity: 1;
-  transform: translateX(-50%) scale(1);
+  transform: translateX(calc(-50% + var(--tip-dx, 0px))) scale(1);
+}
+
+/* A trigger's tooltip describes the flyout it opens, so it steps aside
+   while that flyout is open instead of poking out from under it. */
+.vp-tool[aria-haspopup][aria-expanded="true"] .vp-tool__tip {
+  visibility: hidden;
+}
+
+/* A phone keeps :hover on the button it last tapped, so that button's tip
+   stayed open over whatever the tap opened (the Annotate tip sat on the
+   ribbon's notch as a double chevron). Where nothing can hover, tips show
+   on keyboard focus only; a touch tablet with a mouse or trackpad attached
+   (any-hover) keeps them. */
+@media (hover: none) and (any-hover: none) {
+  .vp-tool:hover:not(:focus-visible) .vp-tool__tip {
+    visibility: hidden;
+  }
 }
 
 /* ---- Measurement tools flyout (collapses Distance/HU/ROI/Clear into one button) ---- */
@@ -911,6 +1073,12 @@
   gap: 2px;
   padding: 6px;
   min-width: 184px;
+  /* Natural width whatever the trigger's x. A fixed panel otherwise shrinks to
+     the room left of its own left edge, so useToolbarFlyout would measure it
+     narrow, pull it left, and it would re-lay out wider past the screen edge. */
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
   background: #16181d;
   border: 1px solid var(--vp-border);
   border-radius: 12px;
@@ -961,6 +1129,19 @@
 .vp-flyout--cine .vp-tool--cine-play:hover {
   background: var(--vp-hover);
   border-color: var(--vp-border-strong);
+}
+
+/* While playing, the Pause icon is drawn dark, so the button keeps the
+   white active face (the rules above would otherwise paint it dark). */
+.vp-flyout--cine .vp-tool--cine-play.vp-tool--active {
+  background: #ffffff;
+  border-color: #ffffff;
+  color: #08090b;
+}
+
+.vp-flyout--cine .vp-tool--cine-play.vp-tool--active:hover {
+  background: #d9dde4;
+  border-color: #d9dde4;
 }
 
 .vp-flyout__item {
@@ -1086,7 +1267,13 @@
 .vp-flyout--config {
   min-width: 220px;
   padding: 10px 12px;
-  gap: 8px;
+}
+
+/* Keeps the flyout's 2px row gap, so action rows sit at the same pitch as in the
+   other flyouts; the section label and segmented rows carry their own spacing. */
+.vp-flyout--config > .vp-panel__title,
+.vp-flyout--config > .vp-seg:not(:last-child) {
+  margin-bottom: 6px;
 }
 
 /* Adjust ▾ — the fill/border/brightness/contrast/zoom sliders + center/reset, stacked
@@ -1097,15 +1284,23 @@
   gap: 12px;
 }
 
+/* Label, track and readout columns are fixed, so every track starts and
+   ends at the same x whatever the label or value width. */
 .vp-flyout--adjust .vp-tb-slider {
   width: 100%;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) 50px;
+  align-items: center;
   gap: 10px;
 }
 
 .vp-flyout--adjust .vp-range {
   width: 100%;
-  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.vp-flyout--adjust .vp-tb-slider__val {
+  min-width: 0;
 }
 
 .vp-flyout--adjust__actions {
@@ -1845,7 +2040,8 @@
 /* Touch: the box stays 19px, its hit area grows to 33px. The disclosure
    chevrons get a 32px minimum height and a wider hit area drawn by a pseudo
    element, so the chevron keeps its 18px column and a sub-group's organs stay
-   indented from its chip. */
+   indented from its chip. The Adjust and Cine sliders and the Adjust action
+   buttons get touch sizes further down in the same block. */
 @media (max-width: 640px), (pointer: coarse) {
   .vp-checkbox {
     position: relative;
@@ -1866,6 +2062,57 @@
     content: "";
     position: absolute;
     inset: 0 -4px 0 -10px;
+  }
+
+  /* The scan rename pencil is a 16px button: a pseudo element reaches a 44px
+     hit area without moving the name or the buttons beside it. */
+  .vp-tb-id__rename-btn {
+    position: relative;
+  }
+
+  .vp-tb-id__rename-btn::after {
+    content: "";
+    position: absolute;
+    inset: -14px;
+  }
+
+  /* The Adjust and Cine sliders: the input is a 28px tall hit area, the 4px track
+     is drawn on the track pseudo elements and the thumb grows to 22px. */
+  .vp-range {
+    height: 28px;
+    background: transparent;
+  }
+
+  .vp-range::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .vp-range::-moz-range-track {
+    height: 4px;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .vp-range::-webkit-slider-thumb {
+    width: 22px;
+    height: 22px;
+    margin-top: -9px;
+  }
+
+  .vp-range::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+  }
+
+  .vp-flyout--adjust__actions .vp-tb-mini {
+    min-height: 36px;
+  }
+
+  /* The load-failure screen's Retry and Back buttons sit on the same overlay. */
+  .vp-loading .vp-btn {
+    min-height: 40px;
   }
 }
 

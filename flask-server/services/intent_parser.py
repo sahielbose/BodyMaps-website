@@ -28,7 +28,7 @@ ALLOWED_PRESETS = {"soft_tissue", "bone", "lung", "liver"}
 ALLOWED_METRICS = {"volume_cm3", "mean_hu", "all"}
 ALLOWED_TOOLS = {"distance", "probe", "roi"}
 # The viewer's zoom range, the same as MIN_ZOOM and MAX_ZOOM in
-# PanTS-Demo/src/helpers/viewer/useKeyboardShortcuts.ts. The confirmation sentence
+# PanTS-Demo/src/helpers/CornerstoneNifti2.tsx. The confirmation sentence
 # quotes the value, so a wider range here would claim a zoom the panes never show.
 MIN_ZOOM = 0.2
 MAX_ZOOM = 8

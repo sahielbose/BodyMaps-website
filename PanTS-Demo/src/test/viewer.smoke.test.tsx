@@ -1,7 +1,8 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "../contexts/authContext";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { RECENT_UPLOADS_KEY } from "../helpers/recentUploads";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const viewerDispose = vi.hoisted(() => vi.fn());
 const viewerVolumeSequence = vi.hoisted(() => ({ value: 0 }));
@@ -206,6 +207,110 @@ describe("viewer smoke test", () => {
 		expect(viewerDispose).toHaveBeenCalledOnce();
 	});
 
+	it("gives the case one main landmark around the panes and a level 1 heading", async () => {
+		const { container } = render(
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/case/17"]}>
+					<Routes>
+						<Route path="/case/:caseId" element={<VisualizationPage />} />
+					</Routes>
+				</MemoryRouter>
+			</AuthProvider>
+		);
+		await waitFor(() => expect(renderVisualization).toHaveBeenCalled());
+		const main = screen.getByRole("main");
+		expect(main).toContainElement(container.querySelector(".vp-stage") as HTMLElement);
+		expect(screen.getByRole("heading", { level: 1, name: "Case 17" })).toHaveClass("sr-only");
+	});
+
+	it("runs Brightness and Contrast the way their names say and announces the real level and width", async () => {
+		render(
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/case/1"]}>
+					<Routes>
+						<Route path="/case/:caseId" element={<VisualizationPage />} />
+					</Routes>
+				</MemoryRouter>
+			</AuthProvider>
+		);
+		await waitFor(() => expect(renderVisualization).toHaveBeenCalled());
+		fireEvent.click(screen.getByRole("button", { name: "Adjust" }));
+
+		const brightness = screen.getByRole("slider", { name: "Brightness" }) as HTMLInputElement;
+		const contrast = screen.getByRole("slider", { name: "Contrast" }) as HTMLInputElement;
+		expect(brightness).toHaveAttribute("aria-valuetext", "Window level 40 HU");
+		expect(contrast).toHaveAttribute("aria-valuetext", "Window width 400 HU");
+
+		// Right is more contrast: a narrower window.
+		fireEvent.change(contrast, { target: { value: String(Number(contrast.value) + 200) } });
+		expect(contrast).toHaveAttribute("aria-valuetext", "Window width 200 HU");
+
+		// Right is brighter: a lower window level.
+		fireEvent.change(brightness, { target: { value: String(Number(brightness.value) + 100) } });
+		expect(brightness).toHaveAttribute("aria-valuetext", "Window level -60 HU");
+	});
+
+	it("names the CT window preset only while its window is the one applied", async () => {
+		render(
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/case/1"]}>
+					<Routes>
+						<Route path="/case/:caseId" element={<VisualizationPage />} />
+					</Routes>
+				</MemoryRouter>
+			</AuthProvider>
+		);
+		await waitFor(() => expect(renderVisualization).toHaveBeenCalled());
+		expect(screen.getByRole("button", { name: "CT window preset: Soft tissue" })).toBeInTheDocument();
+
+		fireEvent.click(screen.getByRole("button", { name: "CT window preset: Soft tissue" }));
+		fireEvent.click(screen.getByRole("button", { name: "Lung" }));
+		expect(screen.getByRole("button", { name: "CT window preset: Lung" })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Lung" })).toHaveAttribute("aria-pressed", "true");
+
+		// A Contrast drag leaves Lung's window, so the trigger stops calling it Lung.
+		fireEvent.click(screen.getByRole("button", { name: "Adjust" }));
+		const contrast = screen.getByRole("slider", { name: "Contrast" }) as HTMLInputElement;
+		fireEvent.change(contrast, { target: { value: String(Number(contrast.value) + 300) } });
+		const trigger = screen.getByRole("button", { name: "CT window preset" });
+		// The label's last span is the visible one; the others only size it.
+		expect(trigger.querySelector(".vp-tb-mini__label > span:last-child")).toHaveTextContent(/^Window$/);
+		expect(screen.queryByRole("button", { name: "CT window preset: Lung" })).toBeNull();
+	});
+
+	it("says a case has no metadata once the lookup comes back empty, not before", async () => {
+		let answerSearch!: () => void;
+		const search = new Promise<void>((resolve) => { answerSearch = resolve; });
+		const plainFetch = global.fetch;
+		global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+			if (String(url).includes("/api/search")) {
+				await search;
+				return { ok: true, status: 200, json: async () => ({ items: [] }) } as Response;
+			}
+			return plainFetch(url, init);
+		}) as typeof fetch;
+
+		render(
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/case/1"]}>
+					<Routes>
+						<Route path="/case/:caseId" element={<VisualizationPage />} />
+					</Routes>
+				</MemoryRouter>
+			</AuthProvider>
+		);
+		await waitFor(() => expect(renderVisualization).toHaveBeenCalled());
+		fireEvent.click(screen.getByRole("button", { name: "Panels" }));
+		fireEvent.click(screen.getByRole("button", { name: "Case metadata" }));
+
+		await waitFor(() => expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/api/search")));
+		expect(screen.getByText("Loading…")).toBeInTheDocument();
+		expect(screen.queryByText("No metadata available for this case.")).toBeNull();
+
+		await act(async () => answerSearch());
+		expect(await screen.findByText("No metadata available for this case.")).toBeInTheDocument();
+	});
+
 	it("aborts an in-flight load and disposes its late result", async () => {
 		const staleDispose = vi.fn();
 		let resolveLoad!: (value: Awaited<ReturnType<typeof renderVisualization>>) => void;
@@ -317,5 +422,135 @@ describe("viewer smoke test", () => {
 
 		await waitFor(() => expect(ctUpdateRange).toHaveBeenCalled());
 		expect(segmentationUpdateRange).not.toHaveBeenCalled();
+	});
+});
+
+describe("scan name in the viewer's top bar", () => {
+	it("the rename field is named, like the Upload page's", async () => {
+		localStorage.setItem(
+			RECENT_UPLOADS_KEY,
+			JSON.stringify([{ sessionId: "abc", label: "ePAI scan", model: "ePAI", status: "Completed", timestamp: Date.now() }]),
+		);
+		render(
+			<AuthProvider>
+				<MemoryRouter initialEntries={["/session/abc"]}>
+					<Routes>
+						<Route path="/session/:sessionId" element={<VisualizationPage />} />
+					</Routes>
+				</MemoryRouter>
+			</AuthProvider>
+		);
+		fireEvent.click(await screen.findByRole("button", { name: "Rename scan" }));
+		const field = screen.getByRole("textbox", { name: "Scan name" });
+		expect(field).toHaveFocus();
+		expect(field).toHaveValue("ePAI scan");
+		localStorage.clear();
+	});
+
+	// The saved names are one list per browser, each run stamped with the account
+	// that started it. Opening a session's address as another account is possible
+	// (browser history, a shared link), and must show neither its owner's name
+	// for it nor a way to change it.
+	describe("on a browser shared by two accounts", () => {
+		const signedInAs = (id: string) => {
+			global.fetch = vi.fn(async (url: RequestInfo | URL) => {
+				const body = String(url).includes("/api/auth/me")
+					? { user: { id, email: `${id}@example.com`, name: null, plan: "pro" } }
+					: {};
+				return {
+					ok: true, status: 200, json: async () => body, text: async () => "",
+					arrayBuffer: async () => new ArrayBuffer(0), blob: async () => new Blob(),
+					headers: { get: () => "application/json" },
+				};
+			}) as unknown as typeof fetch;
+		};
+		const openSession = () =>
+			render(
+				<AuthProvider>
+					<MemoryRouter initialEntries={["/session/abc"]}>
+						<Routes>
+							<Route path="/session/:sessionId" element={<VisualizationPage />} />
+						</Routes>
+					</MemoryRouter>
+				</AuthProvider>
+			);
+		const saved = () => JSON.parse(localStorage.getItem(RECENT_UPLOADS_KEY) ?? "[]") as { label: string }[];
+		const seed = () =>
+			localStorage.setItem(
+				RECENT_UPLOADS_KEY,
+				JSON.stringify([{ sessionId: "abc", label: "One's scan", model: "ePAI", status: "Completed", timestamp: Date.now(), ownerId: "u1" }]),
+			);
+		afterEach(() => localStorage.clear());
+
+		it("shows the account's own name for its scan, and renames it", async () => {
+			seed();
+			signedInAs("u1");
+			openSession();
+
+			fireEvent.click(await screen.findByRole("button", { name: "Rename scan" }));
+			fireEvent.change(screen.getByRole("textbox", { name: "Scan name" }), { target: { value: "Renamed" } });
+			fireEvent.keyDown(screen.getByRole("textbox", { name: "Scan name" }), { key: "Enter" });
+
+			await waitFor(() => expect(saved()[0].label).toBe("Renamed"));
+		});
+
+		it("writes no rename once the run is no longer the account's (it changed hands in another tab)", async () => {
+			seed();
+			signedInAs("u1");
+			openSession();
+			fireEvent.click(await screen.findByRole("button", { name: "Rename scan" }));
+			fireEvent.change(screen.getByRole("textbox", { name: "Scan name" }), { target: { value: "Renamed" } });
+
+			localStorage.setItem(
+				RECENT_UPLOADS_KEY,
+				JSON.stringify([{ ...saved()[0], sessionId: "abc", ownerId: "u2" }]),
+			);
+			fireEvent.keyDown(screen.getByRole("textbox", { name: "Scan name" }), { key: "Enter" });
+
+			await waitFor(() => expect(screen.queryByRole("textbox", { name: "Scan name" })).not.toBeInTheDocument());
+			expect(saved()[0].label).toBe("One's scan");
+		});
+
+		it("takes up a scan saved before runs carried an owner when the server says it is the account's", async () => {
+			localStorage.setItem(
+				RECENT_UPLOADS_KEY,
+				JSON.stringify([{ sessionId: "abc", label: "Earlier scan", model: "ePAI", status: "Completed", timestamp: Date.now() }]),
+			);
+			global.fetch = vi.fn(async (url: RequestInfo | URL) => {
+				const u = String(url);
+				const body = u.includes("/api/auth/me")
+					? { user: { id: "u1", email: "u1@example.com", name: null, plan: "pro" } }
+					: u.includes("/api/me/runs/owned")
+						? { owned: ["abc"] }
+						: {};
+				return {
+					ok: true, status: 200, json: async () => body, text: async () => "",
+					arrayBuffer: async () => new ArrayBuffer(0), blob: async () => new Blob(),
+					headers: { get: () => "application/json" },
+				};
+			}) as unknown as typeof fetch;
+			openSession();
+
+			// Opened straight from an address, with the Upload page never visited.
+			fireEvent.click(await screen.findByRole("button", { name: "Rename scan" }));
+			expect(screen.getByRole("textbox", { name: "Scan name" })).toHaveValue("Earlier scan");
+			fireEvent.change(screen.getByRole("textbox", { name: "Scan name" }), { target: { value: "Renamed" } });
+			fireEvent.keyDown(screen.getByRole("textbox", { name: "Scan name" }), { key: "Enter" });
+
+			await waitFor(() => expect(saved()[0].label).toBe("Renamed"));
+			expect((saved()[0] as { ownerId?: string }).ownerId).toBe("u1");
+		});
+
+		it("shows another account's scan under its address without that account's name, and cannot rename it", async () => {
+			seed();
+			signedInAs("u2");
+			openSession();
+			await waitFor(() => expect(vi.mocked(global.fetch).mock.calls.some(([u]) => String(u).includes("/api/auth/me"))).toBe(true));
+			await new Promise((resolve) => setTimeout(resolve, 80));
+
+			expect(screen.queryByText("One's scan")).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: "Rename scan" })).not.toBeInTheDocument();
+			expect(saved()[0].label).toBe("One's scan");
+		});
 	});
 });

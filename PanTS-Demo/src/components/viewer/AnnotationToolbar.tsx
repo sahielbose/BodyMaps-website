@@ -18,6 +18,7 @@ import {
 import "./AnnotationToolbar.css";
 import NumberSliderField from "../NumberSliderField";
 import { FlyoutArrow, FlyoutPanel, MenuColumn, MenuRow, MenuDivider, useFlyout } from "./FlyoutPrimitives";
+import { MAX_DIAMETER_MM, MIN_DIAMETER_MM } from "../../helpers/viewer/brushSize";
 import type { GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
 
 // sessionStorage keys: once the overview tour (or first-target hint) has
@@ -123,9 +124,6 @@ const SCISSORS_OPERATIONS: { value: ScissorsOperation; label: string }[] = [
 // Tools that don't have an ApplyButton — they commit directly on pointer
 // interaction, so the rendering dot is the only feedback available.
 const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "scissors", "levelTracing", "pointSegment", "boxSegment"];
-
-const MIN_DIAMETER_MM = 2;
-const MAX_DIAMETER_MM = 40;
 
 // Which "explain Continue / Start over / Exit" message a guided tool falls
 // under. Grow from Seeds gets its own copy; the slice-range tools (Copy/Fill

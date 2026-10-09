@@ -20,7 +20,7 @@ import {
     IconCircle,
     IconClick,
     IconEye,
-    IconFlipHorizontal,
+    IconFlipVertical,
     IconGrid3x3,
     IconHome,
     IconId,
@@ -41,6 +41,7 @@ import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { Link, useLocation, useParams } from "react-router-dom";
 import PanelHeader from "../components/PanelHeader";
+import TriggerLabel from "../components/TriggerLabel";
 import AISidebar from "../components/AIAssistant/AISidebar";
 import { track } from "../helpers/analytics";
 import { formatCaseMetaValue } from "../helpers/demographics";
@@ -75,7 +76,9 @@ import { organTipPosition } from "../helpers/viewer/organTipPosition";
 import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
 import { voxelsLog } from "../helpers/viewer/editLog";
 import { useInteractivePromptTool } from "../helpers/viewer/useInteractivePromptTool";
-import { loadRecentUploads, renameRecentUpload } from "../helpers/recentUploads";
+import { loadRecentUploads, renameRecentUpload, runsOf } from "../helpers/recentUploads";
+import { useAuthIfPresent } from "../contexts/authContext";
+import { useRunsAdoptedVersion } from "../helpers/adoptLegacyRuns";
 import {
   applyMargin, getActualMarginMm, getActualHollowMm,
   applyIslandsOperation, applyLogicalOperator, applySmoothing,
@@ -97,6 +100,7 @@ import {
     applyVolume3DPreset,
     ARROW_TOOL,
     BIDIRECTIONAL_TOOL,
+    cancelMeasurementInProgress,
     captureViewportImages,
     centerOnCursor,
     clearMaskEditCursor,
@@ -187,8 +191,10 @@ import AnnotationToolbar, {
 import { setMaskBrushSize } from "../helpers/CornerstoneNifti2";
 import { useMorphPicker } from "../helpers/viewer/useMorphPicker";
 import { useToolbarFlyout } from "../helpers/viewer/useToolbarFlyout";
+import { crosshairAfterClick, crosshairModeShown } from "../helpers/viewer/crosshairMode";
 import { useLassoTool } from "../helpers/viewer/useLassoTool";
 import { volume3DPresetsForModality } from "../helpers/volume3DPresets";
+import { CT_WINDOWS } from "../helpers/ctWindows";
 import { useFocusedPane } from "../helpers/viewer/useFocusedPane";
 import { axialSliceBarKeyStep } from "../helpers/viewer/sliceBarKeys";
 import { useKeyboardShortcuts } from "../helpers/viewer/useKeyboardShortcuts";
@@ -227,6 +233,7 @@ import { type CheckBoxData } from "../types";
 import { splitClassBookkeeping } from "../helpers/splitClassBookkeeping";
 import "./VisualizationPage.css";
 import LiveWireOverlay from "../components/viewer/LiveWireOverlay";
+import { markEscapeUsed } from "../helpers/viewer/escapeUsed";
 
 type ViewMode = "mpr" | "axial" | "sagittal" | "coronal" | "3d";
 
@@ -239,10 +246,10 @@ type LayoutPreset = "grid" | "axial-primary" | "sagittal-primary" | "coronal-pri
 
 const LAYOUT_PRESETS: { id: LayoutPreset; label: string }[] = [
 	{ id: "grid", label: "Equal" },
-	{ id: "axial-primary", label: "Axial Large" },
-	{ id: "sagittal-primary", label: "Sagittal Large" },
-	{ id: "coronal-primary", label: "Coronal Large" },
-	{ id: "3d-primary", label: "3D Large" },
+	{ id: "axial-primary", label: "Axial large" },
+	{ id: "sagittal-primary", label: "Sagittal large" },
+	{ id: "coronal-primary", label: "Coronal large" },
+	{ id: "3d-primary", label: "3D large" },
 ];
 
 // Which pane each non-"grid" preset enlarges. The other three fill the remaining
@@ -259,10 +266,10 @@ const LAYOUT_PANE_ORDER: ViewMode[] = ["axial", "sagittal", "coronal", "3d"];
 // scan," so they share one "Layout ▾" toolbar dropdown instead of two separate
 // always-visible rows of segmented buttons.
 const VIEW_MODE_OPTIONS: { mode: ViewMode; label: string }[] = [
-	{ mode: "mpr", label: "⊞ MPR" },
+	{ mode: "mpr", label: "MPR" },
 	{ mode: "axial", label: "Axial" },
-	{ mode: "sagittal", label: "Sag" },
-	{ mode: "coronal", label: "Cor" },
+	{ mode: "sagittal", label: "Sagittal" },
+	{ mode: "coronal", label: "Coronal" },
 	{ mode: "3d", label: "3D" },
 ];
 const VIEW_MODE_SHORT_LABEL: Record<ViewMode, string> = {
@@ -272,6 +279,24 @@ const VIEW_MODE_SHORT_LABEL: Record<ViewMode, string> = {
 	coronal: "Coronal",
 	"3d": "3D",
 };
+// The view names the Layout trigger shows and sizes itself to. The preset names
+// ("Sagittal large") are never shown in it, so it keeps one width.
+const LAYOUT_TRIGGER_LABELS: readonly string[] = Object.values(VIEW_MODE_SHORT_LABEL);
+
+// A toolbar tooltip is centred on its button, so on the left-hand buttons it
+// starts off screen. Measured when the button is hovered or focused, and applied
+// as --tip-dx (see .vp-tool__tip), it slides the tip back inside the window.
+function clampToolTip(event: React.SyntheticEvent) {
+	const target = event.target as HTMLElement | null;
+	const tool = target?.closest?.(".vp-tool");
+	const tip = tool?.querySelector<HTMLElement>(":scope > .vp-tool__tip");
+	if (!tool || !tip) return;
+	const gutter = 8;
+	const button = tool.getBoundingClientRect();
+	const left = button.left + button.width / 2 - tip.offsetWidth / 2;
+	const dx = Math.max(gutter - left, Math.min(0, window.innerWidth - gutter - (left + tip.offsetWidth)));
+	tip.style.setProperty("--tip-dx", `${Math.round(dx)}px`);
+}
 
 export type MaskEditMode = "brush" | "eraser" | "smartfill" | "lasso" | null;
 
@@ -361,13 +386,15 @@ function rgbToColorName(r: number, g: number, b: number): string {
 }
 
 const CT_PRESETS = [
-	{ name: "Soft Tissue", width: 400, center: 40 },
-	{ name: "Bone", width: 1800, center: 400 },
-	{ name: "Lung", width: 1500, center: -600 },
-	{ name: "Liver", width: 150, center: -50 }, // Brightness 50 (= -center), Contrast 150 (= width)
-	{ name: "Brain", width: 80, center: 40 },
-	{ name: "Angio", width: 600, center: 150 }, // contrast-enhanced vessels (CTA)
+	{ name: "Soft tissue", ...CT_WINDOWS.softTissue },
+	{ name: "Bone", ...CT_WINDOWS.bone },
+	{ name: "Lung", ...CT_WINDOWS.lung },
+	{ name: "Liver", ...CT_WINDOWS.liver },
+	{ name: "Brain", ...CT_WINDOWS.brain },
+	{ name: "Angio", ...CT_WINDOWS.angio },
 ] as const;
+// Everything the CT window trigger can say, so it can be sized to the longest.
+const WINDOW_TRIGGER_LABELS: readonly string[] = ["Window", ...CT_PRESETS.map((p) => p.name)];
 
 // Used only as a fallback for the very first frame or two, before a pane's
 // Cornerstone viewport has actually been enabled yet — see getPanePxPerMm
@@ -410,6 +437,10 @@ function getPanePxPerMm(paneEl: HTMLDivElement | null): number {
 // MeasurementToolName) so the magnify entry — a plain `string`, deliberately not part of
 // the measurement-tool union — fits in the same array. The names come from
 // helpers/measurementTools, the one table the panel and the report read too.
+// The Contrast slider's window width range (HU).
+const WINDOW_WIDTH_MIN = 1;
+const WINDOW_WIDTH_MAX = 2000;
+
 const MEASURE_TOOLS: { name: PrimaryMouseToolName; Icon: typeof IconRuler2; key: string }[] = [
 	{ name: LENGTH_TOOL, Icon: IconRuler2, key: "L" },
 	{ name: BIDIRECTIONAL_TOOL, Icon: IconArrowsCross, key: "B" },
@@ -775,9 +806,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	});
 	const sliceInfoRef = useRef(sliceInfo);
 	useEffect(() => { sliceInfoRef.current = sliceInfo; }, [sliceInfo]);
-	// Matches the "Soft Tissue" CT_PRESETS entry (W 400 / L 40) — activePreset below
-	// defaults to that same preset, so the readout and the pre-highlighted button
-	// should agree on first load instead of showing a level the preset never set.
+	// Matches the "Soft tissue" CT_PRESETS entry (W 400 / L 40), so the window
+	// trigger (activePreset below) names that preset on first load and the readout
+	// shows the level it sets.
 	const [windowWidth, setWindowWidth] = useState(400);
 	const [windowCenter, setWindowCenter] = useState(40);
 	const [maskingArea, setMaskingArea] = useState<MaskingArea>("everywhere");
@@ -881,6 +912,13 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const stageRef = useRef<HTMLDivElement>(null);
 	const [showOrganDetails, setShowOrganDetails] = useState(false);
 	const [loading, setLoading] = useState(true);
+	// Set after mount, so "Preparing scan" is a change to the live region and is spoken.
+	// The region also reads loading and dicomError directly, so it empties in the same
+	// render that shows an error or the scan instead of one effect later.
+	const [loadingAnnounced, setLoadingAnnounced] = useState(false);
+	useEffect(() => {
+		setLoadingAnnounced(loading && !dicomError);
+	}, [loading, dicomError]);
 	// Bumped when the segmentation's slices have all arrived, which is after
 	// the viewer reports ready (Cornerstone streams them in the background).
 	const [segmentationLoads, setSegmentationLoads] = useState(0);
@@ -1570,6 +1608,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// hdReady logic gating the Annotate button, not a separate guess. Placed
 	// after `enhance` is declared above since both read enhance.state.
 	const [promptToolBusy, setPromptToolBusy] = useState(false);
+	const promptToolArmed =
+		activeToolbarTool === "pointSegment" ||
+		activeToolbarTool === "boxSegment";
 	const pointSegment = useInteractivePromptTool({
 		enabled: activeToolbarTool === "pointSegment" && !promptToolBusy,
 		mode: "point",
@@ -1596,6 +1637,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		onBusyChange: setPromptToolBusy,
 		onComplete: () => setActiveToolbarTool(null),
 	});
+	// What the Crosshair button shows and what a click on it does
+	// (see helpers/viewer/crosshairMode).
+	const crosshairModeState = {
+		crosshairToolActive,
+		measureToolArmed: Boolean(activeMeasureTool),
+		editToolArmed: Boolean(editMode),
+		promptToolArmed,
+	};
+	const crosshairShown = crosshairModeShown(crosshairModeState);
 
 	const enhanceStartedRef = useRef(false);
 	// Live mirrors so the async swap re-applies the *current* window/visibility, not
@@ -1675,16 +1725,39 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const [scanLabel, setScanLabel] = useState<string | null>(null);
 	const [renamingScan, setRenamingScan] = useState(false);
 	const [scanRenameDraft, setScanRenameDraft] = useState("");
+	// The list is per browser, so the name is only read, or changed, when the
+	// run is the caller's own (runsOf): another account's saved name is not
+	// shown to whoever opens its address.
+	const auth = useAuthIfPresent();
+	const scanOwnerId = auth?.user?.id ?? null;
+	const scanOwnerSettled = auth ? !auth.loading : true;
+	// Earlier runs are stamped with their account once sign-in settles.
+	const runsAdoptedVersion = useRunsAdoptedVersion();
+	const ownScan = useCallback(
+		() => runsOf(loadRecentUploads(), scanOwnerId, scanOwnerSettled).find((u) => u.sessionId === sessionId),
+		// The version is not read inside; it is what makes the read happen again.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[sessionId, scanOwnerId, scanOwnerSettled, runsAdoptedVersion],
+	);
 	useEffect(() => {
 		if (!sessionId) { setScanLabel(null); return; }
-		const match = loadRecentUploads().find((u) => u.sessionId === sessionId);
-		setScanLabel(match?.label ?? null);
-	}, [sessionId]);
+		setScanLabel(ownScan()?.label ?? null);
+	}, [sessionId, ownScan]);
+	// Enter or Escape unmounts the focused rename input; the rename button takes
+	// focus back (a click elsewhere leaves focus where the person put it).
+	const scanRenameBtnRef = useRef<HTMLButtonElement>(null);
+	const refocusScanRenameBtn = useRef(false);
+	useEffect(() => {
+		if (renamingScan || !refocusScanRenameBtn.current) return;
+		refocusScanRenameBtn.current = false;
+		scanRenameBtnRef.current?.focus({ preventScroll: true });
+	}, [renamingScan]);
 	const commitScanRename = () => {
 		if (!sessionId) return;
-		renameRecentUpload(sessionId, scanRenameDraft);
-		const match = loadRecentUploads().find((u) => u.sessionId === sessionId);
-		setScanLabel(match?.label ?? null);
+		if (ownScan()) {
+			renameRecentUpload(sessionId, scanRenameDraft);
+			setScanLabel(ownScan()?.label ?? null);
+		}
 		setRenamingScan(false);
 	};
 	const [showMeasurePanel, setShowMeasurePanel] = useState(false);
@@ -1731,7 +1804,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// the stage observer refits those panes from scratch rather than putting back a
 	// relative zoom read against a fit that was still moving.
 	const annotateRefitRef = useRef(false);
-	const [activePreset, setActivePreset] = useState<string>("Soft Tissue");
+	// The CT preset whose width and level are applied right now, or "" for any
+	// other window. Worked out from the window rather than stored, so the Brt/Con
+	// sliders, a shared link or following a leader can't leave the last clicked
+	// preset's name on the trigger.
+	const activePreset =
+		CT_PRESETS.find((p) => p.width === Math.round(windowWidth) && p.center === Math.round(windowCenter))?.name ?? "";
 	const [_tooltip, setToolTip] = useState({
 		visible: false,
 		x: 0,
@@ -1808,7 +1886,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setActiveMeasurementTool(null);
 			toggleCrosshairTool(crosshairToolActive);
 		}
-	}, [editMode, activeToolbarTool, activeMeasureTool, crosshairToolActive, guidedPicking]);
+	}, [editMode, activeToolbarTool, activeMeasureTool, crosshairToolActive, guidedPicking, viewerReady]);
 
 
 
@@ -2380,13 +2458,16 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 
 
+	// The 3D view hides every slice pane, so there is nothing for these to act on.
 	const handleFlipHorizontal = () => {
+		if (viewMode === "3d") return;
 		const pane = focusedPane.getFocusedPane()
 		flipPaneHorizontal(pane);
 		sessionRef.current?.log("view", `Flipped ${pane} horizontally`);
 	};
 
 	const handleRotate90Clockwise = () => {
+		if (viewMode === "3d") return;
 		const pane = focusedPane.getFocusedPane()
 		rotatePane90Clockwise(pane);
 		sessionRef.current?.log("view", `Rotated ${pane} 90° clockwise`);
@@ -2396,6 +2477,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// React StrictMode double-invokes that form in dev to catch impure updaters, which would
 	// call startCine/stopCine twice per click (this app runs in StrictMode; see the similar
 	// double-run workarounds in dicomLocal.ts).
+	const cinePaneRef = useRef<CinePane>("axial");
 	const toggleCine = useCallback(() => {
 		if (!viewerReady) return;
 		const pane = focusedPane.getFocusedPane();
@@ -2405,14 +2487,35 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			sessionRef.current?.log("view", "Stopped cine playback");
 			return;
 		}
+		// The 3D view hides the slice panes, so a clip would scroll one nobody sees.
+		if (viewMode === "3d") return;
 		const ok = startCine(pane, cineFps);
+		if (ok) cinePaneRef.current = pane;
 		setCinePlaying(ok);
 		if (ok) {
 			sessionRef.current?.log("view", `Started cine playback (${pane}, ${cineFps} fps)`);
 		} else {
 			console.warn(`Cine playback failed to start for pane "${pane}"`);
 		}
-	}, [cinePlaying, focusedPane.getFocusedPane, cineFps, viewerReady]);
+	}, [cinePlaying, focusedPane.getFocusedPane, cineFps, viewerReady, viewMode]);
+
+	// Escape that nothing else used (no flyout, dialog, popover or half-drawn
+	// shape took it) disarms a measure tool or an nnInteractive prompt tool.
+	// A measure tool hands the mouse back to crosshair navigation, as the
+	// Crosshair button would; a prompt tool is deselected, as clicking it
+	// again in the ribbon would.
+	const disarmOnEscape = (): boolean => {
+		if (activeMeasureTool) {
+			setActiveMeasureTool(null);
+			setCrosshairToolActive(true);
+			return true;
+		}
+		if (promptToolArmed) {
+			handleToolbarToolChange(null);
+			return true;
+		}
+		return false;
+	};
 
 	useKeyboardShortcuts({
 		takeSnapshot,
@@ -2428,10 +2531,32 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		sliceInfoRef,
 		editMode,
 		setZoomLevel,
+		diameterMm,
+		onDiameterChange: handleDiameterChange,
 		collaborationConnected: liveRoom?.connectionState === "connected",
 		collaborationLocked: liveRoom?.collaborationLocked,
 		onCollaborationUndo: liveRoom?.requestUndo,
 		onUndo: handleUndo,
+		// Suspended while any full-screen layer owns the keyboard: the report
+		// walkthrough and the HD-loading overlay — otherwise S still snapshots
+		// the hidden panes, V starts cine,
+		// and [ / ] scroll slices invisibly underneath them. The session summary
+		// counts too: a click on its backdrop drops focus to <body>, which the
+		// dialog guard in the handler no longer recognises, and so does a click on
+		// the plain text of the live-room dialog. So does the load
+		// itself: before the tool group exists a tool hotkey would only move the
+		// toolbar highlight, leaving Cornerstone on another tool.
+		disabled:
+			loading ||
+			!viewerReady ||
+			Boolean(dicomError) ||
+			showReportScreen ||
+			sessionResult !== null ||
+			showLiveRoomCreate ||
+			annotateHdLoading,
+		closeAnnotationToolbarIfOpen,
+		onEscape: disarmOnEscape,
+		cancelDrawing: () => cancelMeasurementInProgress(),
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
 	// the new speed rather than waiting for the next stop/start.
@@ -2439,7 +2564,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		setCineFps(fps);
 		if (cinePlaying) {
 			stopCine();
-			startCine(focusedPane.getFocusedPane(), fps);
+			startCine(cinePaneRef.current, fps);
 		}
 	};
 
@@ -2697,7 +2822,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					if (result.initialVoi) {
 						setWindowWidth(result.initialVoi.windowWidth);
 						setWindowCenter(result.initialVoi.windowCenter);
-						setActivePreset("");
 					}
 					acceptLoadedViewer(result);
 				} catch (e) {
@@ -3038,24 +3162,36 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		const url = `${window.location.origin}${window.location.pathname}${qs ? `?${qs}` : ""}`;
 		try {
 			await navigator.clipboard.writeText(url);
+			setShareCopied(true);
+			window.setTimeout(() => setShareCopied(false), 1600);
 		} catch {
 			// Clipboard blocked (e.g. insecure context) — fall back to a prompt so the link
-			// is still copyable by hand.
+			// is still copyable by hand. Nothing was copied, so no "Link copied" state.
 			window.prompt("Copy this link to share the current view:", url);
 		}
-		setShareCopied(true);
-		window.setTimeout(() => setShareCopied(false), 1600);
 	};
 
 	// The Measure button shows the active tool's icon (including magnify, now folded into
 	// the same flyout/state), or the ruler when nothing is active.
 	const measureToolActive = activeMeasureTool !== null;
 	const ActiveMeasureIcon = MEASURE_TOOLS.find((t) => t.name === activeMeasureTool)?.Icon ?? IconRuler2;
+	// Names the armed tool on the trigger, like "Layout: MPR", so the state
+	// the icon shows is also announced.
+	const activeMeasureLabel = activeMeasureTool ? measurementToolName(activeMeasureTool) : undefined;
 
 	// Group-level "something inside is active" flags, so each collapsed toolbar dropdown
 	// still visually reflects its contents' state without having to be open.
 	const viewGroupActive = hoverIdentifyEnabled || referenceLinesOn;
 	const panelsGroupActive = showOrganDetails || showStats || showMetadata || showMeasurePanel;
+	// A dock's own close button unmounts (or hides) with the dock, which would drop
+	// focus to <body>. Closing from inside a dock hands focus back to the Panels
+	// trigger that opened it; a close from elsewhere (the Measurements shortcut, a
+	// mouse click on the toolbar) leaves focus where it is.
+	const keepFocusOnPanelsButton = () => {
+		if (document.activeElement?.closest(".vp-stats, .vp-measure, .vp-organs")) {
+			panelsFlyout.btnRef.current?.focus({ preventScroll: true });
+		}
+	};
 	const collaborationDisabled = !viewerReady || Boolean(liveRoom && (
 		liveRoom.connectionState !== "connected" || liveRoom.collaborationLocked
 	));
@@ -3065,10 +3201,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 	// The Layout ▾ trigger shows the pane-layout preset's name when one is active
 	// (it's the more specific choice), otherwise the current view mode.
-	const layoutTriggerLabel =
-		viewMode === "mpr" && layoutPreset !== "grid"
-			? LAYOUT_PRESETS.find((p) => p.id === layoutPreset)?.label ?? VIEW_MODE_SHORT_LABEL.mpr
-			: VIEW_MODE_SHORT_LABEL[viewMode];
+	const layoutTriggerLabel = VIEW_MODE_SHORT_LABEL[viewMode];
+	// The preset's name is not in the trigger: "Sagittal large" is wider than any
+	// view name, so showing it moved every icon after it, and on a phone re-wrapped
+	// the bar. It is named in the flyout, and read out with the trigger.
+	const layoutPresetLabel =
+		viewMode === "mpr" && layoutPreset !== "grid" ? LAYOUT_PRESETS.find((p) => p.id === layoutPreset)?.label : undefined;
 
 	// Center on an organ (from the sidebar): move both the 2D MPR crosshair and the 3D
 	// (NiiVue) crosshair — the Cornerstone move suppresses its change event, so the 3D
@@ -3297,7 +3435,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	}, [showAnnotationToolbar, renderingEngine]);
 
 	const handlePresetClick = (preset: typeof CT_PRESETS[number]) => {
-		setActivePreset(preset.name);
 		handleWindowChange(preset.width, preset.center);
 		showWindowReadoutBriefly();
 		sessionRef.current?.log("preset", `Applied ${preset.name} window`);
@@ -3400,7 +3537,13 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						data-horizontal={opensLeft ? "left" : "right"}
 						data-vertical={opensAbove ? "above" : "below"}
 						onKeyDown={(event) => {
-							if (event.key === "Escape") setOpenPinnedNote(null);
+							if (event.key !== "Escape") return;
+							// Closing the note uses up the Escape, so it doesn't
+							// also disarm the active tool.
+							if (isOpen) markEscapeUsed(event.nativeEvent);
+							// Escape inside the open note hands focus back to its pin.
+							if (isOpen) event.currentTarget.querySelector<HTMLElement>(".lr-note-pin")?.focus({ preventScroll: true });
+							setOpenPinnedNote(null);
 						}}
 					>
 						<button
@@ -3427,10 +3570,18 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 							>
 								<header>
 									<div>
-										<span>PINNED NOTE</span>
+										<span style={{ textTransform: "uppercase" }}>Pinned note</span>
 										<strong id={`${popoverId}-author`}>{note.author}</strong>
 									</div>
-									<button type="button" aria-label="Close pinned note" onClick={() => setOpenPinnedNote(null)}><IconX size={15} /></button>
+									<button
+										type="button"
+										aria-label="Close pinned note"
+										onClick={(event) => {
+											// The note unmounts with this button, so focus goes back to its pin.
+											event.currentTarget.closest(".lr-note-anchor")?.querySelector<HTMLElement>(".lr-note-pin")?.focus({ preventScroll: true });
+											setOpenPinnedNote(null);
+										}}
+									><IconX size={15} /></button>
 								</header>
 								<p id={`${popoverId}-text`}>{note.text}</p>
 								<footer>
@@ -3691,20 +3842,32 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// navigation/measurement mode had taken over underneath them. Mirrors
 	// the closing branch of handleToggleAnnotationToolbar exactly, just
 	// gated on "was it open" instead of always toggling.
-	const closeAnnotationToolbarIfOpen = () => {
+	// A function declaration (not a const) so it hoists: the
+	// useKeyboardShortcuts call above this point passes it into the hook.
+	function closeAnnotationToolbarIfOpen() {
 		if (!showAnnotationToolbar) return;
 		setShowAnnotationToolbar(false);
 		setActiveCatalogOrganId(null);
 		setActiveSegmentState(null);
 		setEditMode(null);
 		setActiveToolbarTool(null);
-	};
+	}
+
+	// On a tablet or phone the Organs dock and the right-hand docks (stats, metadata,
+	// measurements, the AI sidebar) cannot sit side by side, so opening any of those from
+	// anywhere (a menu item, the M shortcut) closes Organs, as Organs already closes them.
+	useEffect(() => {
+		if (!(showStats || showMetadata || showMeasurePanel || showAISidebar)) return;
+		if (typeof window.matchMedia !== "function" || !window.matchMedia("(max-width: 899px)").matches) return;
+		setShowOrganDetails(false);
+	}, [showStats, showMetadata, showMeasurePanel, showAISidebar]);
 
 	const handleToggleStats = () => {
 		// The right-side slot is shared by stats / metadata / measurements / mask editing.
 		setShowMetadata(false);
 		setShowMeasurePanel(false);
-		setShowAnnotationToolbar(false);
+		// Also drops the target class, so the mask isolation ends with the ribbon.
+		closeAnnotationToolbarIfOpen();
 		setEditMode(null);
 		setActiveToolbarTool(null);
 		setShowStats((v) => !v);
@@ -3715,7 +3878,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const handleToggleMetadata = () => {
 		setShowStats(false);
 		setShowMeasurePanel(false);
-		setShowAnnotationToolbar(false);
+		// Also drops the target class, so the mask isolation ends with the ribbon.
+		closeAnnotationToolbarIfOpen();
 		setEditMode(null);
 		setActiveToolbarTool(null);
 		setShowMetadata((v) => !v);
@@ -3733,7 +3897,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setShowStats(false);
 			setShowMetadata(false);
 			setShowMeasurePanel(false);
-			setShowAnnotationToolbar(false);
+			closeAnnotationToolbarIfOpen();
 			setEditMode(null);
 			setActiveToolbarTool(null);
 			void loadOrganStats();
@@ -3981,6 +4145,11 @@ const aiAvailableOrgans = useMemo(() => {
 			<div
 				className="vp-topbar"
 				ref={topbarRef}
+				// The full-screen loading and failure overlays cover the toolbar, so Tab must not
+				// land on controls nobody can see.
+				inert={loading || Boolean(dicomError)}
+				onPointerOver={clampToolTip}
+				onFocus={clampToolTip}
 			>
 				<button
 					className="vp-iconbtn"
@@ -4001,22 +4170,34 @@ const aiAvailableOrgans = useMemo(() => {
 						{renamingScan ? (
 							<input
 								autoFocus
+								aria-label="Scan name"
+								maxLength={80}
 								value={scanRenameDraft}
 								onChange={(e) => setScanRenameDraft(e.target.value)}
 								onBlur={commitScanRename}
 								onKeyDown={(e) => {
+									// The Enter that picks an IME candidate (key 229 on some
+									// browsers) belongs to the composition, not to the save.
+									if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+									if (e.key !== "Enter" && e.key !== "Escape") return;
+									// Focus is about to land on the rename button, which would
+									// otherwise take this same key press as its own Enter and
+									// reopen the edit.
+									e.preventDefault();
+									refocusScanRenameBtn.current = true;
 									if (e.key === "Enter") commitScanRename();
-									else if (e.key === "Escape") setRenamingScan(false);
+									else setRenamingScan(false);
 								}}
 								className="vp-tb-id__val vp-tb-id__rename-input"
 							/>
 						) : (
 							<span className="vp-tb-id__val-row">
-								<span className="vp-tb-id__val">{sessionId && scanLabel ? scanLabel : caseId}</span>
+								<span className="vp-tb-id__val" title={sessionId && scanLabel ? scanLabel : caseId}>{sessionId && scanLabel ? scanLabel : caseId}</span>
 								{sessionId && scanLabel && (
 									<button
 										type="button"
 										className="vp-tb-id__rename-btn"
+										ref={scanRenameBtnRef}
 										title="Rename scan"
 										aria-label="Rename scan"
 										onClick={() => { setScanRenameDraft(scanLabel); setRenamingScan(true); }}
@@ -4036,23 +4217,18 @@ const aiAvailableOrgans = useMemo(() => {
 					    panel, not a pick-and-dismiss menu) so both pickers can be used in one visit. */}
 					<div className="vp-toolgroup" ref={layoutFlyout.groupRef}>
 						<button
-							ref={layoutFlyout.btnRef}
 							className={`vp-tb-mini vp-tb-mini--flyout ${layoutFlyout.open ? "vp-tb-mini--active" : ""}`}
-							onClick={layoutFlyout.toggle}
-							aria-label="Layout"
-							aria-haspopup="menu"
-							aria-expanded={layoutFlyout.open}
+							aria-label={`Layout: ${layoutTriggerLabel}${layoutPresetLabel ? `, ${layoutPresetLabel}` : ""}`}
+							{...layoutFlyout.triggerProps}
 						>
-							<span>{layoutTriggerLabel}</span>
+							<TriggerLabel current={layoutTriggerLabel} options={LAYOUT_TRIGGER_LABELS} />
 							<IconChevronDown size={13} />
 						</button>
 						{layoutFlyout.open && layoutFlyout.pos &&
 							createPortal(
 								<div
 									className="vp-flyout vp-flyout--config"
-									role="menu"
-									ref={layoutFlyout.menuRef}
-									style={{ position: "fixed", top: layoutFlyout.pos.top, left: layoutFlyout.pos.left }}
+									{...layoutFlyout.panelProps("Layout")}
 								>
 									<span className="vp-panel__title">View</span>
 									<div className="vp-seg" role="group" aria-label="View layout">
@@ -4060,6 +4236,7 @@ const aiAvailableOrgans = useMemo(() => {
 											<button
 												key={mode}
 												onClick={() => setViewMode(mode)}
+												aria-pressed={viewMode === mode}
 												className={`vp-seg__btn ${viewMode === mode ? "vp-seg__btn--active" : ""}`}
 											>{label}</button>
 										))}
@@ -4072,6 +4249,7 @@ const aiAvailableOrgans = useMemo(() => {
 													<button
 														key={id}
 														onClick={() => { track("viewer_change_layout"); setLayoutPreset(id); }}
+														aria-pressed={layoutPreset === id}
 														className={`vp-seg__btn ${layoutPreset === id ? "vp-seg__btn--active" : ""}`}
 													>{label}</button>
 												))}
@@ -4089,29 +4267,24 @@ const aiAvailableOrgans = useMemo(() => {
 					    open (a config panel) so presets can be flipped through quickly. */}
 					<div className="vp-toolgroup" ref={windowFlyout.groupRef}>
 						<button
-							ref={windowFlyout.btnRef}
 							className={`vp-tb-mini vp-tb-mini--flyout ${windowFlyout.open ? "vp-tb-mini--active" : ""}`}
-							onClick={windowFlyout.toggle}
-							aria-label="CT window preset"
-							aria-haspopup="menu"
-							aria-expanded={windowFlyout.open}
+							aria-label={activePreset ? `CT window preset: ${activePreset}` : "CT window preset"}
+							{...windowFlyout.triggerProps}
 						>
-							<span>{activePreset || "Window"}</span>
+							<TriggerLabel current={activePreset || "Window"} options={WINDOW_TRIGGER_LABELS} />
 							<IconChevronDown size={13} />
 						</button>
 						{windowFlyout.open && windowFlyout.pos &&
 							createPortal(
 								<div
 									className="vp-flyout vp-flyout--config"
-									role="menu"
-									ref={windowFlyout.menuRef}
-									style={{ position: "fixed", top: windowFlyout.pos.top, left: windowFlyout.pos.left }}
+									{...windowFlyout.panelProps("CT window preset")}
 								>
 									{CT_PRESETS.map((preset) => (
 										<button
 											key={preset.name}
 											className={`vp-flyout__item ${activePreset === preset.name ? "is-active" : ""}`}
-											role="menuitem"
+											aria-pressed={activePreset === preset.name}
 											onClick={() => handlePresetClick(preset)}
 										>
 											<span>{preset.name}</span>
@@ -4129,12 +4302,9 @@ const aiAvailableOrgans = useMemo(() => {
 					    without the menu closing after each change. */}
 					<div className="vp-toolgroup" ref={adjustFlyout.groupRef}>
 						<button
-							ref={adjustFlyout.btnRef}
 							className={`vp-tool ${adjustFlyout.open ? "vp-tool--active" : ""}`}
-							onClick={adjustFlyout.toggle}
 							aria-label="Adjust"
-							aria-haspopup="menu"
-							aria-expanded={adjustFlyout.open}
+							{...adjustFlyout.triggerProps}
 						>
 							<IconAdjustmentsHorizontal size={20} color={adjustFlyout.open ? "#08090b" : "white"} />
 							<span className="vp-tool__caret" />
@@ -4144,9 +4314,7 @@ const aiAvailableOrgans = useMemo(() => {
 							createPortal(
 								<div
 									className="vp-flyout vp-flyout--adjust"
-									role="menu"
-									ref={adjustFlyout.menuRef}
-									style={{ position: "fixed", top: adjustFlyout.pos.top, left: adjustFlyout.pos.left }}
+									{...adjustFlyout.panelProps("Adjust")}
 								>
 									{!isLocal && (
 										<>
@@ -4172,29 +4340,37 @@ const aiAvailableOrgans = useMemo(() => {
 											</label>
 										</>
 									)}
+									{/* Both run the way their names say: right is brighter (a lower
+									    window level) and more contrast (a narrower window). The
+									    readouts and what a screen reader hears are the real level
+									    and width. */}
 									<label className="vp-tb-slider" title="Brightness (window level)">
 										<span className="vp-tb-slider__label">Brt</span>
 										<input
 											type="range" min="-1000" max="1000" step="1" className="vp-range"
 											aria-label="Brightness"
+											aria-valuetext={`Window level ${Math.round(windowCenter)} HU`}
 											value={windowCenter * -1}
 											onChange={(e) => {
 												handleWindowChange(null, Number(e.target.value) * -1);
 												showWindowReadoutBriefly();
 											}}
 										/>
+										<span className="vp-tb-slider__val" title="Window level (HU)">L {Math.round(windowCenter)}</span>
 									</label>
 									<label className="vp-tb-slider" title="Contrast (window width)">
 										<span className="vp-tb-slider__label">Con</span>
 										<input
-											type="range" min="1" max="2000" step="1" className="vp-range"
+											type="range" min={WINDOW_WIDTH_MIN} max={WINDOW_WIDTH_MAX} step="1" className="vp-range"
 											aria-label="Contrast"
-											value={windowWidth}
+											aria-valuetext={`Window width ${Math.round(windowWidth)} HU`}
+											value={WINDOW_WIDTH_MIN + WINDOW_WIDTH_MAX - windowWidth}
 											onChange={(e) => {
-												handleWindowChange(Number(e.target.value), null);
+												handleWindowChange(WINDOW_WIDTH_MIN + WINDOW_WIDTH_MAX - Number(e.target.value), null);
 												showWindowReadoutBriefly();
 											}}
 										/>
+										<span className="vp-tb-slider__val" title="Window width (HU)">W {Math.round(windowWidth)}</span>
 									</label>
 									<label className="vp-tb-slider" title="Zoom">
 										<span className="vp-tb-slider__label">Zoom</span>
@@ -4234,15 +4410,20 @@ const aiAvailableOrgans = useMemo(() => {
 										    dropdowns (same portal-flyout pattern as Measure/Cine originally used)
 										    so the bar reads as ~9 clusters instead of ~20 individual icons. */}
 										<button
-												className={`vp-tool ${crosshairToolActive && !activeMeasureTool && !editMode && activeToolbarTool !== "pointSegment" && activeToolbarTool !== "boxSegment" ? "vp-tool--active" : ""}`}
-												onClick={() => {
-													setEditMode(null);
-													setActiveMeasureTool(null);
-													setCrosshairToolActive((prev) => !prev);
-												}}
-												aria-label="Crosshair mode"
-											>
-												<IconPointer size={20} color={crosshairToolActive && !activeMeasureTool && !editMode && activeToolbarTool !== "pointSegment" && activeToolbarTool !== "boxSegment" ? "#08090b" : "white"} />
+											className={`vp-tool ${crosshairShown ? "vp-tool--active" : ""}`}
+											onClick={() => {
+												// From a measure, edit or prompt tool this is "back to
+												// navigating": switch crosshair mode on, never off.
+												const next = crosshairAfterClick(crosshairModeState);
+												closeAnnotationToolbarIfOpen();
+												setEditMode(null);
+												setActiveMeasureTool(null);
+												setCrosshairToolActive(next);
+											}}
+											aria-label="Crosshair mode"
+											aria-pressed={crosshairShown}
+										>
+											<IconPointer size={20} color={crosshairShown ? "#08090b" : "white"} />
 												<span className="vp-tool__tip">Crosshair</span>
 											</button>
 
@@ -4250,13 +4431,10 @@ const aiAvailableOrgans = useMemo(() => {
 											    primary-mouse-tool slot) + clear. */}
 											<div className="vp-toolgroup" ref={measureFlyout.groupRef}>
 												<button
-													ref={measureFlyout.btnRef}
 												className={`vp-tool ${measureToolActive || measureFlyout.open ? "vp-tool--active" : ""}`}
-												onClick={measureFlyout.toggle}
 												disabled={collaborationDisabled}
-													aria-label="Measurement tools"
-													aria-haspopup="menu"
-													aria-expanded={measureFlyout.open}
+												aria-label={activeMeasureLabel ? `Measurement tools: ${activeMeasureLabel}` : "Measurement tools"}
+												{...measureFlyout.triggerProps}
 												>
 													<ActiveMeasureIcon size={20} color={measureToolActive || measureFlyout.open ? "#08090b" : "white"} />
 													<span className="vp-tool__caret" />
@@ -4266,20 +4444,19 @@ const aiAvailableOrgans = useMemo(() => {
 													createPortal(
 														<div
 															className="vp-flyout"
-															role="menu"
-															ref={measureFlyout.menuRef}
-															style={{ position: "fixed", top: measureFlyout.pos.top, left: measureFlyout.pos.left }}
+															{...measureFlyout.panelProps("Measurement tools")}
 														>
 															{MEASURE_TOOLS.map(({ name, Icon, key: hotkey }) => (
 																<button
 																	key={name}
 																	className={`vp-flyout__item ${activeMeasureTool === name ? "is-active" : ""}`}
-															role="menuitem"
+																	aria-pressed={activeMeasureTool === name}
 																	// Name and detail are adjacent spans, which read as one run-on word.
 																	aria-label={`${measurementToolName(name)}, ${measurementToolDetail(name)}`}
 																	aria-keyshortcuts={hotkey}
-															disabled={collaborationDisabled}
+																	disabled={collaborationDisabled}
 																	onClick={() => {
+																		closeAnnotationToolbarIfOpen();
 																		setEditMode(null);
 																		setActiveMeasureTool((p) => (p === name ? null : name));
 																		measureFlyout.close();
@@ -4288,7 +4465,7 @@ const aiAvailableOrgans = useMemo(() => {
 																	<Icon size={18} />
 																	<span>{measurementToolName(name)}</span>
 																	<span className="vp-flyout__detail">{measurementToolDetail(name)}</span>
-																	<span className="vp-flyout__kbd">{hotkey}</span>
+																	<span className="vp-flyout__kbd" aria-hidden="true">{hotkey}</span>
 																</button>
 															))}
 															<ClearMeasurementsFlyoutItem
@@ -4308,12 +4485,9 @@ const aiAvailableOrgans = useMemo(() => {
 											    (one-shot actions on the focused pane). */}
 											<div className="vp-toolgroup" ref={viewFlyout.groupRef}>
 												<button
-													ref={viewFlyout.btnRef}
 													className={`vp-tool ${viewGroupActive || viewFlyout.open ? "vp-tool--active" : ""}`}
-													onClick={viewFlyout.toggle}
 													aria-label="View options"
-													aria-haspopup="menu"
-													aria-expanded={viewFlyout.open}
+													{...viewFlyout.triggerProps}
 												>
 													<IconEye size={20} color={viewGroupActive || viewFlyout.open ? "#08090b" : "white"} />
 													<span className="vp-tool__caret" />
@@ -4323,13 +4497,11 @@ const aiAvailableOrgans = useMemo(() => {
 													createPortal(
 														<div
 															className="vp-flyout"
-															role="menu"
-															ref={viewFlyout.menuRef}
-															style={{ position: "fixed", top: viewFlyout.pos.top, left: viewFlyout.pos.left }}
+															{...viewFlyout.panelProps("View options")}
 														>
 															<button
 																className={`vp-flyout__item ${hoverIdentifyEnabled ? "is-active" : ""}`}
-																role="menuitem"
+																aria-pressed={hoverIdentifyEnabled}
 																title="Name the organ under the cursor"
 																onClick={() => {
 																	setHoverIdentifyEnabled((v) => !v);
@@ -4338,11 +4510,11 @@ const aiAvailableOrgans = useMemo(() => {
 																}}
 															>
 																<IconScanEye size={18} />
-																<span>{hoverIdentifyEnabled ? "Hover identify: on" : "Hover identify"}</span>
+																<span>Hover identify</span>
 															</button>
 															<button
 																className={`vp-flyout__item ${referenceLinesOn ? "is-active" : ""}`}
-																role="menuitem"
+																aria-pressed={referenceLinesOn}
 																title="Dotted line in the other panes for whichever pane you scroll"
 																onClick={() => {
 																	setReferenceLinesOn((v) => !v);
@@ -4350,24 +4522,24 @@ const aiAvailableOrgans = useMemo(() => {
 																}}
 															>
 																<IconGrid3x3 size={18} />
-																<span>{referenceLinesOn ? "Reference lines: on" : "Reference lines"}</span>
+																<span>Reference lines</span>
 															</button>
 															<button
 																className="vp-flyout__item"
-																role="menuitem"
-																title="The focused pane — last one scrolled or clicked"
+																disabled={viewMode === "3d"}
+																title={viewMode === "3d" ? "Not available in the 3D view" : "Applies to the focused pane (the last one scrolled or clicked)"}
 																onClick={() => {
 																	handleFlipHorizontal();
 																	viewFlyout.close();
 																}}
 															>
-																<IconFlipHorizontal size={18} />
+																<IconFlipVertical size={18} />
 																<span>Flip horizontal</span>
 															</button>
 															<button
 																className="vp-flyout__item"
-																role="menuitem"
-																title="The focused pane — last one scrolled or clicked"
+																disabled={viewMode === "3d"}
+																title={viewMode === "3d" ? "Not available in the 3D view" : "Applies to the focused pane (the last one scrolled or clicked)"}
 																onClick={() => {
 																	handleRotate90Clockwise();
 																	viewFlyout.close();
@@ -4385,34 +4557,37 @@ const aiAvailableOrgans = useMemo(() => {
 											    (play/pause + FPS side by side), not a pick-and-dismiss menu. */}
 											<div className="vp-toolgroup" ref={cineFlyout.groupRef}>
 												<button
-													ref={cineFlyout.btnRef}
 													className={`vp-tool ${cinePlaying || cineFlyout.open ? "vp-tool--active" : ""}`}
-													onClick={cineFlyout.toggle}
 													aria-label="Cine controls"
-													aria-haspopup="menu"
-													aria-expanded={cineFlyout.open}
+													{...cineFlyout.triggerProps}
 												>
+													{/* Same condition as the active class above, or a playing
+													    cine draws a white icon on the white active face. */}
 													{cinePlaying ? (
-														<IconPlayerPause size={20} color={cineFlyout.open ? "#08090b" : "white"} />
+														<IconPlayerPause size={20} color="#08090b" />
 													) : (
 														<IconPlayerPlay size={20} color={cineFlyout.open ? "#08090b" : "white"} />
 													)}
+													<span className="vp-tool__caret" />
 													<span className="vp-tool__tip">
-														{cinePlaying ? `Cine playing (${cineFps} fps) — click for controls` : "Cine controls (V to play)"}
+														{cinePlaying
+															? `Cine playing at ${cineFps} fps`
+															: viewMode === "3d" ? "Cine controls" : "Cine controls (V to play)"}
 													</span>
 												</button>
 												{cineFlyout.open && cineFlyout.pos &&
 													createPortal(
 														<div
 															className="vp-flyout vp-flyout--cine"
-															role="menu"
-															ref={cineFlyout.menuRef}
-															style={{ position: "fixed", top: cineFlyout.pos.top, left: cineFlyout.pos.left }}
+															{...cineFlyout.panelProps("Cine controls")}
 														>
 															<button
 																className={`vp-tool vp-tool--cine-play ${cinePlaying ? "vp-tool--active" : ""}`}
 																onClick={toggleCine}
+																disabled={viewMode === "3d" && !cinePlaying}
 																aria-label={cinePlaying ? "Pause cine playback" : "Play cine playback"}
+																// Say why Play is dimmed: the 3D render has no slices to step through.
+																title={viewMode === "3d" && !cinePlaying ? "Cine only plays in the slice views" : undefined}
 															>
 																{cinePlaying ? (
 																	<IconPlayerPause size={20} color="#08090b" />
@@ -4484,7 +4659,7 @@ const aiAvailableOrgans = useMemo(() => {
 													>
 														<IconPencil size={20} color={showAnnotationToolbar ? "#08090b" : "white"} />
 														<span className="vp-tool__tip">
-															{hdReady ? "Annotate" : "Annotate — loads HD resolution first"}
+															{hdReady ? "Annotate" : "Annotate (loads HD resolution first)"}
 														</span>
 													</button>
 												);
@@ -4493,30 +4668,25 @@ const aiAvailableOrgans = useMemo(() => {
 											{/* Capture ▾ — snapshot, voice-narrated reading session, share link. */}
 											{!soloChallenge && <div className="vp-toolgroup" ref={captureFlyout.groupRef}>
 												<button
-													ref={captureFlyout.btnRef}
 													className={`vp-tool ${readingSession ? "vp-tool--rec" : ""} ${captureFlyout.open ? "vp-tool--active" : ""}`}
-													onClick={captureFlyout.toggle}
 													aria-label="Capture and session tools"
-													aria-haspopup="menu"
-													aria-expanded={captureFlyout.open}
+													{...captureFlyout.triggerProps}
 												>
 													<IconCamera size={20} color={captureFlyout.open ? "#08090b" : "white"} />
 													<span className="vp-tool__caret" />
 													<span className="vp-tool__tip">
-														{readingSession ? "Recording — capture / share" : "Capture"}
+														{readingSession ? "Recording. Capture or share" : "Capture"}
 													</span>
 												</button>
 												{captureFlyout.open && captureFlyout.pos &&
 													createPortal(
 														<div
 															className="vp-flyout"
-															role="menu"
-															ref={captureFlyout.menuRef}
-															style={{ position: "fixed", top: captureFlyout.pos.top, left: captureFlyout.pos.left }}
+															{...captureFlyout.panelProps("Capture and session tools")}
 														>
 															<button
 																className="vp-flyout__item"
-																role="menuitem"
+																aria-keyshortcuts="S"
 																onClick={() => {
 																	void takeSnapshot();
 																	captureFlyout.close();
@@ -4524,11 +4694,10 @@ const aiAvailableOrgans = useMemo(() => {
 															>
 																<IconCamera size={18} />
 																<span>Snapshot</span>
-																<span className="vp-flyout__kbd">S</span>
+																<span className="vp-flyout__kbd" aria-hidden="true">S</span>
 															</button>
 															<button
 																className={`vp-flyout__item ${readingSession ? "is-active" : ""}`}
-																role="menuitem"
 																disabled={sessionStarting}
 																onClick={() => {
 																	if (readingSession) void stopReadingSession();
@@ -4548,7 +4717,6 @@ const aiAvailableOrgans = useMemo(() => {
 															{!isLocal && (
 																<button
 																	className="vp-flyout__item"
-																	role="menuitem"
 																	onClick={() => {
 																		void handleShare();
 																		captureFlyout.close();
@@ -4567,12 +4735,9 @@ const aiAvailableOrgans = useMemo(() => {
 											    stats, case metadata, measurements). */}
 											{!soloChallenge && <div className="vp-toolgroup" ref={panelsFlyout.groupRef}>
 												<button
-													ref={panelsFlyout.btnRef}
 													className={`vp-tool ${panelsGroupActive || panelsFlyout.open ? "vp-tool--active" : ""}`}
-													onClick={panelsFlyout.toggle}
 													aria-label="Panels"
-													aria-haspopup="menu"
-													aria-expanded={panelsFlyout.open}
+													{...panelsFlyout.triggerProps}
 												>
 													<IconLayoutSidebarRight size={20} color={panelsGroupActive || panelsFlyout.open ? "#08090b" : "white"} />
 													<span className="vp-tool__caret" />
@@ -4582,14 +4747,12 @@ const aiAvailableOrgans = useMemo(() => {
 													createPortal(
 														<div
 															className="vp-flyout"
-															role="menu"
-															ref={panelsFlyout.menuRef}
-															style={{ position: "fixed", top: panelsFlyout.pos.top, left: panelsFlyout.pos.left }}
+															{...panelsFlyout.panelProps("Panels")}
 														>
 															{!isLocal && (
 																<button
 																	className={`vp-flyout__item ${showOrganDetails ? "is-active" : ""}`}
-																	role="menuitem"
+																	aria-pressed={showOrganDetails}
 																	onClick={() => {
 																		if (showOrganDetails) {
 																			setShowOrganDetails(false);
@@ -4609,7 +4772,7 @@ const aiAvailableOrgans = useMemo(() => {
 															{!isLocal && (
 																<button
 																	className={`vp-flyout__item ${showStats ? "is-active" : ""}`}
-																	role="menuitem"
+																	aria-pressed={showStats}
 																	onClick={() => {
 																		handleToggleStats();
 																		panelsFlyout.close();
@@ -4622,7 +4785,7 @@ const aiAvailableOrgans = useMemo(() => {
 															{!isLocal && (
 																<button
 																	className={`vp-flyout__item ${showMetadata ? "is-active" : ""}`}
-																	role="menuitem"
+																	aria-pressed={showMetadata}
 																	onClick={() => {
 																		handleToggleMetadata();
 																		panelsFlyout.close();
@@ -4634,20 +4797,21 @@ const aiAvailableOrgans = useMemo(() => {
 															)}
 															<button
 																className={`vp-flyout__item ${showMeasurePanel ? "is-active" : ""}`}
-																role="menuitem"
+																aria-pressed={showMeasurePanel}
+																aria-keyshortcuts="M"
 																onClick={() => {
 																	setShowStats(false);
 																	setShowMetadata(false);
-																	setShowAnnotationToolbar(false);
+																	closeAnnotationToolbarIfOpen();
 																	setEditMode(null);
-																	setActiveToolbarTool(null);										
+																	setActiveToolbarTool(null);
 																	setShowMeasurePanel((v) => !v);
 																	panelsFlyout.close();
 																}}
 															>
 																<IconListDetails size={18} />
 																<span>Measurements</span>
-																<span className="vp-flyout__kbd">M</span>
+																<span className="vp-flyout__kbd" aria-hidden="true">M</span>
 															</button>
 														</div>,
 														document.body
@@ -4684,7 +4848,16 @@ const aiAvailableOrgans = useMemo(() => {
 														else if (enhance.state === "idle") void runEnhance();
 														else if (enhance.state === "failed") toggleHd();
 													}}
-													aria-label="Full resolution"
+													aria-label={
+														enhance.state === "streaming"
+															? `Full resolution, loading ${enhance.pct ?? 0}%`
+															: isHd || enhance.state === "done"
+																? "Full resolution loaded"
+																: enhance.state === "failed"
+																	? "Full resolution failed, reload in HD"
+																	: "Load full resolution"
+													}
+													aria-pressed={isHd || enhance.state === "done"}
 												>
 													<span style={{ fontFamily: "var(--vp-mono)", fontSize: "12px", fontWeight: 700 }}>
 														{enhance.state === "streaming" ? `${enhance.pct ?? 0}%` : "HD"}
@@ -4697,7 +4870,7 @@ const aiAvailableOrgans = useMemo(() => {
 																: enhance.state === "done"
 																	? "Full resolution ✓"
 																	: enhance.state === "failed"
-																		? "Enhance failed — click to reload in HD"
+																		? "Enhance failed. Click to reload in HD"
 																		: "Load full resolution"}
 													</span>
 												</button>
@@ -4733,10 +4906,10 @@ const aiAvailableOrgans = useMemo(() => {
 													type="button"
 													className="vp-tool"
 													onClick={() => setShowLiveRoomCreate(true)}
-													aria-label="Start Live Room"
+													aria-label="Start a live room"
 												>
 													<IconUsersGroup size={17} />
-													<span className="vp-tool__tip">Live Room</span>
+													<span className="vp-tool__tip">Live room</span>
 												</button>
 											)}
 										</div>
@@ -4747,13 +4920,24 @@ const aiAvailableOrgans = useMemo(() => {
 			     stage narrower instead of overlaying it (same principle as the toolbar
 			     above pushing it down). The stage's ResizeObserver refits the canvases
 			     whenever a dock opens or closes. */}
-			<div className="vp-body">
+			<main className="vp-body" inert={Boolean(dicomError)}>
+				{/* Always mounted, so the copy is announced even though the Capture menu that
+				    held the "Share this view" item has already closed. */}
+				<span className="sr-only" role="status">{shareCopied ? "Link copied" : ""}</span>
+				{/* Outside the busy stage, whose live regions are held back until it is idle.
+				    The overlay itself comes and goes, so this is what gets spoken. */}
+				<span className="sr-only" role="status">{loadingAnnounced && loading && !dicomError ? "Preparing scan" : ""}</span>
+				{/* The page's heading for screen readers; the toolbar shows the same
+				    case or scan name visually. */}
+				<h1 className="sr-only">
+					{isLocal ? caseId : sessionId && scanLabel ? scanLabel : `${sessionId ? "Session" : "Case"} ${caseId}`}
+				</h1>
 				{!isLocal && !soloChallenge && (
 					<OrganCheckbox
 						setCheckState={setCheckState}
 						checkState={checkState}
 						sessionId={sessionId}
-						setShowOrganDetails={setShowOrganDetails}
+						setShowOrganDetails={(open) => { keepFocusOnPanelsButton(); setShowOrganDetails(open); }}
 						showOrganDetails={showOrganDetails}
 						labelColorMap={labelColorMap}
 						onJumpToOrgan={handleJumpToOrgan}
@@ -4762,7 +4946,7 @@ const aiAvailableOrgans = useMemo(() => {
 				)}
 
 			{/* Stage — fills the space below the toolbar; the viewports live here. */}
-			<div className="vp-stage" ref={stageRef}>
+			<div className="vp-stage" ref={stageRef} aria-busy={loading}>
 
 				{loading ? (
 					<div className="vp-loading">
@@ -5158,7 +5342,7 @@ const aiAvailableOrgans = useMemo(() => {
 			    become an overlay, see VisualizationPage.css). */}
 			{showStats && (
 				<div className="vp-stats" ref={statsPanelRef} tabIndex={-1}>
-					<PanelHeader title="Organ statistics" closeLabel="Close organ statistics" onClose={() => setShowStats(false)}>
+					<PanelHeader title="Organ statistics" closeLabel="Close organ statistics" onClose={() => { keepFocusOnPanelsButton(); setShowStats(false); }}>
 						{statRows.length > 0 && (
 							<>
 								<button
@@ -5331,7 +5515,7 @@ const aiAvailableOrgans = useMemo(() => {
 
 			{showMetadata && (
 				<div className="vp-stats" ref={metadataPanelRef} tabIndex={-1}>
-					<PanelHeader title="Case metadata" closeLabel="Close case metadata" onClose={() => setShowMetadata(false)} />
+					<PanelHeader title="Case metadata" closeLabel="Close case metadata" onClose={() => { keepFocusOnPanelsButton(); setShowMetadata(false); }} />
 					{!pantsCase ? (
 						<div className="vp-panel__empty">
 							Case metadata is only available for dataset cases.
@@ -5368,12 +5552,12 @@ const aiAvailableOrgans = useMemo(() => {
 
 			{showMeasurePanel && (
 				<MeasurementPanel
-					onClose={() => setShowMeasurePanel(false)}
+					onClose={() => { keepFocusOnPanelsButton(); setShowMeasurePanel(false); }}
 					onJump={(mm) => setCrosshairMm(mm)}
 					readOnly={collaborationDisabled && Boolean(liveRoom)}
 				/>
 			)}
-			</div>
+			</main>
 			{hoverOrganTip.visible && (
 				<div
 					className="vp-organ-tip"
@@ -5556,7 +5740,12 @@ const aiAvailableOrgans = useMemo(() => {
 				<SessionSummary
 					result={sessionResult}
 					measurements={sessionMeasurements}
-					onDiscard={() => setSessionResult(null)}
+					onDiscard={() => {
+						// The Stop control that opened this is gone, so there is no
+						// opener to restore: hand focus back to the Capture button.
+						document.querySelector<HTMLElement>('button[aria-label="Capture and session tools"]')?.focus({ preventScroll: true });
+						setSessionResult(null);
+					}}
 				/>
 			)}
 

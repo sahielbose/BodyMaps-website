@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "../contexts/authContext";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -161,7 +161,7 @@ describe("Organ Statistics — population percentiles", () => {
 		// The toolbar is visible by default; open Organ statistics (grouped under
 		// the "Panels" dropdown alongside Organs/Case metadata/Measurements).
 		fireEvent.click(screen.getByLabelText("Panels"));
-		fireEvent.click(screen.getByRole("menuitem", { name: "Organ stats" }));
+		fireEvent.click(screen.getByRole("button", { name: "Organ stats" }));
 
 		// The %ile column header only appears once the norms asset has loaded.
 		expect(await screen.findByText("%ile")).toBeTruthy();
@@ -187,7 +187,7 @@ describe("Organ Statistics — population percentiles", () => {
 		// The toolbar is visible by default; open Organ statistics (grouped under
 		// the "Panels" dropdown alongside Organs/Case metadata/Measurements).
 		fireEvent.click(screen.getByLabelText("Panels"));
-		fireEvent.click(screen.getByRole("menuitem", { name: "Organ stats" }));
+		fireEvent.click(screen.getByRole("button", { name: "Organ stats" }));
 		await screen.findByText("%ile");
 
 		// spleen has no bucket and the kidney volume is flagged → at least two
@@ -202,7 +202,7 @@ describe("Viewer shell layout", () => {
 	it("docks Organ statistics beside the viewports, inside the body row", async () => {
 		const { container } = renderViewer();
 		fireEvent.click(screen.getByLabelText("Panels"));
-		fireEvent.click(screen.getByRole("menuitem", { name: "Organ stats" }));
+		fireEvent.click(screen.getByRole("button", { name: "Organ stats" }));
 		await screen.findByText("%ile");
 
 		const stats = container.querySelector(".vp-stats");
@@ -211,5 +211,20 @@ describe("Viewer shell layout", () => {
 		// It used to render after .vp-body closed, stacked under the panes.
 		expect(stats!.parentElement).toBe(body);
 		expect(body!.querySelector(":scope > .vp-stage")).not.toBeNull();
+	});
+
+	it("names the armed measurement tool on its trigger, and Escape hands back the crosshair", async () => {
+		renderViewer();
+		const trigger = screen.getByRole("button", { name: "Measurement tools" });
+		await waitFor(() => expect(trigger).toBeEnabled());
+		fireEvent.click(trigger);
+		fireEvent.click(await screen.findByRole("button", { name: /Distance/ }));
+		expect(trigger).toHaveAccessibleName("Measurement tools: Distance");
+
+		// The shortcut hook waits for the event to finish before disarming.
+		fireEvent.keyDown(document.body, { key: "Escape" });
+
+		await waitFor(() => expect(trigger).toHaveAccessibleName("Measurement tools"));
+		expect(screen.getByRole("button", { name: "Crosshair mode" })).toHaveAttribute("aria-pressed", "true");
 	});
 });
