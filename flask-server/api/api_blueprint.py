@@ -8701,24 +8701,36 @@ def _safe_case_id(case_id):
     return int(case_id)
 
 
-def _case_ct_path(case_id, low=False):
-    case_dir = f"{Constants.PANTS_PATH}/image_only/{get_panTS_id(_safe_case_id(case_id))}"
-    path = f"{case_dir}/{Constants.MAIN_NIFTI_FILENAME}"
+def _lowres_or_full(subdir, pants_id, filename, low):
+    """Resolve a case volume, preferring the low-res copy when asked for it.
+
+    make_lowres.py writes the low-res copies under LOWRES_ROOT, a writable
+    disk, precisely because the dataset mount is read-only — so looking for
+    them next to the originals under PANTS_PATH finds nothing and silently
+    falls back to full resolution. That fallback is not harmless here: the
+    viewer's volume endpoint reads low-res from LOWRES_ROOT, so the two halves
+    of the feature end up on different voxel grids and the client rejects
+    every proposal with a resolution-mismatch error. Check LOWRES_ROOT first,
+    the dataset mount second (for setups that do colocate them), full res last.
+    """
+    full = f"{Constants.PANTS_PATH}/{subdir}/{pants_id}/{filename}"
     if low:
-        low_path = path.replace('.nii.gz', '_lowres.nii.gz')
-        if os.path.exists(low_path):
-            return low_path
-    return path
+        low_name = filename.replace('.nii.gz', '_lowres.nii.gz')
+        for candidate in (f"{LOWRES_ROOT}/{subdir}/{pants_id}/{low_name}",
+                          f"{Constants.PANTS_PATH}/{subdir}/{pants_id}/{low_name}"):
+            if os.path.exists(candidate):
+                return candidate
+    return full
+
+
+def _case_ct_path(case_id, low=False):
+    return _lowres_or_full("image_only", get_panTS_id(_safe_case_id(case_id)),
+                           Constants.MAIN_NIFTI_FILENAME, low)
 
 
 def _case_mask_path(case_id, low=False):
-    case_dir = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(_safe_case_id(case_id))}"
-    path = f"{case_dir}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
-    if low:
-        low_path = path.replace('.nii.gz', '_lowres.nii.gz')
-        if os.path.exists(low_path):
-            return low_path
-    return path
+    return _lowres_or_full("mask_only", get_panTS_id(_safe_case_id(case_id)),
+                           Constants.COMBINED_LABELS_NIFTI_FILENAME, low)
 
 
 # Single-slot CT cache for interactive_segment(). Without this, every single
@@ -8754,32 +8766,157 @@ def _load_ct_cached(ct_path, cache_key):
     return ct_obj, ct
 
 
+# --------------------------------------------------------------------------- #
+# Full-resolution bridge for res="low" prompts.
+#
+# The viewer loads the low-res volume by default, and the mask it applies must
+# be on that grid — but nothing forces the MODEL to see the low-res CT.
+# Running inference on the low-res copy costs a measured 0.05-0.09 Dice
+# (every organ is half as wide in voxels), and running it at full resolution
+# and downsampling only the returned mask recovers essentially all of it.
+# These helpers translate between the two grids: the request's seed labelmap
+# and any raw voxel coordinates go up to the full grid, the returned mask and
+# changed-bbox come back down to the viewer's grid. Downsampling uses the same
+# transform make_lowres.py used to build the low-res files (ndimage.zoom,
+# nearest for labels), so the result lands on the served grid by construction.
+# --------------------------------------------------------------------------- #
+
+def _lowres_grid(low_path):
+    """Shape, affine and header of the low-res volume the viewer loaded."""
+    img = nib.load(low_path)
+    return tuple(int(d) for d in img.shape[:3]), img.affine, img.header
+
+
+def _upsample_seed_b64(seg_b64, low_shape, full_shape):
+    """Re-encode a viewer-grid seed labelmap onto the inference grid."""
+    import base64
+    import gzip as _gzip
+    import numpy as np
+    from scipy.ndimage import zoom
+    try:
+        raw = _gzip.decompress(base64.b64decode(seg_b64))
+    except Exception:
+        raise ValueError("initial_seg_gz_b64 is not valid base64 gzip data.")
+    if len(raw) != int(np.prod(low_shape)):
+        raise ValueError(
+            f"initial_seg has {len(raw)} voxels but the displayed volume has "
+            f"{int(np.prod(low_shape))}: the seed must be on the viewer's grid.")
+    seed = np.frombuffer(raw, dtype=np.uint8).reshape(low_shape, order="F")
+    up = zoom(seed, [f / l for f, l in zip(full_shape, low_shape)], order=0)
+    if tuple(up.shape) != tuple(full_shape):
+        raise ValueError("Seed upsample landed on the wrong grid.")
+    return base64.b64encode(_gzip.compress(up.tobytes(order="F"))).decode("ascii")
+
+
+def _downsample_mask(mask, low_shape):
+    """Nearest-neighbour the model's full-res mask onto the viewer's grid."""
+    from scipy.ndimage import zoom
+    out = zoom(mask, [l / f for l, f in zip(low_shape, mask.shape)], order=0)
+    if tuple(out.shape) != tuple(low_shape):
+        raise ValueError("Mask downsample landed on the wrong grid.")
+    return out
+
+
+def _scale_bbox_down(bbox, full_shape, low_shape):
+    """Map an upper-exclusive full-grid bbox to the low grid, conservatively
+    (floor the lower bound, ceil the upper) so the client never diffs too
+    small a slab."""
+    import math
+    scaled = []
+    for (lo, hi), f, l in zip(bbox, full_shape, low_shape):
+        r = l / f
+        scaled.append((max(0, math.floor(lo * r)), min(l, math.ceil(hi * r))))
+    return scaled
+
+
 @api_blueprint.route('/interactive-segment/<case_id>', methods=['POST'])
 def interactive_segment(case_id):
     """Click-to-segment: seed prompt -> proposed mask (.nii.gz in CT geometry).
 
     Body JSON: { point_lps:[x,y,z] | point_ijk:[i,j,k], tolerance?, box_lps?,
-                 res?: "low"|"full" }. res should match the resolution the viewer
-                 loaded so the returned mask's voxel grid aligns with the labelmap.
+                 scribble_lps?: [[x,y,z],...], lasso_lps?: [[x,y,z],...],
+                 res?: "low"|"full", session_token?: str, include?: bool,
+                 initial_seg_gz_b64?: str, expect_session?: bool }.
+    res should match the resolution the viewer loaded so the returned mask's
+    voxel grid aligns with the labelmap. The grid of the RESPONSE always
+    honors res, but inference itself runs on the full-res CT whenever it is
+    present (the mask is downsampled to the viewer's grid afterwards) —
+    prompting the half-size volume costs a measured 0.05-0.09 Dice for
+    nothing. Consecutive requests carrying the same
+    session_token accumulate on the model server as one prompt session, so each
+    new prompt refines the same object; the X-Prompt-Session response header
+    says whether the returned mask is session-scoped ("active") or a one-shot
+    proposal ("none" — e.g. the region-grow fallback ran), which the client
+    uses to pick merge-in vs replace-object apply semantics. include:false
+    marks a corrective prompt (carve the clicked region OUT of the session's
+    object) — model-only, no fallback, and an empty result is then legitimate
+    (the corrections shrank the object to nothing) rather than a 422.
+    initial_seg_gz_b64 (base64 gzip of a uint8 labelmap in NIfTI file order)
+    seeds a fresh session from an existing mask so the model refines a
+    shipped label instead of starting an empty object; also model-only.
+    refine:true sends that seed with no point and returns the model's redraw
+    of it (zero-shot label refinement); an empty redraw is a 422, since
+    applying it would erase the class. expect_session:true (sent once the
+    client holds an object for the token) turns "this process no longer has
+    that session" into a 409 with code "session_lost" instead of a fresh
+    one-prompt object the client would mistake for a refinement.
     """
     if not _ANALYSIS_SLOTS.acquire(blocking=False):
         return jsonify(_ANALYSIS_BUSY_RESPONSE[0]), _ANALYSIS_BUSY_RESPONSE[1]
     try:
         import numpy as np
         from services.advanced_analysis import segment_from_prompt
+        from services.nninteractive_predictor import (
+            PromptCapacityError, PromptModelUnavailableError, PromptSessionLostError)
         body = request.get_json(force=True, silent=True) or {}
         low = (body.get("res") or "low").lower() == "low"
         ct_path = _case_ct_path(case_id, low=low)
         if not os.path.exists(ct_path):
             return jsonify({"error": "CT not found for this case on the server."}), 404
 
+        # Full-resolution bridge: even when the viewer is on the low-res grid,
+        # run the model on the full-res CT whenever it exists and downsample
+        # only the returned mask. The response stays on the viewer's grid, so
+        # nothing changes for the client — the proposal is just better.
+        low_grid = None
+        if low:
+            full_path = _case_ct_path(case_id, low=False)
+            if ct_path != full_path and os.path.exists(full_path):
+                low_grid = _lowres_grid(ct_path)
+                ct_path = full_path
+                low = False  # the model session and CT cache are full-res now
+
         case_key = f"{case_id}:{'low' if low else 'full'}"
         ct_obj, ct = _load_ct_cached(ct_path, case_key)
-        mask = segment_from_prompt(ct, ct_obj.affine, body, case_key=case_key)
-        if int(mask.sum()) == 0:
-            return jsonify({"error": "Nothing grew from that point — try a different spot or a higher tolerance."}), 422
+        if low_grid is not None:
+            low_shape = low_grid[0]
+            if body.get("initial_seg_gz_b64"):
+                body["initial_seg_gz_b64"] = _upsample_seed_b64(
+                    body["initial_seg_gz_b64"], low_shape, ct.shape)
+            if body.get("point_ijk"):
+                body["point_ijk"] = [
+                    min(f - 1, max(0, int(round(v * f / l))))
+                    for v, f, l in zip(body["point_ijk"], ct.shape, low_shape)
+                ]
+        mask, changed_bbox = segment_from_prompt(ct, ct_obj.affine, body, case_key=case_key)
+        if low_grid is not None:
+            low_shape, low_affine, low_header = low_grid
+            mask = _downsample_mask(mask, low_shape)
+            if changed_bbox is not None:
+                changed_bbox = _scale_bbox_down(changed_bbox, ct.shape, low_shape)
+        from services.nninteractive_predictor import session_is_active
+        session_active = session_is_active(body.get("session_token"))
+        include = body.get("include")
+        include = True if include is None else bool(include)
+        if int(mask.sum()) == 0 and body.get("refine"):
+            return jsonify({"error": "The model found nothing to keep in this class, so it was left as it was."}), 422
+        if int(mask.sum()) == 0 and include and not session_active:
+            return jsonify({"error": "Nothing was found at that point. Try a box or lasso around the target, or a different spot."}), 422
 
-        out = nib.Nifti1Image(mask, ct_obj.affine, ct_obj.header)
+        if low_grid is not None:
+            out = nib.Nifti1Image(mask, low_affine, low_header)
+        else:
+            out = nib.Nifti1Image(mask, ct_obj.affine, ct_obj.header)
         out.header.set_data_dtype('uint8')
         # nibabel serializes an uncompressed .nii to bytes; gzip it ourselves.
         import gzip as _gzip
@@ -8787,13 +8924,137 @@ def interactive_segment(case_id):
         resp = make_response(gz)
         resp.headers['Content-Type'] = 'application/gzip'
         resp.headers['X-Mask-Voxels'] = str(int(mask.sum()))
+        resp.headers['X-Prompt-Session'] = 'active' if session_active else 'none'
+        if changed_bbox is not None:
+            # "i0,i1,j0,j1,k0,k1" (upper-exclusive, NIfTI axis order): the
+            # slab the model's prediction actually wrote. The client diffs
+            # only this region against its previous state instead of the
+            # whole volume; absent header = full-volume diff.
+            resp.headers['X-Changed-Bbox'] = ",".join(
+                str(v) for pair in changed_bbox for v in pair
+            )
         resp.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
         return resp
+    except PromptCapacityError as ce:
+        # Every prompt-session slot is holding someone's live session; the
+        # new user retries rather than an existing user losing context.
+        return jsonify({"error": str(ce)}), 503
+    except PromptSessionLostError as le:
+        # The client's object outlived its session here. The code tells it to
+        # start a fresh session seeded from its labelmap instead of showing
+        # this as a failure.
+        return jsonify({"error": str(le), "code": "session_lost"}), 409
+    except PromptModelUnavailableError as ue:
+        print("[interactive_segment] model unavailable:", repr(ue.__cause__), flush=True)
+        return jsonify({"error": str(ue)}), 503
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
     except Exception as error:
-        print("[interactive_segment error]", type(error).__name__, error)
+        print("[interactive_segment error]", type(error).__name__, error, flush=True)
         return jsonify({"error": "Interactive segmentation failed."}), 500
+    finally:
+        _ANALYSIS_SLOTS.release()
+
+
+@api_blueprint.route('/interactive-capabilities', methods=['GET'])
+def interactive_capabilities():
+    """What the interactive model server says about itself, for the client's
+    attribution line. The licence comes from the RUNNING server (its
+    /capabilities reports it per checkpoint) — a future checkpoint could
+    ship different terms, and a licence hardcoded in the viewer would then
+    silently misattribute it. `available: false` (with a null license)
+    means the server never answered; the client keeps its fallback text.
+
+    It also says what the loaded checkpoint can do, so the viewer offers
+    exactly that: `interactions` (point, box, scribble, lasso), whether it
+    refines a label with no prompt (`refine`), and whether the server keeps
+    an undo snapshot (`undo`). Each is null when the server didn't say, and
+    the client then keeps the tool it already shows."""
+    from services.nninteractive_predictor import get_capabilities
+    caps = get_capabilities() or {}
+    supported = caps.get("supported_interactions")
+    supported = supported if isinstance(supported, dict) else None
+
+    def flag(value):
+        return value if isinstance(value, bool) else None
+
+    resp = jsonify({
+        "available": bool(caps),
+        "license": caps.get("license"),
+        "model_version": caps.get("inference_session_version"),
+        "interactions": None if supported is None else {
+            "point": flag(supported.get("points")),
+            "box": flag(supported.get("bbox2d")),
+            "scribble": flag(supported.get("scribble")),
+            "lasso": flag(supported.get("lasso")),
+        },
+        "refine": flag(caps.get("supports_zero_shot_label_refinement"))
+        if caps.get("supports_initial_label") is not False else False,
+        "undo": flag(caps.get("supports_undo")),
+    })
+    # An outage answer must not be cached for the hour a real one is, or the
+    # viewer keeps its fallback tools and licence line after the server is back.
+    resp.headers['Cache-Control'] = 'public, max-age=3600' if caps else 'no-store'
+    return resp
+
+
+@api_blueprint.route('/interactive-segment/<case_id>/release', methods=['POST'])
+def interactive_segment_release(case_id):
+    """Give back the model-server lease held by a finished prompt session.
+
+    A session belongs to one annotation class, so it is finished as soon as the
+    user moves to another class. Nothing else frees it before the idle reaper
+    runs, which is what makes annotating a run of structures hit the capacity
+    limit with abandoned sessions holding the slots.
+
+    Body JSON: { session_token: str }. Always 200 -> {"released": bool}: a
+    token that was already reaped, never existed, or expired is not an error,
+    since the caller's goal (that slot is not mine any more) already holds.
+    Deliberately does NOT take an analysis slot - releasing has to succeed
+    while the analysis pool is saturated, which is exactly when it matters.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        from services.nninteractive_predictor import release_session
+    except ImportError:
+        return jsonify({"error": "The interactive model server integration is not installed."}), 503
+    try:
+        released = release_session(body.get("session_token"))
+    except Exception as error:
+        print("[interactive_segment_release error]", type(error).__name__, error)
+        return jsonify({"released": False})
+    return jsonify({"released": bool(released)})
+
+
+@api_blueprint.route('/interactive-segment/<case_id>/undo', methods=['POST'])
+def interactive_segment_undo(case_id):
+    """Rewind the live prompt session by one interaction, keeping the model
+    server's context in lockstep with a client-side ctrl+z (the client
+    restores the labelmap voxels itself from its own undo entry, so this
+    returns bookkeeping JSON, not a mask).
+
+    Body JSON: { session_token: str }. 200 -> {"undone": true, "remaining": N}
+    (N = prompts still accumulated). 409 -> the session can't be rewound:
+    wrong/stale token, nothing to undo, the server's single-level undo is
+    exhausted, or the session expired. The client treats ANY failure as "end
+    the session" — its next prompt starts fresh and re-seeds from the
+    restored labelmap, so state stays consistent either way.
+    """
+    if not _ANALYSIS_SLOTS.acquire(blocking=False):
+        return jsonify(_ANALYSIS_BUSY_RESPONSE[0]), _ANALYSIS_BUSY_RESPONSE[1]
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        try:
+            from services.nninteractive_predictor import undo_last
+        except ImportError:
+            return jsonify({"error": "The interactive model server integration is not installed."}), 503
+        remaining = undo_last(body.get("session_token"))
+        return jsonify({"undone": True, "remaining": remaining})
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 409
+    except Exception as error:
+        print("[interactive_segment_undo error]", type(error).__name__, error)
+        return jsonify({"error": "Undo failed on the model server."}), 500
     finally:
         _ANALYSIS_SLOTS.release()
 

@@ -93,7 +93,7 @@ def region_grow(
             # Still over the cap after tightening — refuse rather than return
             # (and hole-fill) an oversized mask.
             raise ValueError(
-                "Selection too large — click a more specific region or restrict it with a box."
+                "Selection too large. Click a more specific region or restrict it with a box."
             )
 
     # Fill interior holes so the proposal is a solid object.
@@ -102,18 +102,88 @@ def region_grow(
 USE_NNINTERACTIVE = True
 
 
-def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_key: str | None = None) -> np.ndarray:
+_PLANE_WORLD_ROW = {"sagittal": 0, "coronal": 1, "axial": 2}
+
+
+def _plane_to_axis(affine: np.ndarray, plane) -> int | None:
+    """Volume axis (0, 1, 2) normal to a viewer pane, from the CT affine: the
+    voxel axis that runs most along the world axis the pane is perpendicular
+    to. None for an absent or unknown plane (the caller then guesses)."""
+    row = _PLANE_WORLD_ROW.get(plane) if isinstance(plane, str) else None
+    if row is None:
+        return None
+    return int(np.argmax(np.abs(np.asarray(affine)[row, :3])))
+
+
+def segment_from_prompt(
+    ct: np.ndarray, affine: np.ndarray, prompt: dict, case_key: str | None = None
+) -> tuple[np.ndarray, list | None]:
     """Model-agnostic entry point for the click-to-segment tool.
+
+    Returns (mask, changed_bbox): changed_bbox is the [[i0,i1],[j0,j1],
+    [k0,k1]] slab (upper-exclusive) the model's prediction actually wrote —
+    everything outside it is unchanged from the session's previous response —
+    or None when that isn't known (region_grow fallback, older model
+    server), meaning the caller must treat the whole volume as changed.
 
     `case_key` (e.g. "17:full") lets the nnInteractive path cache the
     uploaded volume across requests for the same case+resolution.
+
+    `prompt["session_token"]` (opaque client string) keeps the nnInteractive
+    prompt session open across requests: consecutive prompts carrying the
+    same token accumulate as context on the model server, so each new click
+    REFINES the same object instead of starting over. Session responses are
+    authoritative — once a token has accumulated context, failures raise
+    instead of falling back to region_grow (bolting a threshold blob onto a
+    model-refined mask would corrupt the object), and an empty mask is
+    returned as-is rather than triggering the fallback.
+
+    `prompt["include"]: false` marks a corrective prompt — carve the clicked
+    region OUT of the session's object instead of adding to it. Only the
+    interactive model understands that; there is no region-grow equivalent,
+    so corrective prompts never fall back and are refused outright when the
+    model path is unavailable.
+
+    `prompt["initial_seg_gz_b64"]` (base64 of a gzipped uint8 labelmap in
+    NIfTI file order, one byte per CT voxel, nonzero = in the object) seeds a
+    fresh session from an existing mask — the model continues from a shipped
+    organ label instead of starting an empty object. Seeded requests are
+    model-only for the same reason corrective ones are: region_grow can't
+    honor the seed, and silently answering with an unrelated threshold blob
+    would read as the model mangling the user's existing label.
+
+    `prompt["scribble_lps"]` ([[x,y,z], ...], 2+ points on one viewport
+    slice) is a stroke prompt: the backend rasterizes it to a thin polyline
+    mask on that slice and the model segments the structure under it. Takes
+    precedence over point/box when present (point_lps still accompanies it,
+    as the stroke's first vertex, for older-server compatibility). Model-only.
+
+    `prompt["lasso_lps"]` (3+ points) is the closed sibling: a freehand
+    contour rasterized as a FILLED polygon on its slice — "everything inside
+    this outline is the object". Same precedence and model-only rules.
+
+    `prompt["plane"]` ("axial" | "coronal" | "sagittal", optional) names the
+    pane a scribble or lasso was drawn on. Its volume axis is read from the
+    affine and used as the slice axis, because a perfectly straight stroke
+    cannot reveal it (its voxel spread ties between two axes). Without it the
+    axis is guessed from the stroke.
+
+    `prompt["refine"]: true` with `initial_seg_gz_b64` and no point asks the
+    model to redraw that label from the label alone (zero-shot label
+    refinement). Model-only, like any seeded request.
     """
+    refine = bool(prompt.get("refine"))
+    stroke_axis = _plane_to_axis(affine, prompt.get("plane"))
     if "point_ijk" in prompt:
         seed = tuple(int(v) for v in prompt["point_ijk"])
     elif "point_lps" in prompt:
         seed = lps_to_ijk(affine, prompt["point_lps"])
+    elif refine:
+        seed = None
     else:
         raise ValueError("prompt needs point_ijk or point_lps")
+    if refine and not prompt.get("initial_seg_gz_b64"):
+        raise ValueError("Refining needs the class's current voxels.")
 
     box_ijk = None
     if prompt.get("box_lps"):
@@ -124,23 +194,113 @@ def segment_from_prompt(ct: np.ndarray, affine: np.ndarray, prompt: dict, case_k
             tuple(max(a, b) + 1 for a, b in zip(c0, c1)),
         )
 
+    scribble_ijk = None
+    if prompt.get("scribble_lps"):
+        scribble_ijk = [lps_to_ijk(affine, p) for p in prompt["scribble_lps"]]
+        if len(scribble_ijk) < 2:
+            raise ValueError("A scribble needs at least 2 points.")
+
+    lasso_ijk = None
+    if prompt.get("lasso_lps"):
+        lasso_ijk = [lps_to_ijk(affine, p) for p in prompt["lasso_lps"]]
+        if len(lasso_ijk) < 3:
+            raise ValueError("A lasso needs at least 3 points.")
+
+    session_token = prompt.get("session_token") or None
+    include = prompt.get("include")
+    include = True if include is None else bool(include)
+
+    initial_seg = None
+    seg_b64 = prompt.get("initial_seg_gz_b64")
+    if seg_b64:
+        import base64
+        import gzip
+        try:
+            raw = gzip.decompress(base64.b64decode(seg_b64))
+        except Exception:
+            raise ValueError("initial_seg_gz_b64 is not valid base64 gzip data.")
+        if len(raw) != ct.size:
+            raise ValueError(
+                f"initial_seg has {len(raw)} voxels but the CT has {ct.size}: a "
+                "resolution mismatch between the viewer and this request."
+            )
+        # The client ships the labelmap as raw linear bytes in NIfTI file
+        # order (i fastest), so a Fortran reshape recovers [i, j, k] indexing.
+        initial_seg = np.frombuffer(raw, dtype=np.uint8).reshape(ct.shape, order="F")
+
+    # Prompts that only the interactive model can honor: corrective (no
+    # region-grow equivalent), seeded (the fallback would ignore the seed and
+    # mangle the existing label), and stroke-shaped (region_grow takes one
+    # seed point — answering a drawn stroke with a blob grown from its first
+    # vertex would silently ignore what the user drew).
+    model_only = (
+        (not include)
+        or initial_seg is not None
+        or scribble_ijk is not None
+        or lasso_ijk is not None
+    )
+
     if USE_NNINTERACTIVE:
         try:
             from services.nninteractive_predictor import predict
-            mask = predict(
+            mask, changed_bbox = predict(
                 ct,
                 case_key or "unkeyed",
-                point_ijk=seed if box_ijk is None else None,
-                box_ijk=box_ijk,
+                point_ijk=None if refine else (
+                    seed if (box_ijk is None and scribble_ijk is None and lasso_ijk is None) else None),
+                box_ijk=box_ijk if (scribble_ijk is None and lasso_ijk is None) else None,
+                scribble_ijk=scribble_ijk,
+                lasso_ijk=lasso_ijk,
+                stroke_axis=stroke_axis,
+                session_token=session_token,
+                include=include,
+                initial_seg=initial_seg,
+                refine=refine,
+                expect_session=bool(prompt.get("expect_session")),
             )
-            if mask.sum() > 0:
-                return mask
+            if session_token is not None or model_only or mask.sum() > 0:
+                # In-session responses are authoritative even when empty (a
+                # refinement can legitimately shrink the object) — see the
+                # docstring. Only tokenless one-shot prompts keep the empty
+                # -> region_grow fallback.
+                return mask, changed_bbox
             print("[segment_from_prompt] nnInteractive returned empty mask, falling back to region_grow")
         except Exception as e:
+            from services import nninteractive_predictor as _predictor
+            if (
+                isinstance(e, (_predictor.PromptCapacityError, _predictor.PromptSessionLostError))
+                or model_only
+                or _predictor.session_is_active(session_token)
+            ):
+                # No fallback exists for model-only prompts, a token that
+                # already refined an object across earlier prompts must not
+                # silently switch models mid-session (nor one whose session
+                # was lost: the client restarts it from its labelmap), and a
+                # capacity refusal should reach the user as "try again
+                # shortly" rather than silently degrade into a region-grow
+                # blob. Fail loudly: the known refusals keep their own
+                # message, and anything else (the model server went away)
+                # says so instead of surfacing as a bare 500.
+                if isinstance(e, (ValueError, _predictor.PromptCapacityError)):
+                    raise
+                raise _predictor.PromptModelUnavailableError(
+                    _predictor.PromptModelUnavailableError.MESSAGE) from e
             print(f"[segment_from_prompt] nnInteractive failed ({type(e).__name__}: {e}), falling back to region_grow")
 
+    if model_only:
+        raise ValueError(
+            "That prompt needs the interactive model server, which is not available right now."
+        )
     tolerance = min(max(float(prompt.get("tolerance", 80.0)), 1.0), 1000.0)
-    return region_grow(ct, seed, tolerance=tolerance, box_ijk=box_ijk)
+    if box_ijk is not None:
+        # The client sends the drag-start corner as the point, which sits on
+        # the edge of the box (often fat or air around the organ). Grow from
+        # the box centre so the intensity band comes from what was boxed.
+        seed = tuple(
+            min(max((lo + hi - 1) // 2, 0), n - 1)
+            for lo, hi, n in zip(box_ijk[0], box_ijk[1], ct.shape)
+        )
+    return region_grow(ct, seed, tolerance=tolerance, box_ijk=box_ijk), None
 
 # --------------------------------------------------------------------------- #
 # 2. Vessel curved-planar analysis
