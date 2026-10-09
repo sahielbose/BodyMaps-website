@@ -62,6 +62,6 @@ describe("DICOM directory picker", () => {
 
     await waitFor(() => expect(picker).toHaveBeenCalledOnce());
     expect(picker.mock.instances[0]).toBe(window);
-    expect(await screen.findByText("DICOM series (1 slices)")).toBeInTheDocument();
+    expect(await screen.findByText("DICOM series (1 slice)")).toBeInTheDocument();
   });
 });
