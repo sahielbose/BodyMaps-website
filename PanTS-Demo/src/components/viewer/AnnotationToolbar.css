@@ -637,9 +637,12 @@
     box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
 }
 
+/* The halo around a lasso's start point once the cursor can close the
+   shape: its radius swells and its opacity fades. `r` needs a unit here: a
+   bare number is only valid in the SVG attribute, so in a stylesheet the
+   declaration was dropped and only the opacity pulsed. */
 .vp-livewire-close-pulse {
     animation: vp-livewire-pulse 0.9s ease-in-out infinite;
-    transform-origin: center;
 }
 
 @keyframes vp-livewire-pulse {
@@ -647,12 +650,12 @@
     0%,
     100% {
         opacity: 0.55;
-        r: 12;
+        r: 12px;
     }
 
     50% {
         opacity: 0.15;
-        r: 16;
+        r: 16px;
     }
 }
 
