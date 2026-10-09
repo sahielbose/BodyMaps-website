@@ -42,6 +42,10 @@ class Limiter:
         if limit <= 0:
             return False
 
+        return self._count(key) > limit
+
+    def _count(self, key: str) -> int:
+        """Add one to `key`'s window and return its new count."""
         now = time.monotonic()
         with self._lock:
             if len(self._buckets) > self.MAX_BUCKETS:
@@ -53,7 +57,26 @@ class Limiter:
             if now - started >= self._window:
                 started, count = now, 0
             self._buckets[key] = (started, count + 1)
-            return count >= limit
+            return count + 1
+
+    def at_limit(self, key: str, limit: int) -> bool:
+        """Whether `key` has already used up its window, without counting this
+        request. Pair with hit() to count only some outcomes (failed logins)."""
+        if limit <= 0:
+            return False
+        now = time.monotonic()
+        with self._lock:
+            started, count = self._buckets.get(key, (now, 0))
+            return now - started < self._window and count >= limit
+
+    def hit(self, key: str) -> None:
+        """Count one event against `key`'s window."""
+        self._count(key)
+
+    def clear(self, key: str) -> None:
+        """Forget `key`'s counter."""
+        with self._lock:
+            self._buckets.pop(key, None)
 
     def reset(self) -> None:
         """Forget every counter. For tests, which would otherwise leak a full

@@ -1,6 +1,7 @@
 from flask import Blueprint, send_file, make_response, request, jsonify, Response, current_app, stream_with_context
 from werkzeug.utils import secure_filename
 from services.session_manager import generate_uuid
+from services.atomic_write import atomic_destination
 from services.auto_segmentor import run_auto_segmentation, cancel_session, cancel_all_inference, max_parallel_jobs, pop_run_info
 from services import job_run_log
 from services.mesh_generation import (
@@ -52,7 +53,7 @@ import io
 import re
 import shutil
 import tempfile
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -299,6 +300,26 @@ def _public_job_payload(job: dict) -> dict:
     return response
 
 
+# Hosts Hugging Face redirects resolve/ downloads to (its CDN and Xet storage).
+_HF_REDIRECT_HOST_SUFFIXES = (".huggingface.co", ".hf.co")
+_PROXY_MAX_REDIRECTS = 3
+
+
+def _is_hf_redirect_target(url: str) -> bool:
+    try:
+        target = urlsplit(url)
+        host = (target.hostname or "").lower()
+        return (
+            target.scheme == "https"
+            and target.username is None
+            and target.password is None
+            and target.port in (None, 443)
+            and (host == "huggingface.co" or host.endswith(_HF_REDIRECT_HOST_SUFFIXES))
+        )
+    except ValueError:
+        return False
+
+
 @api_blueprint.route("/proxy-image")
 def proxy_image():
     """
@@ -322,21 +343,37 @@ def proxy_image():
     except ValueError:
         return Response("Forbidden", status=403)
 
-    # Rebuild against a literal trusted origin. Redirects stay disabled so an
-    # otherwise-valid Hugging Face URL cannot bounce the server to a private IP.
+    # Rebuild against a literal trusted origin. requests' own redirect handling
+    # stays off so an otherwise-valid Hugging Face URL cannot bounce the server
+    # to a private IP; the hops Hugging Face really makes (resolve/ files are
+    # served from its CDN via a 302) are followed by hand, and only to HTTPS
+    # Hugging Face hosts.
     safe_path = quote(parsed.path or "/", safe="/-._~")
     upstream_url = urlunsplit(("https", "huggingface.co", safe_path, parsed.query, ""))
 
-    try:
-        r = requests.get(upstream_url, timeout=10, allow_redirects=False)
-    except requests.RequestException:
-        current_app.logger.warning("Hugging Face image proxy request failed", exc_info=True)
-        return Response("Upstream request failed", status=502)
+    for _ in range(_PROXY_MAX_REDIRECTS + 1):
+        try:
+            r = requests.get(upstream_url, timeout=10, allow_redirects=False)
+        except requests.RequestException:
+            current_app.logger.warning("Hugging Face image proxy request failed", exc_info=True)
+            return Response("Upstream request failed", status=502)
+        if not 300 <= r.status_code < 400:
+            break
+        location = urljoin(upstream_url, r.headers.get("Location", ""))
+        if not _is_hf_redirect_target(location):
+            return Response("Upstream redirected off Hugging Face", status=502)
+        upstream_url = location
+    else:
+        return Response("Too many upstream redirects", status=502)
 
     if not r.ok:
         return Response(f"Upstream status {r.status_code}", status=r.status_code)
 
     content_type = r.headers.get("Content-Type", "image/jpeg")
+    # A 200 that is not an image (an error page, a redirect notice) would
+    # otherwise reach an <img> and render as a broken thumbnail.
+    if not content_type.lower().startswith("image/"):
+        return Response("Upstream did not return an image", status=502)
 
     resp = Response(r.content, status=200, mimetype=content_type)
 
@@ -358,7 +395,13 @@ from openpyxl import load_workbook
 SESSIONS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "tmp")
 PDF_DIR = f"{Constants.PERMISSIONS_DIR}/pdf"
 os.makedirs(SESSIONS_DIR, exist_ok=True)
-os.makedirs(PDF_DIR, exist_ok=True)
+try:
+    os.makedirs(PDF_DIR, exist_ok=True)
+except OSError as e:
+    # PERMISSIONS_DIR defaults to /home/visitor/data, which is not creatable on
+    # a dev machine — that must not kill the whole API at import time. PDF export
+    # re-creates the directory when actually writing a report.
+    print(f"[boot] could not create PDF_DIR {PDF_DIR} ({e}); PDF export disabled until it exists")
 
 def _arg(name: str, default=None):
     return request.args.get(name, default)
@@ -528,10 +571,9 @@ def get_mesh_file(display_id, filename):
             return jsonify({"error": f"Error generating GLB: {str(e)}"}), 500
         try:
             os.makedirs(os.path.dirname(mesh_path), exist_ok=True)
-            tmp_path = f"{mesh_path}.part"
-            with open(tmp_path, "wb") as f:
-                f.write(glb_bytes)
-            os.replace(tmp_path, mesh_path)
+            with atomic_destination(mesh_path, suffix=".part") as tmp_path:
+                with open(tmp_path, "wb") as f:
+                    f.write(glb_bytes)
         except OSError as e:
             print("[mesh cache]", type(e).__name__, str(e))
             return send_file(
@@ -603,6 +645,7 @@ def home():
 
 
 @api_blueprint.route('/upload', methods=['POST'])
+@require_auth
 def upload():
     try:
         session_id = request.form.get('SESSION_ID')
@@ -717,6 +760,7 @@ def get_report(id):
     # Per-request filenames: with gunicorn's 8 threads, two simultaneous report
     # requests sharing temp.pdf/final.pdf would corrupt each other's output.
     request_token = uuid.uuid4().hex
+    os.makedirs(PDF_DIR, exist_ok=True)
     temp_pdf_path = f"{PDF_DIR}/temp_{request_token}.pdf"
     output_pdf_path = f"{PDF_DIR}/final_{request_token}.pdf"
     try:
@@ -2000,6 +2044,7 @@ def _create_organ_overview_image(ct_array, mask_array, label_id, output_path, co
 def generate_report_pdf(id):
     if not _is_safe_id(id):
         return jsonify({"error": "Invalid id"}), 400
+    os.makedirs(PDF_DIR, exist_ok=True)
     temp_pdf_path = f"{PDF_DIR}/temp_report_{id}.pdf"
     output_pdf_path = f"{PDF_DIR}/report_{id}.pdf"
     try:
@@ -2216,10 +2261,9 @@ def _record_job_duration(model, input_size_bytes, duration_seconds):
             lines.append(json.dumps(record) + "\n")
             if len(lines) > _JOB_DURATIONS_MAX_LINES:
                 lines = lines[-_JOB_DURATIONS_MAX_LINES:]
-            tmp = _JOB_DURATIONS_PATH + ".tmp"
-            with open(tmp, "w") as f:
-                f.writelines(lines)
-            os.replace(tmp, _JOB_DURATIONS_PATH)
+            with atomic_destination(_JOB_DURATIONS_PATH) as tmp:
+                with open(tmp, "w") as f:
+                    f.writelines(lines)
     except Exception as e:
         print(f"[job duration] {model}: {e}")
 
@@ -2236,20 +2280,35 @@ def _load_job_durations():
         return []
 
 
+# _set_inference_job persists after it releases _inference_jobs_lock, so two
+# status changes to one job can reach the disk in either order. Writes to one
+# session's job.json are serialized on a lock picked by session id (a few
+# stripes, so unrelated sessions rarely wait on each other), and each write
+# takes the newest state at that moment, so the last write to land is always
+# the latest status rather than whichever thread happened to be slower.
+_JOB_PERSIST_STRIPES = 16
+_job_persist_locks = [threading.Lock() for _ in range(_JOB_PERSIST_STRIPES)]
+
+
 def _persist_inference_job(session_id, snapshot):
     """Mirror a job's metadata to disk so status survives a gunicorn restart.
 
     Best-effort and fully isolated in try/except: a disk failure here must
     never break the request that triggered the status change. Atomic via
-    write-temp-then-rename so a crash mid-write can't leave a corrupt file.
+    write-temp-then-rename, with a temp name unique to each write, so neither a
+    crash mid-write nor a concurrent write can leave a corrupt file.
     """
     try:
         path = _job_meta_path(session_id)  # sanitized via secure_filename
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(snapshot, f, default=str)
-        os.replace(tmp, path)
+        with _job_persist_locks[hash(session_id) % _JOB_PERSIST_STRIPES]:
+            with _inference_jobs_lock:
+                latest = inference_jobs.get(session_id)
+                if latest is not None:
+                    snapshot = dict(latest)
+            with atomic_destination(path) as tmp:
+                with open(tmp, "w") as f:
+                    json.dump(snapshot, f, default=str)
     except Exception as e:
         print(f"[job persist] {session_id}: {e}")
 
@@ -2913,6 +2972,12 @@ def check_inference_status_legacy():
 
 @api_blueprint.route('/jobs', methods=['POST'])
 def create_pull_inference_job():
+    # Operators queue pull-worker jobs with the same X-Worker-Token the workers
+    # use; the site itself runs scans through /run-inference and never calls this.
+    auth_error = _require_worker_auth()
+    if auth_error is not None:
+        return auth_error
+
     payload = _json_payload()
 
     def _pick_text(*keys):
@@ -4279,11 +4344,10 @@ def _ai_download_case_file(pants_id, rel_path, filename):
         print(f"[ai metrics] downloading {filename} for {pants_id} from HuggingFace...")
         resp = requests.get(url, stream=True, timeout=120)
         resp.raise_for_status()
-        tmp = cached + ".part"
-        with open(tmp, "wb") as handle:
-            for chunk in resp.iter_content(chunk_size=8192):
-                handle.write(chunk)
-        os.replace(tmp, cached)
+        with atomic_destination(cached, suffix=".part") as tmp:
+            with open(tmp, "wb") as handle:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    handle.write(chunk)
         return cached
     except Exception as exc:
         print(f"[ai metrics] download failed for {pants_id}/{filename}: {exc}")
@@ -7446,6 +7510,7 @@ def _edited_masks_dir(case_id):
 
 
 @api_blueprint.route('/save-edited-mask/<case_id>', methods=['POST'])
+@require_auth
 def save_edited_mask(case_id):
     try:
         uploaded = request.files.get("mask")

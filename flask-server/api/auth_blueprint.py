@@ -20,6 +20,7 @@ Routes (registered under <BASE_PATH>/api):
 
 import hashlib
 import hmac
+import html as _html_mod
 import json
 import os
 
@@ -48,6 +49,25 @@ _reset_limiter = Limiter(RESET_WINDOW_S)
 # Verification mail has the same abuse profile as reset mail: a deliberate,
 # rare act per person, a spam vector without a ceiling.
 _verify_limiter = Limiter(RESET_WINDOW_S)
+
+# Login and register take no auth either. Login is an online password-guessing
+# channel (and an argon2 verify per call), so it has two ceilings: one per IP,
+# and one per account, because a guesser with many addresses would otherwise
+# get a fresh per-IP allowance against the same password each time.
+# Register creates an account and sends mail to any address it is given, so it
+# gets a per-IP ceiling like the reset endpoints. The per-IP numbers are set
+# with a campus NAT in mind, where a whole lab can share one address.
+# Only failed sign-ins count, and the right password clears the account's
+# count, so a shared lab account or a class behind one NAT is never locked out
+# by people signing in successfully.
+LOGIN_WINDOW_S = 900
+LOGIN_MAX_PER_IP = 60
+LOGIN_MAX_PER_EMAIL = 10
+REGISTER_WINDOW_S = 3600
+REGISTER_MAX_PER_IP = 30
+
+_login_limiter = Limiter(LOGIN_WINDOW_S)
+_register_limiter = Limiter(REGISTER_WINDOW_S)
 
 # The access coupon is intentionally checked here, on the server, rather than
 # in the model picker.  Keep only a SHA-256 digest in the environment so a
@@ -94,6 +114,8 @@ def _logged_in_response(user: dict, status: int = 200):
 
 @auth_blueprint.route("/auth/register", methods=["POST"])
 def register():
+    if _register_limiter.over(request.remote_addr or "unknown", REGISTER_MAX_PER_IP):
+        return jsonify({"error": "Too many sign-ups from this network. Try again later."}), 429
     data = _json()
     email = (data.get("email") or "").strip()
     password = data.get("password") or ""
@@ -118,9 +140,18 @@ def register():
 @auth_blueprint.route("/auth/login", methods=["POST"])
 def login():
     data = _json()
-    user = auth_store.authenticate(data.get("email") or "", data.get("password") or "")
+    email = data.get("email") or ""
+    ip_key = "ip:" + (request.remote_addr or "unknown")
+    email_key = "email:" + str(email).strip().lower()
+    if (_login_limiter.at_limit(ip_key, LOGIN_MAX_PER_IP)
+            or _login_limiter.at_limit(email_key, LOGIN_MAX_PER_EMAIL)):
+        return jsonify({"error": "Too many sign-in attempts. Try again in a few minutes."}), 429
+    user = auth_store.authenticate(email, data.get("password") or "")
     if user is None:
+        _login_limiter.hit(ip_key)
+        _login_limiter.hit(email_key)
         return jsonify({"error": "Invalid email or password"}), 401
+    _login_limiter.clear(email_key)
     return _logged_in_response(user)
 
 
@@ -188,6 +219,10 @@ def _verification_link(raw_token: str) -> str:
 def _verification_email(name: str | None, link: str) -> tuple[str, str, str]:
     """(subject, text, html) for the verification message."""
     greeting = f"Hi {name}," if name else "Hi,"
+    # The name is whatever the registrant typed; escaped, it can't put a link
+    # or markup of its own into a real BodyMaps email.
+    html_greeting = _html_mod.escape(greeting)
+    html_link = _html_mod.escape(link, quote=True)
     hours = auth_store.VERIFY_TTL_MINUTES // 60
     text = (
         f"{greeting}\n\n"
@@ -196,17 +231,17 @@ def _verification_email(name: str | None, link: str) -> tuple[str, str, str]:
         f"{link}\n\n"
         f"The link works once and expires in {hours} hours.\n\n"
         "If you didn't create a BodyMaps account, you can ignore this email.\n\n"
-        "— BodyMaps\n"
+        "BodyMaps\n"
     )
     html = (
-        f"<p>{greeting}</p>"
+        f"<p>{html_greeting}</p>"
         "<p>Confirm this is your email address to finish setting up your "
         "BodyMaps account:</p>"
-        f'<p><a href="{link}">Verify your email</a></p>'
+        f'<p><a href="{html_link}">Verify your email</a></p>'
         f"<p>The link works once and expires in {hours} hours.</p>"
         "<p>If you didn't create a BodyMaps account, you can ignore this "
         "email.</p>"
-        "<p>— BodyMaps</p>"
+        "<p>BodyMaps</p>"
     )
     return "Verify your BodyMaps email", text, html
 
@@ -271,6 +306,8 @@ def _reset_link(raw_token: str) -> str:
 def _reset_email(name: str | None, link: str) -> tuple[str, str, str]:
     """(subject, text, html) for the reset message."""
     greeting = f"Hi {name}," if name else "Hi,"
+    html_greeting = _html_mod.escape(greeting)  # see _verification_email
+    html_link = _html_mod.escape(link, quote=True)
     minutes = auth_store.RESET_TTL_MINUTES
     text = (
         f"{greeting}\n\n"
@@ -278,19 +315,19 @@ def _reset_email(name: str | None, link: str) -> tuple[str, str, str]:
         "was you, open the link below to choose a new one:\n\n"
         f"{link}\n\n"
         f"The link works once and expires in {minutes} minutes.\n\n"
-        "If it wasn't you, you can ignore this email — nothing has changed and "
+        "If it wasn't you, you can ignore this email. Nothing has changed and "
         "your current password still works.\n\n"
-        "— BodyMaps\n"
+        "BodyMaps\n"
     )
     html = (
-        f"<p>{greeting}</p>"
+        f"<p>{html_greeting}</p>"
         "<p>Someone asked to reset the password for your BodyMaps account. "
         "If that was you, choose a new one here:</p>"
-        f'<p><a href="{link}">Reset your password</a></p>'
+        f'<p><a href="{html_link}">Reset your password</a></p>'
         f"<p>The link works once and expires in {minutes} minutes.</p>"
-        "<p>If it wasn't you, you can ignore this email — nothing has changed "
+        "<p>If it wasn't you, you can ignore this email. Nothing has changed "
         "and your current password still works.</p>"
-        "<p>— BodyMaps</p>"
+        "<p>BodyMaps</p>"
     )
     return "Reset your BodyMaps password", text, html
 

@@ -97,6 +97,13 @@ class InferenceJobQueue:
         else:
             ext = ".bin"
 
+        # Refuse a full queue before copying the input, so a rejected job never
+        # writes to disk. The count is taken again under the lock below, since
+        # another job can be admitted while this one copies.
+        with self._locked():
+            if self._active_count() >= self.max_pending:
+                raise self._queue_full()
+
         input_copy_path = os.path.join(self.inputs_dir, f"{job_id}{ext}")
         with open(input_copy_path, "wb") as output_stream:
             shutil.copyfileobj(input_stream, output_stream)
@@ -121,28 +128,35 @@ class InferenceJobQueue:
         }
 
         with self._locked():
-            active = 0
-            for name in os.listdir(self.jobs_dir):
-                if not name.endswith(".json"):
-                    continue
-                try:
-                    with open(os.path.join(self.jobs_dir, name), "r", encoding="utf-8") as f:
-                        existing = json.load(f)
-                except (OSError, ValueError, TypeError):
-                    continue
-                if existing.get("status") in {"queued", "leased", "running"}:
-                    active += 1
-            if active >= self.max_pending:
+            if self._active_count() >= self.max_pending:
                 try:
                     os.remove(input_copy_path)
                 except OSError:
                     pass
-                raise QueueFullError(
-                    f"Inference queue is full ({self.max_pending} pending jobs)"
-                )
+                raise self._queue_full()
             self._write_job(job)
 
         return job
+
+    def _active_count(self) -> int:
+        """Jobs still holding a queue slot. Call with the lock held."""
+        active = 0
+        for name in os.listdir(self.jobs_dir):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(self.jobs_dir, name), "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except (OSError, ValueError, TypeError):
+                continue
+            if existing.get("status") in {"queued", "leased", "running"}:
+                active += 1
+        return active
+
+    def _queue_full(self) -> QueueFullError:
+        return QueueFullError(
+            f"Inference queue is full ({self.max_pending} pending jobs)"
+        )
 
     def get_job(self, job_id: str):
         with self._locked():

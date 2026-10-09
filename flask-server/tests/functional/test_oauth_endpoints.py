@@ -82,8 +82,23 @@ def test_start_redirects_to_provider_when_configured(configured_client):
     assert "accounts.google.com" in r.headers["Location"]
 
 
-def test_start_503_when_not_configured(unconfigured_client):
-    assert unconfigured_client.get("/api/auth/oauth/google").status_code == 503
+def test_start_redirects_with_error_when_not_configured(unconfigured_client):
+    """The start link is a full-page navigation, so an unconfigured provider
+    bounces back to the page the click came from with a message the popup
+    shows, not a JSON body."""
+    from urllib.parse import parse_qs, urlparse
+
+    r = unconfigured_client.get("/api/auth/oauth/github?next=%2Fcase%2F35")
+    assert r.status_code in (302, 303)
+    loc = urlparse(r.headers["Location"])
+    assert loc.path == "/case/35"
+    assert parse_qs(loc.query)["auth_error"] == ["GitHub sign in isn't available on this site."]
+
+
+def test_callback_redirects_with_error_when_not_configured(unconfigured_client):
+    r = unconfigured_client.get("/api/auth/oauth/google/callback?code=abc")
+    assert r.status_code in (302, 303)
+    assert "auth_error" in r.headers["Location"]
 
 
 def test_unknown_provider_404(configured_client):

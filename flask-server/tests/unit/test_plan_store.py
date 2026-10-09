@@ -78,7 +78,8 @@ def test_daily_quota_blocks_the_second_scan(plans):
     assert blocked["limit"] == 1
     assert blocked["used"] == 1
     assert blocked["message"] == "You've used your scan for today."
-    assert blocked["resets_at"]
+    # The column is naive UTC; the string must carry the offset or a browser reads it as local time.
+    assert blocked["resets_at"].endswith("+00:00")
 
 
 def test_concurrency_blocks_a_second_run_still_in_flight(plans):
@@ -98,6 +99,32 @@ def test_concurrency_blocks_a_second_run_still_in_flight(plans):
     summary = plan_store.usage_summary(user_id)
     assert summary["scans"]["used"] == 1
     assert summary["scans"]["in_flight"] == 0
+
+
+def test_boot_reap_frees_a_slot_held_by_a_run_that_died(plans):
+    """A restart mid-run left finished_at NULL, and nothing closed it: once the
+    daily window rolled over, the account was still refused as "one scan at a
+    time" for good."""
+    from datetime import timedelta
+
+    from models.engine import session_scope
+    from models.job import utcnow
+    from models.usage_event import UsageEvent
+
+    plan_store, user_id = plans
+    plan_store.record_inference(user_id, "session-dead", "LesionSegmenter")
+    plan_store.record_ai_message(user_id)
+    with session_scope() as s:
+        for event in s.query(UsageEvent).all():
+            event.created_at = utcnow() - timedelta(days=2)
+
+    blocked = plan_store.check_inference(user_id, "LesionSegmenter")
+    assert blocked is not None
+    assert blocked["reason"] == "concurrent_scans"
+
+    assert plan_store.reap_orphaned_usage() == 1
+    assert plan_store.check_inference(user_id, "LesionSegmenter") is None
+    assert plan_store.reap_orphaned_usage() == 0
 
 
 def test_rerunning_a_session_id_does_not_charge_twice(plans):

@@ -5,6 +5,9 @@ local account. The rules under test:
   - a returning identity is matched by (provider, provider_user_id), never email
   - a first-time login links to an existing account ONLY if the provider
     verified the email
+  - linking onto a local account whose email was never verified drops its
+    password and sessions (whoever registered it may not own the mailbox); a
+    verified local account keeps both
   - an unverified email colliding with an existing account is refused
   - otherwise a new OAuth-only account is created
 """
@@ -54,12 +57,33 @@ def test_same_email_different_providers_link_to_one_account(store):
     assert g["id"] == gh["id"]
 
 
-def test_links_to_password_account_when_email_verified(store):
+def test_links_to_a_verified_password_account_and_keeps_its_password(store):
     local = store.create_user("both@example.com", "password1")
+    _issued, raw = store.create_email_verification(local["id"])
+    assert store.verify_email(raw)["email_verified"] is True
+    token = store.create_session(local["id"])
+
     linked = store.upsert_oauth_user("google", "sub-9", "both@example.com", True)
     assert linked["id"] == local["id"]
-    # Password login still works after linking.
+    # The owner had already proven the mailbox: password and sessions stay.
     assert store.authenticate("both@example.com", "password1")["id"] == local["id"]
+    assert store.resolve_session(token)["id"] == local["id"]
+
+
+def test_linking_onto_an_unverified_account_drops_its_password_and_sessions(store):
+    # Someone registers the victim's address with a password of their own and
+    # keeps the session; the real owner later signs in with Google.
+    squatted = store.create_user("owner@example.com", "attacker-pass")
+    attacker_token = store.create_session(squatted["id"])
+
+    linked = store.upsert_oauth_user("google", "sub-owner", "owner@example.com", True)
+    assert linked["id"] == squatted["id"]
+    assert linked["email_verified"] is True
+    assert store.authenticate("owner@example.com", "attacker-pass") is None
+    assert store.resolve_session(attacker_token) is None
+    # The provider is how the account signs in from here on.
+    again = store.upsert_oauth_user("google", "sub-owner", "owner@example.com", True)
+    assert again["id"] == squatted["id"]
 
 
 def test_refuses_link_when_email_unverified(store):

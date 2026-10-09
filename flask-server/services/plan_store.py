@@ -23,7 +23,7 @@ are on are applied for real.
 """
 
 import uuid
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 from sqlalchemy import select
 
@@ -217,7 +217,8 @@ def _resets_at(s, user_id: str, kind: str) -> str | None:
             UsageEvent.created_at >= _window_start(),
         ).order_by(UsageEvent.created_at.asc()).limit(1)
     ).scalar_one_or_none()
-    return (oldest + WINDOW).isoformat() if oldest else None
+    # created_at is a naive UTC column; say so, or a browser reads the string as local time.
+    return (oldest + WINDOW).replace(tzinfo=timezone.utc).isoformat() if oldest else None
 
 
 # ---- checks ----------------------------------------------------------------
@@ -344,6 +345,24 @@ def finish_inference(session_id: str) -> None:
         ).scalar_one_or_none()
         if event is not None and event.finished_at is None:
             event.finished_at = utcnow()
+
+
+def reap_orphaned_usage() -> int:
+    """Close every inference usage row still open; returns the count. Run once
+    at boot, next to job_store.reap_orphaned_jobs and on the same assumption:
+    inference runs inside the web process, so no run survives a restart. Without
+    this, a run killed mid-flight kept its concurrency slot forever and a Free
+    account (one scan at a time) could never scan again."""
+    now = utcnow()
+    with session_scope() as s:
+        orphans = s.execute(
+            select(UsageEvent).where(
+                UsageEvent.kind == KIND_INFERENCE, UsageEvent.finished_at.is_(None)
+            )
+        ).scalars().all()
+        for event in orphans:
+            event.finished_at = now
+        return len(orphans)
 
 
 def record_ai_message(user_id: str) -> None:

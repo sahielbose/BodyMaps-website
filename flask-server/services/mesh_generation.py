@@ -13,6 +13,7 @@ from skimage import measure
 import trimesh
 
 from constants import Constants
+from services.atomic_write import atomic_destination
 from utils import *
 
 dotenv.load_dotenv()
@@ -308,10 +309,9 @@ def generate_organ_glb_bytes(
 def _write_atomic(path: str, payload: bytes) -> None:
     """Write to a temp file then rename, so readers never see a partial file
     and a crash mid-write can't poison the cache."""
-    tmp_path = f"{path}.part"
-    with open(tmp_path, "wb") as handle:
-        handle.write(payload)
-    os.replace(tmp_path, path)
+    with atomic_destination(path, suffix=".part") as tmp_path:
+        with open(tmp_path, "wb") as handle:
+            handle.write(payload)
 
 
 def bake_case_meshes(

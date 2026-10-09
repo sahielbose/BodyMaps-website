@@ -230,11 +230,17 @@ def bootstrap_emails() -> list[str]:
 
 
 def ensure_bootstrap_admins() -> list[str]:
-    """Grant admin to every ADMIN_EMAILS address that has an account.
+    """Grant admin to every ADMIN_EMAILS address that has a verified account.
 
     Additive only: it never revokes. Taking admin away from someone dropped from
     the env var should be a deliberate act through the UI, not a side effect of
     a deploy editing a variable.
+
+    Registering needs no proof of the mailbox, so anyone could sign up as a
+    listed address before its owner does. Only an account that proved the
+    email (the verification link, or a provider that vouches for it) is
+    promoted; an unverified one is picked up on the first boot after it is
+    verified.
     """
     emails = bootstrap_emails()
     if not emails:
@@ -242,9 +248,15 @@ def ensure_bootstrap_admins() -> list[str]:
 
     with session_scope() as s:
         rows = s.execute(
-            select(User.id).where(User.email.in_(emails), User.is_system.is_(False))
-        ).scalars().all()
+            select(User.id, User.email_verified_at).where(
+                User.email.in_(emails), User.is_system.is_(False))
+        ).all()
 
-    for user_id in rows:
+    granted = [user_id for user_id, verified_at in rows if verified_at is not None]
+    waiting = len(rows) - len(granted)
+    if waiting:
+        print(f"[role_store] {waiting} ADMIN_EMAILS account(s) left without admin "
+              "until the email is verified", flush=True)
+    for user_id in granted:
         grant(user_id, ROLE_ADMIN, granted_by=None)
-    return list(rows)
+    return granted

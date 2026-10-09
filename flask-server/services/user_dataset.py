@@ -42,6 +42,8 @@ import traceback
 from datetime import datetime, timezone
 from typing import Optional
 
+from services.atomic_write import atomic_destination
+
 # Heavy/optional imports (nibabel, numpy) are done lazily inside the worker so
 # importing this module in the request path stays cheap and never fails a route.
 
@@ -162,10 +164,9 @@ def _load_registry(root: str) -> dict:
 
 def _save_registry(root: str, reg: dict) -> None:
     path = _registry_path(root)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(reg, f)
-    os.replace(tmp, path)   # atomic
+    with atomic_destination(path) as tmp:   # atomic publish, temp unique to this write
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(reg, f)
 
 
 def _prune_events(reg: dict, now: float) -> None:

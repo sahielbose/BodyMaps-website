@@ -75,10 +75,12 @@ def _register(client, email="g@h.com"):
 
 
 UPLOAD_ENDPOINTS = [
+    "/api/upload",
     "/api/upload-inference-chunk",
     "/api/finalize-upload",
     "/api/upload-dicom-slice",
     "/api/finalize-dicom",
+    "/api/save-edited-mask/1",
 ]
 
 
@@ -86,6 +88,58 @@ def test_upload_endpoints_refuse_guests(client):
     for endpoint in UPLOAD_ENDPOINTS:
         r = client.post(endpoint, data={})
         assert r.status_code == 401, endpoint
+
+
+def test_legacy_upload_writes_nothing_for_guests(client):
+    import constants
+
+    r = client.post("/api/upload", data={
+        "SESSION_ID": "guest-upload",
+        "MAIN_NIFTI": (io.BytesIO(b"not-a-scan"), "ct.nii.gz"),
+    })
+    assert r.status_code == 401
+    assert not os.path.exists(
+        os.path.join(constants.Constants.SESSIONS_DIR_NAME, "guest-upload"))
+
+
+def test_pull_queue_job_creation_needs_the_worker_token(client, monkeypatch):
+    import api.api_blueprint as api_bp
+
+    monkeypatch.setenv("WORKER_API_TOKEN", "worker-secret")
+    monkeypatch.setattr(
+        api_bp.inference_job_queue, "create_job",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("job was queued")),
+    )
+    scan = lambda: (io.BytesIO(b"scan"), "ct.nii.gz")  # noqa: E731
+
+    assert client.post("/api/jobs", data={"MAIN_NIFTI": scan()}).status_code == 401
+    wrong = client.post("/api/jobs", data={"MAIN_NIFTI": scan()},
+                        headers={"X-Worker-Token": "guess"})
+    assert wrong.status_code == 401
+
+    # A signed-in site account is not a worker either.
+    _register(client, email="jobs-user@h.com")
+    assert client.post("/api/jobs", data={"MAIN_NIFTI": scan()}).status_code == 401
+
+
+def test_pull_queue_job_creation_works_with_the_worker_token(client, monkeypatch):
+    import api.api_blueprint as api_bp
+
+    monkeypatch.setenv("WORKER_API_TOKEN", "worker-secret")
+    queued = {}
+
+    def fake_create_job(**kwargs):
+        queued.update(kwargs)
+        return {"job_id": "job-1", "session_id": kwargs["session_id"],
+                "model": kwargs["model"], "status": "queued"}
+
+    monkeypatch.setattr(api_bp.inference_job_queue, "create_job", fake_create_job)
+    r = client.post("/api/jobs", data={
+        "session_id": "worker-session",
+        "MAIN_NIFTI": (io.BytesIO(b"scan"), "ct.nii.gz"),
+    }, headers={"X-Worker-Token": "worker-secret"})
+    assert r.status_code == 201
+    assert queued["session_id"] == "worker-session"
 
 
 def test_private_session_endpoints_refuse_guests(client):

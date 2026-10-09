@@ -8,10 +8,16 @@ POLL_SECONDS="${POLL_SECONDS:-5}"
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-3600}"
 SESSION_ID="${SESSION_ID:-smoke-$(date +%s)}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pull_queue_smoke}"
+WORKER_API_TOKEN="${WORKER_API_TOKEN:-}"
+
+if [[ -z "${WORKER_API_TOKEN}" ]]; then
+  echo "ERROR: WORKER_API_TOKEN is required (creating a job needs the worker token)."
+  exit 1
+fi
 
 if [[ -z "${INPUT_PATH}" ]]; then
   echo "ERROR: INPUT_PATH is required."
-  echo "Example: INPUT_PATH=/path/to/ct.nii.gz API_BASE=https://server-a ./scripts/smoke_test_pull_queue.sh"
+  echo "Example: INPUT_PATH=/path/to/ct.nii.gz API_BASE=https://server-a WORKER_API_TOKEN=... ./scripts/smoke_test_pull_queue.sh"
   exit 1
 fi
 
@@ -26,6 +32,7 @@ create_status="${OUTPUT_DIR}/create_job.status"
 
 echo "[1/4] Creating job on ${API_BASE}/api/jobs"
 curl -sS -X POST "${API_BASE}/api/jobs" \
+  -H "X-Worker-Token: ${WORKER_API_TOKEN}" \
   -F "MAIN_NIFTI=@${INPUT_PATH}" \
   -F "session_id=${SESSION_ID}" \
   -F "MODEL_NAME=${MODEL_NAME}" \

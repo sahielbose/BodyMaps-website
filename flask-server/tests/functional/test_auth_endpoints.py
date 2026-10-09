@@ -77,6 +77,100 @@ def test_login_wrong_password(client):
     assert good.status_code == 200
 
 
+def test_login_is_throttled_per_account(client):
+    client.post("/api/auth/register", json={"email": "guess@d.com", "password": "password1"})
+    client.post("/api/auth/logout")
+    for _ in range(10):
+        bad = client.post("/api/auth/login", json={"email": "guess@d.com", "password": "nope"})
+        assert bad.status_code == 401
+    # Past the ceiling even the right password waits, whatever the spelling.
+    blocked = client.post("/api/auth/login", json={"email": " Guess@D.com ", "password": "password1"})
+    assert blocked.status_code == 429
+    assert "Too many sign-in attempts" in blocked.get_json()["error"]
+
+    # Another account from the same address is still under its own ceiling.
+    client.post("/api/auth/register", json={"email": "other@d.com", "password": "password1"})
+    client.post("/api/auth/logout")
+    ok = client.post("/api/auth/login", json={"email": "other@d.com", "password": "password1"})
+    assert ok.status_code == 200
+
+
+def test_successful_sign_ins_never_count_toward_the_ceilings(client, monkeypatch):
+    """A shared lab account, or a class behind one NAT, signs in many times
+    with the right password; none of that may lock anyone out."""
+    import api.auth_blueprint as bp_mod
+    monkeypatch.setattr(bp_mod, "LOGIN_MAX_PER_IP", 3)
+    client.post("/api/auth/register", json={"email": "lab@d.com", "password": "password1"})
+    client.post("/api/auth/logout")
+    for _ in range(12):
+        ok = client.post("/api/auth/login", json={"email": "lab@d.com", "password": "password1"})
+        assert ok.status_code == 200
+        client.post("/api/auth/logout")
+
+
+def test_the_right_password_clears_the_account_count(client):
+    client.post("/api/auth/register", json={"email": "typo@d.com", "password": "password1"})
+    client.post("/api/auth/logout")
+    for _ in range(9):
+        assert client.post("/api/auth/login", json={"email": "typo@d.com", "password": "nope"}).status_code == 401
+    assert client.post("/api/auth/login", json={"email": "typo@d.com", "password": "password1"}).status_code == 200
+    client.post("/api/auth/logout")
+    # A fresh allowance: nine more typos still get a 401, not a lockout.
+    for _ in range(9):
+        assert client.post("/api/auth/login", json={"email": "typo@d.com", "password": "nope"}).status_code == 401
+
+
+def test_login_is_throttled_per_ip(client, monkeypatch):
+    import api.auth_blueprint as bp_mod
+    monkeypatch.setattr(bp_mod, "LOGIN_MAX_PER_IP", 3)
+
+    codes = [
+        client.post("/api/auth/login", json={"email": f"spray{i}@d.com", "password": "nope"}).status_code
+        for i in range(4)
+    ]
+    assert codes == [401, 401, 401, 429]
+
+
+def test_register_is_throttled_per_ip(client, monkeypatch):
+    import api.auth_blueprint as bp_mod
+    from services import auth_store
+    sent = []
+    monkeypatch.setattr(bp_mod, "REGISTER_MAX_PER_IP", 2)
+    monkeypatch.setattr(bp_mod.mailer, "send", lambda to, *_args: sent.append(to) or True)
+
+    codes = [
+        client.post("/api/auth/register", json={"email": f"new{i}@d.com", "password": "password1"}).status_code
+        for i in range(3)
+    ]
+    assert codes == [201, 201, 429]
+    assert sent == ["new0@d.com", "new1@d.com"]
+    assert auth_store.authenticate("new2@d.com", "password1") is None
+
+
+def test_the_signup_name_is_escaped_in_the_html_email(client, monkeypatch):
+    import api.auth_blueprint as bp_mod
+    mails = []
+    monkeypatch.setattr(
+        bp_mod.mailer, "send",
+        lambda to, subject, text, html: mails.append((text, html)) or True,
+    )
+    name = '<a href="https://evil.example">Click here</a>'
+
+    r = client.post("/api/auth/register", json={
+        "email": "phish@d.com", "password": "password1", "name": name,
+    })
+    assert r.status_code == 201
+    client.post("/api/auth/logout")
+    client.post("/api/auth/forgot-password", json={"email": "phish@d.com"})
+
+    assert len(mails) == 2  # verification, then reset
+    for text, html in mails:
+        assert "&lt;a href=&quot;https://evil.example&quot;&gt;Click here&lt;/a&gt;" in html
+        assert html.count("<a href=") == 1  # only the real link
+        # The plain-text part is not HTML, so it carries the name as typed.
+        assert text.startswith(f"Hi {name},")
+
+
 def test_admin_coupon_requires_authentication(client, monkeypatch):
     monkeypatch.setenv(
         "BODYMAPS_ADMIN_COUPON_SHA256",

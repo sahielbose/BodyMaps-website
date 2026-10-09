@@ -34,9 +34,16 @@ def store(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def make_user():
-    def _make(email):
+    def _make(email, verified=True):
+        from models.engine import session_scope
+        from models.job import utcnow
+        from models.user import User
         from services import auth_store
-        return auth_store.create_user(email, "password1")["id"]
+        user_id = auth_store.create_user(email, "password1")["id"]
+        if verified:
+            with session_scope() as s:
+                s.get(User, user_id).email_verified_at = utcnow()
+        return user_id
     return _make
 
 
@@ -186,6 +193,28 @@ def test_bootstrap_skips_an_email_with_no_account(store, monkeypatch):
     """They haven't signed up yet; the next boot picks them up."""
     monkeypatch.setenv("ADMIN_EMAILS", "ghost@b.com")
     assert store.ensure_bootstrap_admins() == []
+
+
+def test_bootstrap_never_promotes_an_unverified_account(store, make_user, monkeypatch):
+    """Registering proves nothing about the mailbox, so a squatter who signs
+    up as a listed address before its owner must not become admin."""
+    squatter = make_user("boss@b.com", verified=False)
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@b.com")
+
+    assert store.ensure_bootstrap_admins() == []
+    assert store.roles_for(squatter) == []
+    assert store.count_admins() == 0
+
+
+def test_bootstrap_promotes_the_account_once_it_is_verified(store, make_user, monkeypatch):
+    from services import auth_store
+    user_id = make_user("boss@b.com", verified=False)
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@b.com")
+    assert store.ensure_bootstrap_admins() == []
+
+    _, token = auth_store.create_email_verification(user_id)
+    assert auth_store.verify_email(token) is not None
+    assert store.ensure_bootstrap_admins() == [user_id]
 
 
 def test_bootstrap_is_repeatable(store, make_user, monkeypatch):

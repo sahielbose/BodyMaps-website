@@ -234,7 +234,10 @@ def upsert_oauth_user(provider: str, provider_user_id: str, email: str,
          account — but ONLY when the provider says the email is verified.
          Unverified + existing account => refuse (OAuthLinkRefusedError), since
          an attacker could otherwise claim an account by setting its address as
-         an unverified email at the provider.
+         an unverified email at the provider. The reverse case matters too: a
+         local account whose email was never verified may have been registered
+         by someone else, so linking onto it drops its password and sessions.
+         A verified local account keeps both.
       3. Else create a brand-new account (no password; OAuth-only).
     """
     email = _normalize_email(email)
@@ -282,7 +285,23 @@ def upsert_oauth_user(provider: str, provider_user_id: str, email: str,
             ))
             # The provider vouched for the address, so mark it verified locally.
             if existing.email_verified_at is None:
-                existing.email_verified_at = utcnow()
+                now = utcnow()
+                # Nobody had proven this mailbox before the provider did, and
+                # anyone can register an address they don't own. The password
+                # and sessions on the row are unproven too: keeping them would
+                # let whoever registered it sign in to the account the real
+                # owner is about to fill. Drop the password and sign out every
+                # browser; the provider is how this account signs in now.
+                existing.password_hash = None
+                live = s.execute(
+                    select(AuthSession).where(
+                        AuthSession.user_id == existing.id,
+                        AuthSession.revoked_at.is_(None),
+                    )
+                ).scalars().all()
+                for sess in live:
+                    sess.revoked_at = now
+                existing.email_verified_at = now
             existing.deletion_requested_at = None  # signing in undoes a pending deletion
             s.flush()
             return existing.to_public_dict()

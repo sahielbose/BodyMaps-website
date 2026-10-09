@@ -4,13 +4,14 @@ import io
 import os
 from pathlib import Path
 
+import pytest
 from flask import Flask
 
 import api.api_blueprint as api_routes
 import api.auth as auth_routes
 from api.api_blueprint import api_blueprint
 from constants import Constants
-from services.inference_job_queue import InferenceJobQueue
+from services.inference_job_queue import InferenceJobQueue, QueueFullError
 
 
 def _client():
@@ -60,6 +61,78 @@ def test_image_proxy_disables_redirects_and_rebuilds_trusted_origin(monkeypatch)
     assert recorded["timeout"] == 10
 
 
+class _Reply:
+    def __init__(self, status_code, headers=None, content=b""):
+        self.status_code = status_code
+        self.ok = status_code < 400
+        self.headers = headers or {}
+        self.content = content
+
+
+def _replay(monkeypatch, replies):
+    requested = []
+
+    def fake_get(url, **kwargs):
+        assert kwargs["allow_redirects"] is False
+        requested.append(url)
+        return replies[len(requested) - 1]
+
+    monkeypatch.setattr(api_routes.requests, "get", fake_get)
+    return requested
+
+
+def test_image_proxy_follows_the_hugging_face_cdn_redirect(monkeypatch):
+    # resolve/ files answer with a 302 to Hugging Face's CDN; passing that
+    # redirect notice on as the image broke every dataset thumbnail.
+    cdn = "https://us.aws.cdn.hf.co/xet-bridge-us/abc?X-Xet-Cas-Uid=public"
+    requested = _replay(monkeypatch, [
+        _Reply(302, {"Location": cdn, "Content-Type": "text/plain"}, b"Found. Redirecting"),
+        _Reply(200, {"Content-Type": "image/jpeg"}, b"jpeg-bytes"),
+    ])
+
+    response = _client().get(
+        "/api/proxy-image",
+        query_string={"url": "https://huggingface.co/datasets/org/repo/resolve/main/profile.jpg"},
+    )
+
+    assert response.status_code == 200
+    assert response.data == b"jpeg-bytes"
+    assert response.mimetype == "image/jpeg"
+    assert requested[1] == cdn
+
+
+def test_image_proxy_never_follows_a_redirect_off_hugging_face(monkeypatch):
+    for location in ("http://us.aws.cdn.hf.co/x.jpg", "https://169.254.169.254/latest",
+                     "https://hf.co.evil.example/x.jpg", "https://user@cdn.hf.co/x.jpg"):
+        requested = _replay(monkeypatch, [_Reply(302, {"Location": location})])
+
+        response = _client().get(
+            "/api/proxy-image", query_string={"url": "https://huggingface.co/org/repo/x.jpg"})
+
+        assert response.status_code == 502, location
+        assert len(requested) == 1, location
+
+
+def test_image_proxy_gives_up_after_a_few_redirects(monkeypatch):
+    hop = {"Location": "https://cdn.hf.co/again.jpg"}
+    requested = _replay(monkeypatch, [_Reply(302, hop)] * 10)
+
+    response = _client().get(
+        "/api/proxy-image", query_string={"url": "https://huggingface.co/org/repo/x.jpg"})
+
+    assert response.status_code == 502
+    assert len(requested) == 4
+
+
+def test_image_proxy_refuses_a_reply_that_is_not_an_image(monkeypatch):
+    _replay(monkeypatch, [_Reply(200, {"Content-Type": "text/html"}, b"<html>")])
+
+    response = _client().get(
+        "/api/proxy-image", query_string={"url": "https://huggingface.co/org/repo/x.jpg"})
+
+    assert response.status_code == 502
+
+
 def test_mesh_filename_validation_is_bounded_before_regex_work():
     response = _client().get(
         "/api/cases/PanTS_00000035/render_only/" + ("a" * 10000) + ".glb"
@@ -94,6 +167,20 @@ def test_inference_queue_copies_stream_to_server_minted_path(tmp_path: Path):
     assert input_path.endswith(".nii.gz")
     assert Path(input_path).read_bytes() == b"scan"
     assert queue.get_job("../not-a-job") is None
+
+
+def test_full_inference_queue_refuses_before_writing_the_input(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("INFERENCE_QUEUE_MAX_PENDING", "1")
+    queue = InferenceJobQueue(str(tmp_path / "queue"))
+    queue.create_job(io.BytesIO(b"scan"), "ct.nii.gz", session_id="first")
+
+    class UnreadableStream:
+        def read(self, *_args):
+            raise AssertionError("input was copied into a full queue")
+
+    with pytest.raises(QueueFullError):
+        queue.create_job(UnreadableStream(), "ct.nii.gz", session_id="second")
+    assert len(os.listdir(queue.inputs_dir)) == 1
 
 
 def test_private_inference_routes_reject_guests_before_touching_jobs(monkeypatch):

@@ -118,17 +118,25 @@ def providers():
     }), 200
 
 
+def _not_configured_redirect(provider: str):
+    """A browser navigation can't show a JSON body, so a provider this site has
+    no credentials for goes back to the page with a message the popup shows."""
+    label = "GitHub" if provider == "github" else "Google"
+    return _redirect_with_error(f"{label} sign in isn't available on this site.")
+
+
 @oauth_blueprint.route("/auth/oauth/<provider>", methods=["GET"])
 def oauth_start(provider):
     if provider not in ("google", "github"):
         return jsonify({"error": "Unknown provider"}), 404
-    if not _provider_configured(provider):
-        return jsonify({"error": f"{provider} sign-in isn't configured"}), 503
 
     # Remember where to return the browser after the callback. Stored in the
     # Flask session (same place Authlib keeps its `state`) so it survives the
     # provider round-trip; sanitized on the way back out in the callback.
     session["oauth_next"] = _safe_next(request.args.get("next"))
+
+    if not _provider_configured(provider):
+        return _not_configured_redirect(provider)
 
     client = oauth.create_client(provider)
     return client.authorize_redirect(_callback_url(provider))
@@ -139,7 +147,7 @@ def oauth_callback(provider):
     if provider not in ("google", "github"):
         return jsonify({"error": "Unknown provider"}), 404
     if not _provider_configured(provider):
-        return jsonify({"error": f"{provider} sign-in isn't configured"}), 503
+        return _not_configured_redirect(provider)
 
     client = oauth.create_client(provider)
     try:
