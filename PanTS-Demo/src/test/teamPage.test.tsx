@@ -1,8 +1,15 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../contexts/authContext";
 import TeamPage from "../routes/TeamPage";
+
+// The site header reads the auth context, whose sign-in check would otherwise
+// go to the network and could settle after the test environment is gone.
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 401 })));
+});
+afterEach(() => vi.unstubAllGlobals());
 
 describe("team page", () => {
   it("links the two verified profiles and leaves the other cards unlinked", () => {

@@ -22,7 +22,7 @@ afterEach(() => {
 });
 
 describe("landing hero copy", () => {
-  it("shows the subtitle under the wordmark and the overview under the stats row", () => {
+  it("is one screen: wordmark, subtitle, two ways in, the stats row, and nothing after it", () => {
     render(
       <AuthProvider>
         <MemoryRouter>
@@ -32,11 +32,12 @@ describe("landing hero copy", () => {
     );
     const subtitle = screen.getByText(LANDING_SUBTITLE);
     expect(subtitle.previousElementSibling?.tagName).toBe("H1");
-    const overview = screen.getByText(LANDING_OVERVIEW);
-    // Directly after the stats row, not between subtitle and stats.
-    expect(overview.previousElementSibling?.textContent).toContain("CT Volumes");
-    expect(overview.nextElementSibling).toBeNull();
-    // The nonclinical sentence lives in the footer, not in the paragraph.
-    expect(overview.textContent).not.toMatch(/nonclinical|research use only/i);
+    // The overview paragraph was dropped to keep the hero clean.
+    expect(screen.queryByText(LANDING_OVERVIEW)).not.toBeInTheDocument();
+    const stats = screen.getByText("CT volumes").closest("dl");
+    expect(stats).not.toBeNull();
+    expect(stats?.nextElementSibling).toBeNull();
+    // The nonclinical sentence lives in the footer, never in the hero.
+    expect(stats?.parentElement?.textContent).not.toMatch(/nonclinical|research use only/i);
   });
 });

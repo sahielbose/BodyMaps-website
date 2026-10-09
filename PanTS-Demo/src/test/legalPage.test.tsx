@@ -1,15 +1,26 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AuthProvider } from "../contexts/authContext";
 import LegalPage from "../routes/LegalPage";
 import { CONTACT_URL } from "../helpers/copy";
 
 const renderLegal = (kind: "terms" | "privacy") =>
+  // The legal pages carry the site header, which reads the auth context.
   render(
-    <MemoryRouter>
-      <LegalPage kind={kind} />
-    </MemoryRouter>,
+    <AuthProvider>
+      <MemoryRouter>
+        <LegalPage kind={kind} />
+      </MemoryRouter>
+    </AuthProvider>,
   );
+
+// The site header reads the auth context, whose sign-in check would otherwise
+// go to the network and could settle after the test environment is gone.
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 401 })));
+});
+afterEach(() => vi.unstubAllGlobals());
 
 describe("legal pages", () => {
   it("terms: provisional status line, every section, nonclinical framing, contact route", () => {

@@ -12,8 +12,10 @@ type Member = {
 };
 
 // preload only the first member's photo to ensure it loads quickly, improving performance.
+// Called during render (not at module scope) so the hint only fires when the
+// team page actually shows — at module scope it ran on any page that pulled in
+// this chunk and logged an unused-preload warning everywhere else.
 const ZHOU_PHOTO = "/headshots/zongwei-zhou.webp";
-preload(ZHOU_PHOTO, { as: "image", fetchPriority: "high" });
 
 // .webp images are used for better compression and faster loading times. Also, be sure to use small image sizes.
 const MEMBERS: Member[] = [
@@ -121,6 +123,7 @@ function MemberCard({
 }
 
 export default function TeamPage() {
+  preload(ZHOU_PHOTO, { as: "image", fetchPriority: "high" });
   return (
     <div className={styles.page}>
       <Header />

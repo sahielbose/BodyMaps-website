@@ -1,156 +1,271 @@
-/* ===== LandingPage.module.css ===== */
+/* ===== LandingPage.module.css =====
+   One screen on white: the wordmark, one line, two ways in, four numbers.
+   Ink text, JHU blue for actions and the wordmark only. The entrance is
+   opacity and transform only, and none of it runs for reduced motion.
+   Type is in rem so it grows with the reader's default text size, and
+   everything shrinks to fit down to a 280px screen. */
 
-/* ---------- Keyframes ---------- */
-@keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(14px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-/* ---------- Root container ---------- */
-/* Theme: BodyMaps brand tokens — ink primary (fills/CTAs), orange strictly as accent. */
 .root {
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --text-2: #6e6e73;
+  --hairline: rgba(15, 23, 42, 0.1);
+  --blue: #002d72;
+  --blue-hover: #0a3d8f;
+
   position: fixed;
   inset: 0;
-  background: #ffffff;
   display: flex;
   flex-direction: column;
   overflow-x: hidden;
-  overflow-y: auto; /* short viewports scroll instead of clipping the hero */
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  color: #111111;
+  overflow-y: auto;
+  background: #ffffff;
+  color: var(--ink);
+  font-family: var(--font-sans);
 }
 
-.statGroup {
+/* A soft edge under the nav: on a screen too short for the hero, whatever
+   scrolls up to the nav dissolves into the page instead of meeting it at a
+   hard line. It takes no space and never catches a click, and tucks a few
+   pixels under the nav, whose real height varies by a pixel or two. */
+.headerFade {
+  position: sticky;
+  top: calc(var(--header-h) - 4px);
+  z-index: calc(var(--z-sidebar) - 1);
+  flex: none;
+  height: 28px;
+  margin-top: -4px;
+  margin-bottom: -24px;
+  background: linear-gradient(#ffffff, rgba(255, 255, 255, 0));
+  pointer-events: none;
+}
+
+.main {
+  flex: 1 0 auto;
   display: flex;
-  align-items: stretch;
+}
+/* The overview is one screen, so the footer simply ends it. Riding the
+   bottom edge (as it does on the long pages) would cover the stats on a
+   short window. */
+.root > footer {
+  position: relative;
 }
 
-/* ---------- Centered Hero ---------- */
+/* ---------- Hero ---------- */
+/* Centred in the space between the nav and the footer, sitting a little
+   above the middle (more room below than above), where the eye expects it. */
 .hero {
   flex: 1;
-  min-height: 0;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  padding: clamp(32px, 6vh, 64px) 24px clamp(56px, 11vh, 120px);
   text-align: center;
-  padding: 24px;
-  padding-bottom: 100px;
-  animation: fadeInUp 0.7s cubic-bezier(.2,.8,.2,1) both;
 }
-.heroTitle {
-  font-size: clamp(64px, 12vw, 132px);
-  font-weight: 700;
-  color: #002D72;
-  letter-spacing: -0.04em;
-  line-height: 1;
+.hero > * {
+  animation: heroIn 1.1s var(--ease) both;
+  animation-delay: calc(80ms + var(--i, 0) * 90ms);
+}
+@keyframes heroIn {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 20px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 12vw between 4rem and 8.25rem (64px and 132px at the default size), but
+   never wider than the screen: the word is 4.46em wide, so below about 340px
+   it scales with the width instead (the 48px is the hero's side padding plus
+   a little air). */
+.wordmark {
   margin: 0;
-}
-.heroTitleAlt {
+  font-size: min(clamp(4rem, 12vw, 8.25rem), calc((100vw - 48px) / 4.6));
+  font-weight: 700;
+  letter-spacing: -0.045em;
+  line-height: 0.95;
   color: #111111;
 }
-.heroSubtitle {
-  font-size: clamp(20px, 2.4vw, 30px);
-  font-weight: 400;
-  color: #8f8f8f;
-  letter-spacing: -0.01em;
-  margin: 22px 0 0;
+.wordmarkBody {
+  color: var(--blue);
 }
-/* One short paragraph so a first-time visitor knows what this is. Sits under
-   the stats row; secondary to the hero on purpose (small, muted, narrow). */
-.heroOverview {
-  max-width: 60ch;
-  margin: 36px auto 0;
-  font-size: clamp(15px, 1.15vw, 17px);
+.subtitle {
+  margin: 22px 0 0;
+  font-size: clamp(1.25rem, 1rem + 0.9vw, 1.75rem);
   font-weight: 400;
-  line-height: 1.55;
-  color: var(--muted);
-  letter-spacing: -0.005em;
+  letter-spacing: -0.012em;
+  line-height: 1.3;
+  color: var(--text-2);
+  text-wrap: balance;
 }
 
-/* ---------- Hero Stats Row ---------- */
-.heroStats {
+.actions {
   display: flex;
-  align-items: stretch;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: center;
+  gap: 16px 32px;
   margin-top: 40px;
 }
-.heroStatItem {
-  display: flex;
-  flex-direction: column;
+.primary {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  padding: 0 44px;
+  min-height: 2.875rem;
+  padding: 0 24px;
+  border-radius: 4px;
+  background: var(--blue);
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color 0.2s ease;
 }
-.heroStatValue {
-  font-size: 34px;
+.primary:hover {
+  background: var(--blue-hover);
+  color: #ffffff;
+}
+.textLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 2.5rem;
+  padding: 0 4px;
+  color: var(--blue);
+  font-size: 1rem;
+  font-weight: 500;
+  text-decoration: none;
+}
+.textLink:hover {
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+.chevron {
+  width: 7px;
+  height: 12px;
+  flex: none;
+  transition: transform 0.3s var(--ease);
+}
+.textLink:hover .chevron {
+  transform: translateX(3px);
+}
+.primary:focus-visible,
+.textLink:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+/* ---------- Stats ---------- */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, auto);
+  margin: 72px 0 0;
+  padding: 0;
+}
+/* The label comes first in the markup (a dt before its dd) and is drawn
+   under the number. Packed to the top, so the numbers in a row share one
+   line even when a label wraps on a phone. The divider is drawn by a
+   pseudo-element of fixed height, not a border, so a label that wraps to two
+   lines does not make one divider taller than the next. */
+.stat {
+  position: relative;
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 0 36px;
+}
+.stat::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 3.5rem;
+  border-left: 1px solid rgba(0, 0, 0, 0.08);
+}
+.stat:first-child::before {
+  display: none;
+}
+.statValue {
+  display: grid;
+  justify-items: center;
+  margin: 0;
+  font-size: 2.125rem;
   font-weight: 700;
-  color: #002D72;
   letter-spacing: -0.02em;
   line-height: 1.1;
+  color: var(--blue);
+  font-variant-numeric: tabular-nums;
 }
-.heroStatLabel {
-  font-size: 11px;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  color: #6a6a6a;
+/* The final figure and the counting one share a cell: the final one (read
+   by screen readers, never seen) holds the width, so the row never shifts
+   while the digits count. */
+.statFinal,
+.statCount {
+  grid-area: 1 / 1;
+}
+.statFinal {
+  opacity: 0;
+}
+.statLabel {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  margin-top: 8px;
-}
-.heroStatDivider {
-  width: 1px;
-  align-self: center;
-  height: 48px;
-  background: rgba(0,0,0,.08);
+  text-wrap: balance;
+  color: var(--text-2);
 }
 
-/* ---------- Hero Actions ---------- */
-.heroActions {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  margin-top: 44px;
-}
-.btnPrimary {
-  padding: 16px 44px;
-  border-radius: 14px;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  font-size: 16px;
-  font-weight: 600;
-  cursor: pointer;
-  background: #002D72;
-  color: #ffffff;
-  border: 1px solid #002D72;
-  transition: all 0.2s ease;
-}
-.btnPrimary:hover {
-  background: #00399a;
-  border-color: #00399a;
-  transform: translateY(-1px);
-}
-.btnSecondary {
-  padding: 16px 44px;
-  border-radius: 14px;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  font-size: 16px;
-  font-weight: 600;
-  cursor: pointer;
-  background: transparent;
-  color: #002D72;
-  border: 1px solid rgba(0,45,114,.35);
-  transition: all 0.2s ease;
-}
-.btnSecondary:hover {
-  background: rgba(0,45,114,.06);
-  border-color: rgba(0,45,114,.55);
-  transform: translateY(-1px);
+/* Phones and small tablets. The vertical spacing gives way with the
+   window's height, so the whole screen, footer included, fits on common
+   phones (360x740, 375x667) instead of cutting the footer at the fold. */
+@media (max-width: 900px) {
+  .hero {
+    padding: clamp(24px, 5vh, 40px) 20px clamp(32px, 7vh, 72px);
+  }
+  .subtitle {
+    margin-top: clamp(14px, 2.6vh, 22px);
+  }
+  .actions {
+    column-gap: clamp(20px, 5vw, 32px);
+    margin-top: clamp(28px, 4.5vh, 40px);
+  }
+  /* Two equal columns, so the divider sits on the same centre line as the
+     wordmark and the buttons; the grid never grows past the screen, and a
+     long label wraps rather than pushing it wider. */
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-width: 100%;
+    row-gap: clamp(20px, 3.5vh, 28px);
+    margin-top: clamp(32px, 6vh, 56px);
+  }
+  .stat {
+    padding: 0 clamp(8px, 4vw, 28px);
+  }
+  .stat:nth-child(odd)::before {
+    display: none;
+  }
+  .statValue {
+    font-size: clamp(1.5rem, 8vw, 2.125rem);
+  }
 }
 
-/* ---------- Responsive ---------- */
-@media (max-width: 720px) {
-  .heroStats { flex-wrap: wrap; gap: 8px 0; }
-  .heroStatItem { padding: 0 26px; }
-  .heroStatValue { font-size: 26px; }
-  .heroActions { flex-direction: column; width: 100%; max-width: 320px; }
-  .btnPrimary, .btnSecondary { width: 100%; }
+/* ---------- Reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .hero > * {
+    animation: none;
+  }
+  .primary,
+  .chevron {
+    transition: none;
+  }
+  .textLink:hover .chevron {
+    transform: none;
+  }
 }

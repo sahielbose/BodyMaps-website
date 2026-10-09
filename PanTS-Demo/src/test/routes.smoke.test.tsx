@@ -7,6 +7,7 @@ import { AuthProvider, useAuth } from "../contexts/authContext";
 import SettingsPage from "../routes/Settings";
 import ProfileSettings from "../routes/Settings/ProfileSettings";
 import LandingPage from "../routes/LandingPage";
+import { LANDING_SUBTITLE } from "../helpers/copy";
 import Homepage from "../routes/Homepage";
 import UploadPage from "../routes/UploadPage";
 
@@ -41,8 +42,11 @@ describe("route smoke tests", () => {
   it("LandingPage (Overview) renders", () => {
     renderRoute(<LandingPage />);
     expect(
-      screen.getByText("The intelligence layer for medical imaging AI"),
+      screen.getByRole("heading", { level: 1, name: "BodyMaps" }),
     ).toBeInTheDocument();
+    expect(screen.getByText(LANDING_SUBTITLE)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Browse the dataset" })).toHaveAttribute("href", "/dashboard");
+    expect(screen.getByText("Medical centers")).toBeInTheDocument();
   });
 
   it("Homepage (Dashboard) renders", async () => {
