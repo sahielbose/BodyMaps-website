@@ -1,5 +1,6 @@
 import { IconCheck } from "@tabler/icons-react";
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "../../contexts/authContext";
 import {
 	canChangePlan,
@@ -9,12 +10,14 @@ import {
 	type PlanId,
 } from "../../helpers/accountProfile";
 import { track } from "../../helpers/analytics";
+import { scrollBehavior } from "../../helpers/motion";
+import { msUntil } from "../../helpers/resetTime";
 import { useSettings } from "./context";
 
 /** "in 6 hrs" / "in 24 min" from an ISO timestamp, or null once it's passed. */
 const untilLabel = (iso: string | null): string | null => {
 	if (!iso) return null;
-	const mins = Math.round((new Date(iso).getTime() - Date.now()) / 60000);
+	const mins = Math.round(msUntil(iso) / 60000);
 	if (mins <= 0) return null;
 	if (mins < 60) return `Resets in ${mins} min`;
 	const hours = Math.round(mins / 60);
@@ -33,7 +36,11 @@ const UsageBar: React.FC<{
 	const spent = limit !== null && used >= limit;
 	// resets_at is null until the first event lands, so an untouched allowance
 	// would otherwise show a bare label with no hint of how the window works.
-	const reset = untilLabel(resetsAt) ?? (limit === null ? null : idleNote);
+	// A window that has passed but not been re-read yet has just reset; the idle
+	// note would claim the clock hasn't started while the bar still reads full.
+	const reset =
+		untilLabel(resetsAt) ??
+		(limit === null ? null : resetsAt ? "Just reset" : idleNote);
 	return (
 		<div className="set-usage">
 			<span className="set-usage-label">
@@ -65,9 +72,56 @@ const UsageBar: React.FC<{
 // say so. Admins are the exception at both ends: they can still move an account
 // between plans, and their own limits are lifted whichever plan they sit on.
 const PlanSettings: React.FC = () => {
-	const { user, usage, setPlan, refreshUsage } = useAuth();
+	const { user, usage, usageFailed, setPlan, refreshUsage } = useAuth();
 	const { busy, run, notify } = useSettings();
 	const [group, setGroup] = useState<PlanGroup>("individual");
+	// Set by the retry button, which is replaced by the bars when the read works.
+	const usageHeading = useRef<HTMLHeadingElement>(null);
+	const retryFocus = useRef(false);
+	// A retry that fails sets usageFailed over true, so without these the row
+	// looks the same before, during and after the press.
+	const [retrying, setRetrying] = useState(false);
+	const [retried, setRetried] = useState(false);
+	useEffect(() => {
+		if (usage) setRetried(false);
+		if (retryFocus.current && usage) {
+			retryFocus.current = false;
+			// Only when focus fell with the retry row; a retry that failed earlier
+			// must not pull focus from wherever the person is working now.
+			const active = document.activeElement;
+			if (!active || active === document.body) usageHeading.current?.focus();
+		}
+	}, [usage]);
+
+	// The figures from sign-in go stale as soon as the assistant is used or a
+	// window resets, so every visit to this page reads them again.
+	useEffect(() => {
+		refreshUsage();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
+	// The "Resets in N min" labels are computed from the clock at render time, so
+	// nothing would move them while the page sits open. Re-render every 30 s
+	// while a window is running, and read the figures again once one has passed
+	// (once per timestamp, so a server that keeps reporting it can't loop).
+	const [, setTick] = useState(0);
+	const refreshedFor = useRef<string | null>(null);
+	const resetTimes = [usage?.scans.resets_at, usage?.ai_messages.resets_at];
+	const running = resetTimes.filter((t): t is string => !!t);
+	const runningKey = running.join("|");
+	useEffect(() => {
+		if (!runningKey) return;
+		const id = window.setInterval(() => {
+			setTick((n) => n + 1);
+			const passed = runningKey.split("|").filter((t) => msUntil(t) <= 0).join("|");
+			if (passed && refreshedFor.current !== passed) {
+				refreshedFor.current = passed;
+				refreshUsage();
+			}
+		}, 30000);
+		return () => window.clearInterval(id);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [runningKey]);
 
 	if (!user) return null;
 
@@ -93,7 +147,7 @@ const PlanSettings: React.FC = () => {
 						<h2 className="set-plan-name">{planLabel(current)} plan</h2>
 						<p className="set-plan-blurb">
 							{canChange
-								? "Admin access — no limits apply, whatever plan you're on."
+								? "Admin access: no limits apply, whatever plan you're on."
 								: currentPlan?.blurb}
 						</p>
 					</div>
@@ -101,7 +155,7 @@ const PlanSettings: React.FC = () => {
 						type="button"
 						className="set-btn"
 						onClick={() =>
-							document.getElementById("change-plan")?.scrollIntoView({ behavior: "smooth" })
+							document.getElementById("change-plan")?.scrollIntoView({ behavior: scrollBehavior() })
 						}
 					>
 						Change plan
@@ -110,7 +164,7 @@ const PlanSettings: React.FC = () => {
 			</div>
 
 			<div className="set-group">
-				<h2 className="set-heading">Usage</h2>
+				<h2 className="set-heading" ref={usageHeading} tabIndex={-1}>Usage</h2>
 				<p className="set-sub">Rolling 24 hours.</p>
 				{usage ? (
 					<>
@@ -129,6 +183,33 @@ const PlanSettings: React.FC = () => {
 							idleNote="Resets 24h after your first message"
 						/>
 					</>
+				) : usageFailed ? (
+					<div className="set-row">
+						<span className="set-row-label" role="status">
+							{retried && !retrying ? "Still can't load your usage." : "Couldn't load your usage."}
+						</span>
+						<button
+							type="button"
+							className="set-btn"
+							aria-disabled={retrying}
+							onClick={async () => {
+								// aria-disabled keeps focus on the button, so a repeat press
+								// has to be ignored here.
+								if (retrying) return;
+								// The row goes when the bars arrive, so focus follows to the heading.
+								retryFocus.current = true;
+								setRetrying(true);
+								setRetried(true);
+								try {
+									await refreshUsage();
+								} finally {
+									setRetrying(false);
+								}
+							}}
+						>
+							{retrying ? "Trying again…" : "Try again"}
+						</button>
+					</div>
 				) : (
 					<p className="set-sub">Loading…</p>
 				)}
@@ -137,7 +218,7 @@ const PlanSettings: React.FC = () => {
 			<div className="set-group set-plan-picker" id="change-plan">
 				<h2 className="set-heading">Change plan</h2>
 
-				<div className="set-segmented" role="tablist" aria-label="Plan type">
+				<div className="set-segmented" role="group" aria-label="Plan type">
 					{([
 						["individual", "Individual"],
 						["team", "Team and Enterprise"],
@@ -145,8 +226,7 @@ const PlanSettings: React.FC = () => {
 						<button
 							key={id}
 							type="button"
-							role="tab"
-							aria-selected={group === id}
+							aria-pressed={group === id}
 							className={`set-segmented-btn${group === id ? " set-segmented-btn--on" : ""}`}
 							onClick={() => setGroup(id)}
 						>
@@ -164,6 +244,10 @@ const PlanSettings: React.FC = () => {
 						// Pro is earned (verified email + complete profile), never
 						// clicked into - except by admins moving accounts for testing.
 						const lockedPro = p.id === "pro" && !canChange && !isCurrent;
+						// A verified researcher's stored plan is still Free, which is
+						// what this card would write: nothing would change, yet the
+						// banner would say "You're on Free." over a Pro page.
+						const isBase = !canChange && !isCurrent && p.id === user.plan;
 						return (
 							<div
 								key={p.id}
@@ -178,20 +262,35 @@ const PlanSettings: React.FC = () => {
 									{p.price}
 									{p.priceNote && <span className="set-plan-price-note">{p.priceNote}</span>}
 								</div>
-								<button
-									type="button"
-									className={`set-plan-cta${isCurrent ? " set-plan-cta--current" : ""}`}
-									disabled={isCurrent || soon || busy || lockedPro}
-									onClick={() => choose(p.id)}
-								>
-									{isCurrent
-										? "Current plan"
-										: soon
-											? "Coming soon"
-											: lockedPro
-												? "Verify to unlock"
-												: p.cta}
-								</button>
+								{lockedPro ? (
+									// Verification happens on the Profile tab, so the card
+									// links there instead of sitting disabled.
+									<Link to="/account" className="set-plan-cta">
+										Verify to unlock
+									</Link>
+								) : (
+									<button
+										type="button"
+										className={`set-plan-cta${isCurrent ? " set-plan-cta--current" : ""}`}
+										// Not disabled: that would drop keyboard focus from a
+										// person who just pressed Enter on it, and the saved
+										// card then stays "Current plan". Presses while it is
+										// unavailable or a save is in flight are ignored.
+										aria-disabled={isCurrent || soon || busy || isBase || undefined}
+										onClick={() => {
+											if (isCurrent || soon || busy || isBase) return;
+											choose(p.id);
+										}}
+									>
+										{isCurrent
+											? "Current plan"
+											: soon
+												? "Coming soon"
+												: isBase
+													? "Your base plan"
+													: p.cta}
+									</button>
+								)}
 								<ul className="set-plan-points">
 									{/* Every card gets a lead line, including the one that
 									    inherits nothing, so the bullet lists start at the

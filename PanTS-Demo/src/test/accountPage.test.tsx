@@ -1,5 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ReactElement } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -102,7 +104,7 @@ beforeEach(() => {
 			});
 		}
 		if (u.includes("/api/me/jobs") && method === "DELETE") {
-			return json({ deleted: { jobs: 3, files: 5 } });
+			return json({ deleted: { jobs: 2, files: 5, runs: 1 } });
 		}
 		if (u.endsWith("/api/me") && method === "DELETE") {
 			return json({
@@ -275,8 +277,89 @@ describe("verified researcher profile", () => {
 	it("explains what the profile unlocks", async () => {
 		renderAt();
 		expect(
-			await screen.findByText(/complete profile unlocks 10 scans a day/)
+			await screen.findByText(/A verified email and a full profile unlock 10 scans a day/)
 		).toBeInTheDocument();
+	});
+});
+
+describe("signing out", () => {
+	const landing = (
+		<>
+			<div>Landing</div>
+			<AuthModal />
+		</>
+	);
+
+	it("from the page lands on the overview without opening the sign-in popup", async () => {
+		const user = userEvent.setup();
+		renderAt("/account", landing);
+		await user.click(await screen.findByRole("button", { name: "Sign out" }));
+
+		expect(await screen.findByText("Landing")).toBeInTheDocument();
+		await waitFor(() => expect(lastCall("POST", "/api/auth/logout")).toBeTruthy());
+		expect(screen.queryByRole("dialog")).toBeNull();
+	});
+
+	it("from the header's account menu lands on the overview without the popup", async () => {
+		const user = userEvent.setup();
+		renderAt("/account", landing);
+		await screen.findByRole("heading", { name: "Profile" });
+		const trigger = screen.getByRole("button", { name: /test\.user@example\.com/ });
+		await user.click(trigger);
+		const menu = document.getElementById(trigger.getAttribute("aria-controls")!)!;
+		await user.click(within(menu).getByRole("button", { name: "Sign out" }));
+
+		expect(await screen.findByText("Landing")).toBeInTheDocument();
+		expect(screen.queryByRole("dialog")).toBeNull();
+	});
+
+	it("deleting the account lands on the overview without the popup", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/privacy", landing);
+		await user.click((await screen.findByRole("button", { name: "Delete account" })));
+		await user.type(screen.getByLabelText(/Type DELETE to confirm/i), "DELETE");
+		await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+		expect(await screen.findByText("Landing")).toBeInTheDocument();
+		expect(screen.queryByRole("dialog")).toBeNull();
+	});
+
+	it("still asks a visitor who arrives signed out to sign in", async () => {
+		const answer = global.fetch;
+		global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) =>
+			String(url).includes("/api/auth/me") ? json({ user: null }) : answer(url, init)
+		) as unknown as typeof fetch;
+		renderAt("/account", landing);
+
+		expect(await screen.findByText("Landing")).toBeInTheDocument();
+		expect(await screen.findByRole("dialog", { name: "Sign in" })).toBeInTheDocument();
+	});
+});
+
+describe("profile layout", () => {
+	it("lets a long email break inside the card on a phone instead of overflowing it", async () => {
+		renderAt("/account");
+		// The email row's value; the header's account button shows it as well.
+		expect(await screen.findByText(USER.email, { selector: ".set-row-value" })).toBeInTheDocument();
+
+		const css = readFileSync(resolve(process.cwd(), "src/routes/Settings/Settings.css"), "utf8");
+		const start = css.indexOf(".set-row-value {");
+		const rule = css.slice(start, css.indexOf("}", start));
+		expect(rule).toMatch(/min-width:\s*0/);
+		expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
+	});
+
+	it("slides the email switch's knob with the track instead of jumping it across", () => {
+		const css = readFileSync(resolve(process.cwd(), "src/routes/Settings/Settings.css"), "utf8");
+		const ruleOf = (selector: string) => {
+			const start = css.indexOf(`${selector} {`);
+			expect(start).toBeGreaterThanOrEqual(0);
+			return css.slice(start, css.indexOf("}", start));
+		};
+		// justify-content can't be animated, so the on state must not move the knob with it.
+		expect(ruleOf(".set-switch--on")).not.toMatch(/justify-content/);
+		expect(ruleOf(".set-switch-knob")).toMatch(/transition:\s*transform/);
+		expect(ruleOf(".set-switch--on .set-switch-knob")).toMatch(/transform:\s*translateX\(17px\)/);
 	});
 });
 
@@ -288,6 +371,46 @@ describe("plan", () => {
 		expect(screen.getByText("0 of 10")).toBeInTheDocument();
 	});
 
+	it("says so when usage can't be loaded, and can try again", async () => {
+		let usageDown = true;
+		const answer = global.fetch;
+		global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) =>
+			usageDown && String(url).includes("/api/me/usage")
+				? json({ error: "Database is busy" }, false, 500)
+				: answer(url, init)
+		) as unknown as typeof fetch;
+		const user = userEvent.setup();
+		renderAt("/account/plan");
+
+		expect(await screen.findByText("Couldn't load your usage.")).toBeInTheDocument();
+		expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+
+		usageDown = false;
+		await user.click(screen.getByRole("button", { name: "Try again" }));
+		expect(await screen.findByText("0 of 1")).toBeInTheDocument();
+		expect(screen.queryByText("Couldn't load your usage.")).not.toBeInTheDocument();
+	});
+
+	it("keeps the usage it has when a later refresh fails", async () => {
+		USER.roles = ["admin"];
+		let usageDown = false;
+		const answer = global.fetch;
+		global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) =>
+			usageDown && String(url).includes("/api/me/usage")
+				? json({}, false, 503)
+				: answer(url, init)
+		) as unknown as typeof fetch;
+		const user = userEvent.setup();
+		renderAt("/account/plan");
+		expect(await screen.findByText("0 of 1")).toBeInTheDocument();
+
+		usageDown = true;
+		await user.click(screen.getByRole("button", { name: "Choose Pro" }));
+		expect(await screen.findByText("You're on Pro.")).toBeInTheDocument();
+		expect(screen.getByText("0 of 1")).toBeInTheDocument();
+		expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+	});
+
 	it("splits the plans into Individual and Team like the reference sites", async () => {
 		const user = userEvent.setup();
 		renderAt("/account/plan");
@@ -297,24 +420,47 @@ describe("plan", () => {
 		expect(screen.getByRole("heading", { name: "Pro" })).toBeInTheDocument();
 		expect(screen.queryByRole("heading", { name: "Team" })).not.toBeInTheDocument();
 
-		await user.click(screen.getByRole("tab", { name: "Team and Enterprise" }));
+		await user.click(screen.getByRole("button", { name: "Team and Enterprise" }));
 		expect(await screen.findByRole("heading", { name: "Team" })).toBeInTheDocument();
 		expect(screen.getByRole("heading", { name: "Enterprise" })).toBeInTheDocument();
 		expect(screen.queryByRole("heading", { name: "Pro" })).not.toBeInTheDocument();
 	});
 
+	it("jumps to the picker without a smooth scroll for reduced motion", async () => {
+		const originalMatchMedia = window.matchMedia;
+		window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+			matches: query.includes("prefers-reduced-motion"),
+			media: query,
+			addEventListener: vi.fn(),
+			removeEventListener: vi.fn(),
+			addListener: vi.fn(),
+			removeListener: vi.fn(),
+		})) as unknown as typeof window.matchMedia;
+		const scrollIntoView = vi.mocked(window.HTMLElement.prototype.scrollIntoView);
+		scrollIntoView.mockClear();
+		try {
+			const user = userEvent.setup();
+			renderAt("/account/plan");
+			await user.click(await screen.findByRole("button", { name: "Change plan" }));
+			expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "auto" });
+		} finally {
+			window.matchMedia = originalMatchMedia;
+		}
+	});
+
 	it("marks the plan you're on and won't let you re-pick it", async () => {
 		renderAt("/account/plan");
 		await screen.findByRole("heading", { name: "Change plan" });
-		expect(screen.getByRole("button", { name: "Current plan" })).toBeDisabled();
+		expect(screen.getByRole("button", { name: "Current plan" })).toHaveAttribute("aria-disabled", "true");
 	});
 
 	it("locks Pro behind verification, and won't send anything", async () => {
 		const user = userEvent.setup();
 		renderAt("/account/plan");
 
-		const cta = await screen.findByRole("button", { name: "Verify to unlock" });
-		expect(cta).toBeDisabled();
+		// A link to the Profile tab, where verification happens, not a dead button.
+		const cta = await screen.findByRole("link", { name: "Verify to unlock" });
+		expect(cta).toHaveAttribute("href", "/account");
 		await user.click(cta);
 		expect(lastCall("POST", "/api/me/plan")).toBeUndefined();
 	});
@@ -357,18 +503,54 @@ describe("history", () => {
 	const day = 24 * 60 * 60 * 1000;
 	const entry = (over: Partial<RecentUpload>): RecentUpload => ({
 		sessionId: "s", label: "ct.nii.gz", model: "LesionSegmenter",
-		status: "Completed", timestamp: Date.now(), ...over,
+		status: "Completed", timestamp: Date.now(), ownerId: "u1", ...over,
 	});
 
-	it("lists only scans older than a day", async () => {
+	it("lists scans older than a day and scans already opened, and says so", async () => {
 		localStorage.setItem(RECENT_UPLOADS_KEY, JSON.stringify([
 			entry({ sessionId: "new", label: "today.nii.gz", timestamp: Date.now() - 60_000 }),
+			entry({ sessionId: "seen", label: "opened.nii.gz", timestamp: Date.now() - 60_000, viewed: true }),
 			entry({ sessionId: "old", label: "lastweek.nii.gz", timestamp: Date.now() - 7 * day }),
 		]));
 
 		renderAt("/account/history");
 		expect(await screen.findByText("lastweek.nii.gz")).toBeInTheDocument();
+		expect(screen.getByText("opened.nii.gz")).toBeInTheDocument();
 		expect(screen.queryByText("today.nii.gz")).not.toBeInTheDocument();
+		// The page describes the same rule the list follows (splitByAge).
+		expect(screen.getByText(/Scans you've already opened, and any older than a day/)).toBeInTheDocument();
+	});
+
+	it("names each row's View and Remove after its scan", async () => {
+		localStorage.setItem(RECENT_UPLOADS_KEY, JSON.stringify([
+			entry({ sessionId: "a", label: "lastweek.nii.gz", timestamp: Date.now() - 7 * day }),
+			entry({ sessionId: "b", label: "lastmonth.nii.gz", timestamp: Date.now() - 30 * day }),
+		]));
+		renderAt("/account/history");
+		expect(await screen.findByRole("button", { name: "View lastweek.nii.gz" })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Remove lastweek.nii.gz" })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Remove lastmonth.nii.gz" })).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+	});
+
+	it("shows only this account's scans, and Remove cannot reach another account's", async () => {
+		const user = userEvent.setup();
+		localStorage.setItem(RECENT_UPLOADS_KEY, JSON.stringify([
+			entry({ sessionId: "mine", label: "mine.nii.gz", timestamp: Date.now() - 7 * day }),
+			entry({ sessionId: "theirs", label: "theirs.nii.gz", timestamp: Date.now() - 7 * day, ownerId: "u2" }),
+			entry({ sessionId: "nobodys", label: "nobodys.nii.gz", timestamp: Date.now() - 7 * day, ownerId: undefined }),
+		]));
+
+		renderAt("/account/history");
+		expect(await screen.findByText("mine.nii.gz")).toBeInTheDocument();
+		expect(screen.queryByText("theirs.nii.gz")).not.toBeInTheDocument();
+		expect(screen.queryByText("nobodys.nii.gz")).not.toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: "Remove mine.nii.gz" }));
+		expect((JSON.parse(localStorage.getItem(RECENT_UPLOADS_KEY) ?? "[]") as RecentUpload[]).map((u) => u.sessionId)).toEqual([
+			"theirs",
+			"nobodys",
+		]);
 	});
 
 	it("says so when there's nothing old enough yet", async () => {
@@ -382,14 +564,20 @@ describe("history", () => {
 
 describe("export", () => {
 	it("downloads the account details from the server rather than rebuilding them locally", async () => {
+		// jsdom can't navigate to the blob link, and its "not implemented"
+		// error fires on a timer that sometimes lands as an unhandled error
+		// and fails the whole run, so capture the click instead.
+		const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
 		const user = userEvent.setup();
 		renderAt("/account/privacy");
 
-		await user.click(await screen.findByRole("button", { name: "Export" }));
+		await user.click(await screen.findByRole("button", { name: "Export account details" }));
 
 		await waitFor(() => expect(lastCall("GET", "/api/me/export")).toBeTruthy());
 		expect(URL.createObjectURL).toHaveBeenCalled();
 		expect(await screen.findByText(/Your account details have been downloaded/i)).toBeInTheDocument();
+		expect(click).toHaveBeenCalledTimes(1);
+		click.mockRestore();
 	});
 });
 
@@ -399,10 +587,10 @@ describe("delete scan history", () => {
 		renderAt("/account/privacy");
 
 		await user.click(
-			(await screen.findAllByRole("button", { name: "Delete" }))[0]
+			(await screen.findByRole("button", { name: "Delete scan history" }))
 		);
 		const confirm = screen.getByRole("button", { name: "Confirm" });
-		expect(confirm).toBeDisabled();
+		expect(confirm).toHaveAttribute("aria-disabled", "true");
 		expect(lastCall("DELETE", "/api/me/jobs")).toBeUndefined();
 
 		await user.type(screen.getByLabelText(/Type CLEAR to confirm/i), "CLEAR");
@@ -412,16 +600,72 @@ describe("delete scan history", () => {
 		expect(await screen.findByText(/Removed 3 scans and their results/i)).toBeInTheDocument();
 	});
 
+	it("counts and clears only this account's scans from the browser's list", async () => {
+		const user = userEvent.setup();
+		global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/api/me/jobs") && (init?.method ?? "GET") === "DELETE") {
+				return json({ deleted: { jobs: 0, files: 0, runs: 0 } });
+			}
+			if (u.includes("/api/auth/me")) return json({ user: { ...USER } });
+			if (u.includes("/api/me/usage")) return json(USAGE);
+			if (u.includes("/api/me/runs/owned")) return json({ owned: [] }); // "nobodys" is not this account's
+			return json({});
+		}) as unknown as typeof fetch;
+		const run = (sessionId: string, ownerId?: string): RecentUpload => ({
+			sessionId, label: sessionId, model: "ePAI", status: "Completed", timestamp: Date.now(), ownerId,
+		});
+		localStorage.setItem(RECENT_UPLOADS_KEY, JSON.stringify([run("mine", "u1"), run("theirs", "u2"), run("nobodys")]));
+		renderAt("/account/privacy");
+
+		await user.click((await screen.findByRole("button", { name: "Delete scan history" })));
+		await user.type(screen.getByLabelText(/Type CLEAR to confirm/i), "CLEAR");
+		await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+		expect(await screen.findByText("Removed 1 scan and their results.")).toBeInTheDocument();
+		expect((JSON.parse(localStorage.getItem(RECENT_UPLOADS_KEY) ?? "[]") as RecentUpload[]).map((u) => u.sessionId)).toEqual([
+			"theirs",
+			"nobodys",
+		]);
+	});
+
 	it("keeps you signed in", async () => {
 		const user = userEvent.setup();
 		renderAt("/account/privacy");
 
-		await user.click((await screen.findAllByRole("button", { name: "Delete" }))[0]);
+		await user.click((await screen.findByRole("button", { name: "Delete scan history" })));
 		await user.type(screen.getByLabelText(/Type CLEAR to confirm/i), "CLEAR");
 		await user.click(screen.getByRole("button", { name: "Confirm" }));
 
 		await waitFor(() => expect(lastCall("DELETE", "/api/me/jobs")).toBeTruthy());
 		expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+	});
+});
+
+describe("privacy confirmation", () => {
+	it("names what it confirms, and Escape closes it back to the button that opened it", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/privacy");
+		const deleteAccount = (await screen.findByRole("button", { name: "Delete account" }));
+		await user.click(deleteAccount);
+
+		const dialog = screen.getByRole("alertdialog", { name: "Delete your account?" });
+		expect(dialog.contains(document.activeElement)).toBe(true);
+		await user.keyboard("{Escape}");
+		expect(screen.queryByRole("alertdialog")).toBeNull();
+		expect(document.activeElement).toBe(deleteAccount);
+		expect(lastCall("DELETE", "/api/me")).toBeUndefined();
+	});
+
+	it("Cancel hands focus back to the Delete button that opened it", async () => {
+		const user = userEvent.setup();
+		renderAt("/account/privacy");
+		const deleteHistory = (await screen.findByRole("button", { name: "Delete scan history" }));
+		await user.click(deleteHistory);
+
+		const dialog = screen.getByRole("alertdialog", { name: "Delete your scan history?" });
+		await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+		expect(document.activeElement).toBe(deleteHistory);
 	});
 });
 
@@ -434,18 +678,18 @@ describe("delete account", () => {
 		await screen.findByRole("heading", { name: "Your data" });
 		expect(screen.queryByText(/Sign back in before then/i)).not.toBeInTheDocument();
 
-		await user.click(screen.getAllByRole("button", { name: "Delete" })[1]);
+		await user.click(screen.getByRole("button", { name: "Delete account" }));
 		expect(await screen.findByText(/Sign back in before then/i)).toBeInTheDocument();
 
 		await user.type(screen.getByLabelText(/Type DELETE to confirm/i), "CLEAR");
-		expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+		expect(screen.getByRole("button", { name: "Confirm" })).toHaveAttribute("aria-disabled", "true");
 	});
 
 	it("calls the endpoint and leaves settings once confirmed", async () => {
 		const user = userEvent.setup();
 		renderAt("/account/privacy");
 
-		await user.click((await screen.findAllByRole("button", { name: "Delete" }))[1]);
+		await user.click((await screen.findByRole("button", { name: "Delete account" })));
 		await user.type(screen.getByLabelText(/Type DELETE to confirm/i), "DELETE");
 		await user.click(screen.getByRole("button", { name: "Confirm" }));
 
@@ -457,7 +701,7 @@ describe("delete account", () => {
 		const user = userEvent.setup();
 		renderAt("/account/privacy", <AuthModal />);
 
-		await user.click((await screen.findAllByRole("button", { name: "Delete" }))[1]);
+		await user.click((await screen.findByRole("button", { name: "Delete account" })));
 		await user.type(screen.getByLabelText(/Type DELETE to confirm/i), "DELETE");
 		await user.click(screen.getByRole("button", { name: "Confirm" }));
 
@@ -471,7 +715,7 @@ describe("success notices", () => {
 	// Clearing scan history is the fixture: the one Privacy action that ends in
 	// a success notice without signing you out.
 	const clearHistory = async (user: ReturnType<typeof userEvent.setup>) => {
-		await user.click((await screen.findAllByRole("button", { name: "Delete" }))[0]);
+		await user.click((await screen.findByRole("button", { name: "Delete scan history" })));
 		await user.type(screen.getByLabelText(/Type CLEAR to confirm/i), "CLEAR");
 		await user.click(screen.getByRole("button", { name: "Confirm" }));
 	};
@@ -489,6 +733,27 @@ describe("success notices", () => {
 			expect(screen.queryByText(/Removed 3 scans and their results/i)).not.toBeInTheDocument()
 		);
 		vi.useRealTimers();
+	});
+
+	it("stay with the section they came from", async () => {
+		global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/api/me/jobs") && (init?.method ?? "GET") === "DELETE") {
+				return json({ error: "Storage is offline" }, false, 503);
+			}
+			if (u.includes("/api/auth/me")) return json({ user: { ...USER } });
+			if (u.includes("/api/me/usage")) return json(USAGE);
+			return json({});
+		}) as unknown as typeof fetch;
+		const user = userEvent.setup();
+		renderAt("/account/privacy");
+		await clearHistory(user);
+		expect(await screen.findByText(/Storage is offline/i)).toBeInTheDocument();
+
+		await user.click(screen.getByRole("link", { name: "Plan" }));
+		expect(await screen.findByRole("heading", { name: "Usage" })).toBeInTheDocument();
+		expect(screen.queryByText(/Storage is offline/i)).not.toBeInTheDocument();
+		expect(screen.getByRole("alert")).toBeEmptyDOMElement();
 	});
 
 	it("leaves errors up, since those still need acting on", async () => {

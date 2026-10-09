@@ -13,9 +13,15 @@
 	/* One height for every text field, select, date field and segmented toggle,
 	   so a row of mixed controls lines up. */
 	--set-control-h: 36px;
+	/* Column layout so the shared SiteFooter sits at the bottom of the page. */
+	display: flex;
+	flex-direction: column;
 }
 
 .set-main {
+	flex: 1;
+	width: 100%;
+	box-sizing: border-box;
 	max-width: 1000px;
 	margin: 0 auto;
 	padding: 28px 24px 80px;
@@ -40,7 +46,8 @@
 	flex-direction: column;
 	gap: 2px;
 	position: sticky;
-	top: 24px;
+	/* Clear the sticky site header. */
+	top: calc(var(--header-h, 64px) + 24px);
 }
 .set-nav-item {
 	display: flex;
@@ -69,6 +76,16 @@
 	color: #002d72;
 	font-weight: 600;
 }
+/* Every label reserves its bold width, so the active tab getting heavier
+   doesn't nudge the tabs after it when the row sizes to its text. */
+.set-nav-item span::after {
+	content: attr(data-label);
+	display: block;
+	height: 0;
+	overflow: hidden;
+	visibility: hidden;
+	font-weight: 600;
+}
 
 /* ── Panel ── */
 .set-panel {
@@ -78,19 +95,35 @@
 	padding: 26px 28px;
 }
 
+/* The banners follow the reader down the panel, just under the sticky site
+   header: a field saved or refused far below the top would otherwise report
+   into a banner scrolled out of view. One wrapper holds both so a notice and an
+   error never stack on the same spot. */
+.set-banners {
+	position: sticky;
+	top: calc(var(--header-h, 64px) + 12px);
+	z-index: 2;
+}
+/* Opaque (the tint is laid over white), so content scrolling beneath can't
+   show through. */
 .set-banner {
 	margin-bottom: 20px;
 	padding: 10px 14px;
 	border-radius: 10px;
-	background: rgba(0, 45, 114, 0.06);
+	background: linear-gradient(rgba(0, 45, 114, 0.06), rgba(0, 45, 114, 0.06)) #ffffff;
 	border: 1px solid rgba(0, 45, 114, 0.14);
 	font-size: 13px;
 	color: #002d72;
 }
 .set-banner--error {
-	background: rgba(239, 68, 68, 0.06);
+	background: linear-gradient(rgba(239, 68, 68, 0.06), rgba(239, 68, 68, 0.06)) #ffffff;
 	border-color: rgba(239, 68, 68, 0.22);
 	color: #b91c1c;
+}
+.set-banner:empty {
+	margin: 0;
+	padding: 0;
+	border: 0;
 }
 
 .set-heading {
@@ -105,14 +138,20 @@
 .set-sub {
 	font-size: 13px;
 	line-height: 1.55;
-	color: #8f8f8f;
+	color: #6a6a6a;
 	margin: 0 0 12px;
+	text-wrap: pretty;
 }
 
 /* A rule closing the heading block, the way ChatGPT's settings panel does it —
    it's what makes a stack of rows read as a section rather than a list adrift.
-   Applied as a top border on the first row so the rule lands after the optional
-   sub-line, with no wrapper element needed. */
+   Drawn on a wrapper around the heading and its sub-line, so every tab gets it
+   whatever follows: a row, a filter, a search field or a list. Profile and Plan
+   still get theirs from the sibling rules below, as a top border on the first
+   row after the heading. */
+.set-head {
+	border-bottom: 1px solid rgba(0, 0, 0, 0.07);
+}
 .set-heading + .set-row,
 .set-heading + .set-usage,
 .set-sub + .set-row,
@@ -132,9 +171,37 @@
 .set-row:last-child {
 	border-bottom: none;
 }
+/* A row and the confirmation it opened, kept together so the hairline falls
+   after the pair rather than between them, and the last pair still ends
+   without one. The row that has its panel open is named in bold. */
+.set-row-block {
+	border-bottom: 1px solid rgba(0, 0, 0, 0.07);
+}
+.set-row-block:last-child {
+	border-bottom: none;
+}
+.set-row-block > .set-row {
+	border-bottom: none;
+}
+.set-row-block > .set-confirm {
+	margin: 0 0 16px;
+}
+.set-row--open .set-row-label {
+	font-weight: 600;
+}
 .set-row-label {
 	font-size: 14px;
 	color: #111111;
+}
+/* People's account line is the primary line of a two-line row, at the weight
+   History gives its scan name. The detail lines under it stay regular, and the
+   row with a confirmation open keeps the bold above. */
+.dash-person:not(.set-row--open) .set-row-label {
+	font-weight: 500;
+}
+.dash-person .set-row-note,
+.dash-person .dash-scheduled {
+	font-weight: 400;
 }
 /* Used sparingly — only where the row would genuinely be ambiguous alone. */
 .set-row-note {
@@ -142,9 +209,15 @@
 	margin-top: 3px;
 	font-size: 12.5px;
 	line-height: 1.45;
-	color: #8f8f8f;
+	color: #6a6a6a;
+	text-wrap: balance;
 }
+/* An email address has no break opportunity of its own, so on a phone it
+   would push the row (and the Resend button) past the card's edge. Let it
+   shrink and break anywhere instead. */
 .set-row-value {
+	min-width: 0;
+	overflow-wrap: anywhere;
 	font-size: 14px;
 	color: #6a6a6a;
 	font-family: "IBM Plex Mono", ui-monospace, monospace;
@@ -152,7 +225,14 @@
 
 /* ── Controls ── */
 .set-btn {
-	padding: 8px 14px;
+	/* The same height as a text field or select, so a button beside one (the
+	   confirm rows, People's search and Edit) lines up with it. */
+	box-sizing: border-box;
+	height: var(--set-control-h);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0 14px;
 	border-radius: 8px;
 	background: #ffffff;
 	border: 1px solid rgba(0, 0, 0, 0.14);
@@ -192,9 +272,11 @@
 }
 
 .set-input {
-	padding: 8px 11px;
+	box-sizing: border-box;
+	height: var(--set-control-h);
+	padding: 0 11px;
 	border-radius: 8px;
-	border: 1px solid rgba(0, 0, 0, 0.14);
+	border: 1px solid rgba(0, 0, 0, 0.45);
 	background: #fafafa;
 	font-family: inherit;
 	font-size: 14px;
@@ -206,16 +288,71 @@
 	border-color: #002d72;
 	background: #ffffff;
 }
+/* A field that can't be edited reads as one: muted text, a flat fill and a
+   fainter border. The text fill is set too, because iOS ignores color on a
+   disabled input. */
+.set-input:disabled,
+.set-select:disabled {
+	color: #6a6a6a;
+	-webkit-text-fill-color: #6a6a6a;
+	background-color: rgba(0, 0, 0, 0.04);
+	border-color: rgba(0, 0, 0, 0.2);
+	cursor: not-allowed;
+}
 
+/* One visible focus ring for every control in Settings. */
+.set-wrapper a:focus-visible,
+.set-wrapper button:focus-visible,
+.set-wrapper select:focus-visible,
+.set-wrapper .set-input:focus-visible {
+	outline: 2px solid #002d72;
+	outline-offset: 2px;
+}
+/* Focus moves to a heading when a Try again button removes itself. */
+.set-wrapper .set-heading:focus-visible {
+	outline: 2px solid #002d72;
+	outline-offset: 2px;
+}
+
+/* A select is a text field with a chevron: the same box, fill and width, with
+   the browser's own arrow swapped for one that sits inside the padding. */
 .set-select {
-	padding: 8px 11px;
+	box-sizing: border-box;
+	height: var(--set-control-h);
+	min-width: 200px;
+	padding: 0 32px 0 11px;
 	border-radius: 8px;
-	border: 1px solid rgba(0, 0, 0, 0.14);
-	background: #ffffff;
+	border: 1px solid rgba(0, 0, 0, 0.45);
+	background-color: #fafafa;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236a6a6a' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right 11px center;
+	appearance: none;
+	-webkit-appearance: none;
 	font-family: inherit;
 	font-size: 14px;
 	color: #111111;
 	cursor: pointer;
+}
+.set-select:focus {
+	outline: none;
+	border-color: #002d72;
+	background-color: #ffffff;
+}
+
+/* Fields in a row get a real width on tablet and desktop, so a placeholder like
+   "Hospital, university or company" isn't clipped at the bare 200px minimum.
+   The phone rule further down makes them fill the line instead. */
+.set-row--field .set-input,
+.set-row--field .set-select {
+	flex: 0 0 min(320px, 55%);
+	width: min(320px, 55%);
+}
+/* The label gives way to the field, not the other way round, so a long note
+   can't squeeze one field narrower than the rest or shift its left edge. */
+.set-row--field .set-row-label {
+	flex: 1 1 0;
+	min-width: 0;
 }
 
 .set-switch {
@@ -224,7 +361,8 @@
 	flex-shrink: 0;
 	border-radius: 999px;
 	border: none;
-	background: rgba(0, 0, 0, 0.16);
+	/* Off state at 3:1 against the page, so the control is visible at rest. */
+	background: rgba(0, 0, 0, 0.45);
 	cursor: pointer;
 	padding: 3px;
 	display: flex;
@@ -232,13 +370,18 @@
 }
 .set-switch--on {
 	background: #002d72;
-	justify-content: flex-end;
 }
+/* The knob slides with a transform (justify-content can't animate), so it
+   moves with the track's colour instead of jumping ahead of it. */
 .set-switch-knob {
 	width: 17px;
 	height: 17px;
 	border-radius: 50%;
 	background: #ffffff;
+	transition: transform 0.18s;
+}
+.set-switch--on .set-switch-knob {
+	transform: translateX(17px);
 }
 
 .set-avatar {
@@ -281,12 +424,45 @@
 	line-height: 1.55;
 	color: #4a4a4a;
 	margin-bottom: 12px;
+	hyphens: none;
+	/* Keeps a closing word from sitting alone on the last line. */
+	text-wrap: pretty;
+}
+/* The question, what it does, and what to type: three blocks, so the eye can
+   take the title first and the prompt last. */
+.set-confirm-title {
+	display: block;
+	font-size: 14px;
+	font-weight: 600;
+	color: #111111;
+	margin-bottom: 4px;
+}
+.set-confirm-prompt {
+	margin-top: 8px;
+}
+/* An email address or a hyphenated word stays whole where it can; an address
+   longer than the line still breaks rather than running out of the panel. */
+.set-nowrap {
+	white-space: nowrap;
+}
+.set-email {
+	display: inline-block;
+	max-width: 100%;
+	overflow-wrap: anywhere;
 }
 .set-confirm-actions {
 	display: flex;
 	align-items: center;
 	gap: 8px;
 	flex-wrap: wrap;
+}
+/* The field takes what the line has, so on a phone it fills the panel and the
+   two buttons wrap together underneath; where there is room it sits in line
+   with them at the same height. */
+.set-confirm-actions .set-input {
+	flex: 1 1 240px;
+	min-width: 0;
+	max-width: 420px;
 }
 
 /* ── Plan ── */
@@ -305,8 +481,9 @@
 }
 .set-plan-blurb {
 	font-size: 13px;
-	color: #8f8f8f;
+	color: #6a6a6a;
 	margin: 3px 0 0;
+	text-wrap: balance;
 }
 
 /* Usage bar: label + reset time left, track, "n of m" right. */
@@ -330,7 +507,7 @@
 	display: block;
 	margin-top: 2px;
 	font-size: 12px;
-	color: #8f8f8f;
+	color: #6a6a6a;
 }
 .set-usage-track {
 	height: 6px;
@@ -389,6 +566,9 @@
 	flex-direction: column;
 	align-items: center;
 	text-align: center;
+	/* The Change plan button scrolls here. The html scroll-padding-top already
+	   clears the sticky header; this is only a small gap above the heading. */
+	scroll-margin-top: 8px;
 }
 .set-plan-picker .set-sub {
 	max-width: 46ch;
@@ -436,13 +616,17 @@
 }
 .set-plan-card-blurb {
 	font-size: 13px;
-	color: #8f8f8f;
+	color: #6a6a6a;
 	margin: 3px 0 16px;
 }
 .set-plan-price {
 	display: flex;
-	align-items: baseline;
-	gap: 6px;
+	flex-direction: column;
+	align-items: flex-start;
+	/* The note always sits under the price. Beside it, the note fit on the line
+	   for one card and not for its neighbour, so the buttons stopped lining up. */
+	gap: 2px;
+	white-space: nowrap;
 	font-size: 26px;
 	font-weight: 600;
 	letter-spacing: -0.01em;
@@ -450,9 +634,10 @@
 	margin-bottom: 16px;
 }
 .set-plan-price-note {
+	white-space: normal;
 	font-size: 12.5px;
 	font-weight: 400;
-	color: #8f8f8f;
+	color: #6a6a6a;
 	letter-spacing: 0;
 }
 .set-plan-cta {
@@ -466,18 +651,33 @@
 	background: #002d72;
 	border: 1px solid #002d72;
 	color: #ffffff;
-	transition: background 0.15s;
+	transition: background 0.15s, border-color 0.15s;
 }
-.set-plan-cta:hover:not(:disabled) {
+/* The locked Pro card's link to the Profile tab shares the button's look. The
+   global a:hover turns text black, so the colour is pinned on hover too, and
+   line-height matches a button so the two cards' bullet lists stay level. */
+a.set-plan-cta {
+	display: block;
+	box-sizing: border-box;
+	text-align: center;
+	text-decoration: none;
+	line-height: normal;
+	color: #ffffff;
+}
+a.set-plan-cta:hover {
+	color: #ffffff;
+}
+.set-plan-cta:hover:not([aria-disabled="true"]) {
 	background: #00399a;
+	border-color: #00399a;
 }
 .set-plan-cta--current {
 	background: transparent;
 	border-color: rgba(0, 0, 0, 0.14);
-	color: #8f8f8f;
+	color: #6a6a6a;
 	cursor: default;
 }
-.set-plan-cta:disabled {
+.set-plan-cta[aria-disabled="true"] {
 	opacity: 0.6;
 	cursor: not-allowed;
 }
@@ -487,7 +687,7 @@
 .set-plan-card--soon {
 	opacity: 0.55;
 }
-.set-plan-card--soon .set-plan-cta:disabled {
+.set-plan-card--soon .set-plan-cta[aria-disabled="true"] {
 	opacity: 1;
 }
 .set-plan-points {
@@ -519,15 +719,22 @@
 }
 
 /* ── History ── */
+/* Every Remove is this wide, so a batch's scan list can stop short of the right
+   edge by exactly the actions column (Remove and the 8px gap) and its Views
+   land under the Views of the single rows. */
 .set-history-list {
+	--set-history-remove-w: 80px;
 	display: flex;
 	flex-direction: column;
 }
+/* Text left, buttons right, centred on the title and its facts. A batch's
+   scan list takes a full row of its own under them, so its Remove stays level
+   with the batch's title rather than with the whole block. */
 .set-history-row {
-	display: flex;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
 	align-items: center;
-	justify-content: space-between;
-	gap: 14px;
+	column-gap: 14px;
 	padding: 14px 0;
 	border-bottom: 1px solid rgba(0, 0, 0, 0.07);
 }
@@ -539,23 +746,61 @@
 	font-weight: 500;
 	color: #111111;
 }
+/* The same line of facts People shows (see MetaParts), in the same sans. */
 .set-history-meta {
-	font-family: "IBM Plex Mono", ui-monospace, monospace;
-	font-size: 11.5px;
-	color: #8f8f8f;
+	font-size: 12.5px;
+	line-height: 1.45;
+	color: #6a6a6a;
 	margin-top: 3px;
 }
+.set-history-main {
+	grid-column: 1;
+	grid-row: 1;
+	min-width: 0;
+}
+/* A batch lists its scans under its own line, one View each. */
+.set-history-scans {
+	grid-column: 1 / -1;
+	grid-row: 2;
+	list-style: none;
+	margin: 8px 0 0;
+	padding: 0 calc(var(--set-history-remove-w) + 8px) 0 0;
+}
+.set-history-scan {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 6px 0;
+	font-size: 13px;
+	color: #111111;
+}
+.set-history-scan-name {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+.set-history-scan-source,
+.set-history-scan-status {
+	margin-left: 8px;
+	font-size: 12.5px;
+	color: #6a6a6a;
+}
 .set-history-actions {
+	grid-column: 2;
+	grid-row: 1;
 	display: flex;
 	align-items: center;
 	gap: 8px;
 	flex-shrink: 0;
 }
+.set-history-actions .set-btn:last-child {
+	min-width: var(--set-history-remove-w);
+}
 .set-empty {
 	padding: 40px 20px;
 	text-align: center;
 	font-size: 13.5px;
-	color: #8f8f8f;
+	color: #6a6a6a;
 }
 
 @media (max-width: 820px) {
@@ -563,14 +808,46 @@
 		grid-template-columns: minmax(0, 1fr);
 		gap: 16px;
 	}
+	/* The rail becomes a swipeable row. Its scrollbar is hidden and both ends
+	   fade out, so a tab cut off at an edge reads as "more this way"; the shell
+	   scrolls the current tab into view (see index.tsx). Each fade starts with a
+	   24px band that is fully transparent and then ramps up over the next 24px,
+	   so the slice of a neighbour left at an edge (a few letters, half an icon)
+	   is hidden or ghosted instead of sitting on the lightest part of the ramp
+	   where it still reads as a stray word. An end the row is already scrolled
+	   to has nothing cut off beside it, so the shell sets data-at-start and
+	   data-at-end and that end's fade is dropped; the first and last tab, which
+	   the row pads 24px in (it reaches 12px into the page gutter), then sit at
+	   full strength at rest. A row that fits has no fade at all and drops that
+	   24px inset down to the focus ring's room. The vertical padding and that
+	   horizontal room keep the ring inside the scroller. */
 	.set-nav {
+		--set-nav-fade-start: transparent 0, transparent 24px, #000 48px;
+		--set-nav-fade-end: #000 calc(100% - 48px), transparent calc(100% - 24px), transparent 100%;
 		position: static;
 		flex-direction: row;
 		overflow-x: auto;
 		gap: 4px;
-		padding-bottom: 4px;
+		margin-inline: -12px;
+		padding: 5px 24px;
+		scroll-padding-inline: 24px;
+		scroll-snap-type: x proximity;
+		scrollbar-width: none;
+		-webkit-mask-image: linear-gradient(to right, var(--set-nav-fade-start), var(--set-nav-fade-end));
+		mask-image: linear-gradient(to right, var(--set-nav-fade-start), var(--set-nav-fade-end));
+	}
+	.set-nav[data-at-start] {
+		--set-nav-fade-start: #000 0;
+	}
+	.set-nav[data-at-end] {
+		--set-nav-fade-end: #000 100%;
+	}
+	.set-nav::-webkit-scrollbar {
+		display: none;
 	}
 	.set-nav-item {
+		flex-shrink: 0;
+		scroll-snap-align: center;
 		white-space: nowrap;
 	}
 	.set-panel {
@@ -586,4 +863,97 @@
 		grid-column: 1 / -1;
 		order: 3;
 	}
+	/* A row that fits (both ends marked at once, as at tablet width) has nothing
+	   to scroll or fade, so it drops the inset and lines up with the card edge
+	   and title. It keeps 4px each side for the focus ring, which reaches 4px
+	   outside the pill and would be clipped by the scroller at the first and
+	   last tab, and the negative margin cancels that room out. */
+	.set-nav[data-at-start][data-at-end] {
+		margin-inline: -4px;
+		padding-inline: 4px;
+		scroll-padding-inline: 4px;
+	}
+}
+
+/* A history row's two buttons take a third of a phone's width, which leaves the
+   name and its facts a sliver. Below this the buttons sit under the text. */
+@media (max-width: 480px) {
+	.set-history-row {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 10px;
+	}
+	.set-history-main {
+		align-self: stretch;
+	}
+	/* The buttons are under the text here, so the scans use the full width. */
+	.set-history-scans {
+		align-self: stretch;
+		margin-top: 0;
+		padding-right: 0;
+	}
+}
+
+/* A row with a field in it can't keep the label and the field side by side on
+   a phone: the field's own minimum width would leave the label a sliver. The
+   label takes the full line and the field sits under it, edge to edge. Rows
+   with only a switch or a button stay inline. */
+@media (max-width: 560px) {
+	.set-row--field {
+		flex-wrap: wrap;
+		gap: 10px;
+	}
+	.set-row--field .set-row-label {
+		flex: 1 1 100%;
+	}
+	.set-row--field .set-input,
+	.set-row--field .set-select {
+		flex: 1 1 100%;
+		width: 100%;
+		min-width: 0;
+	}
+	/* The unverified Email row carries a note, the address and Resend. Inline,
+	   the address is left about 60px and breaks mid-word. The label takes the
+	   first line, and the address and Resend share the one below. */
+	.set-row--email {
+		flex-wrap: wrap;
+		gap: 10px 12px;
+	}
+	.set-row--email .set-row-label {
+		flex: 1 1 100%;
+	}
+	.set-row--email .set-row-value {
+		flex: 1 1 0;
+	}
+	/* 16px keeps iOS from zooming the page when a field takes focus. The Usage
+	   controls also carry .dash-input, which sets 13px from a stylesheet that
+	   loads after this one, so they are named here to outrank it. */
+	.set-input,
+	.set-select,
+	.set-input.dash-input,
+	.set-select.dash-input {
+		font-size: 16px;
+	}
+	/* Between here and the width where all three fit on one line, the field
+	   would keep Confirm beside it and leave Cancel alone underneath. Taking
+	   the whole line keeps the two buttons together below it. */
+	.set-confirm-actions .set-input {
+		flex-basis: 100%;
+	}
+}
+
+/* A section chunk loading inside the panel (see the Suspense around the Outlet). */
+.set-section-loading {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 240px;
+}
+.set-section-loading__spinner {
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	border: 2px solid rgba(15, 23, 42, 0.12);
+	border-top-color: #002d72;
 }
