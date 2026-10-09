@@ -14,6 +14,8 @@
 // flow in this change.
 // ─────────────────────────────────────────────────────────────────────────
 
+import { filenameToName } from './utils.name';
+
 export interface OrganData {
   volume: number;
   mean_hu: number;
@@ -44,11 +46,8 @@ export type ReportMeasurements = {
   lesionCount: number;
 };
 
-export function labelize(organ: string): string {
-  return organ
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, c => c.toUpperCase());
-}
+// Organ keys as sentence-case labels ("kidney_left" -> "Kidney left").
+export const labelize = filenameToName;
 
 export function getDetail(organ: string, comments: string): string | null {
   if (!comments) return null;
@@ -69,6 +68,26 @@ export function organRoot(organ: string): string {
     .replace(/_(gland|body|tail|head|left|right)$/, '')
     .replace(/_/g, ' ')
     .toLowerCase();
+}
+
+// A sub-region or side step ("pancreas_tail", "kidney_left") shares its parent
+// organ's report block. When that block holds several "<root> lesion N:" entries,
+// keep the organ baseline plus only the lesions whose "Location:" names this
+// step's word, so counts, sizes and volumes describe this step's lesions alone.
+// Falls back to the whole block when it has no lesion entries or none match.
+export function narrowSectionToLocation(organ: string, section: string): string {
+  const word = organLocation(organ)?.word;
+  if (!word) return section;
+  const marker = new RegExp(`\\b${organRoot(organ)} lesion \\d+:`, 'gi');
+  const starts = [...section.matchAll(marker)].map(m => m.index ?? 0);
+  if (!starts.length) return section;
+  const baseline = section.slice(0, starts[0]);
+  const wordRe = new RegExp(`\\b${word}\\b`, 'i');
+  const kept = starts
+    .map((from, i) => section.slice(from, starts[i + 1] ?? section.length))
+    .filter(block => wordRe.test(block.match(/Location:\s*([^.]*)/i)?.[1] ?? ''));
+  if (!kept.length) return section;
+  return [baseline, ...kept].join(' ').replace(/\s+/g, ' ').trim();
 }
 
 export function getReportSection(organ: string, comments: string): string | null {
@@ -95,7 +114,8 @@ export function getReportSection(organ: string, comments: string): string | null
     if (i > start && /^IMPRESSION:\s*$/i.test(trimmed)) break;
     if (trimmed) collected.push(trimmed);
   }
-  return collected.join(' ').replace(/\s+/g, ' ').trim() || null;
+  const text = collected.join(' ').replace(/\s+/g, ' ').trim();
+  return text ? narrowSectionToLocation(organ, text) : null;
 }
 
 export function getReportMeasurements(organ: string, comments: string): ReportMeasurements {
@@ -103,11 +123,11 @@ export function getReportMeasurements(organ: string, comments: string): ReportMe
   const lesionVolumeMatch = section?.match(/lesion[\s\S]*?volume:\s*([\d.]+)\s*cc/i);
   const lesionHuMatch = section?.match(/hu\s*value\s*is\s*(-?[\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
   const volumeMatch = lesionVolumeMatch ?? section?.match(/volume:\s*([\d.]+)\s*cc/i);
-  const huMatch = lesionHuMatch ?? section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
+  const huMatch = lesionHuMatch ?? section?.match(/Mean HU value:\s*(-?[\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
   const sizeMatch = section?.match(/Size:\s*([^()]+?)\s*cm/i);
 
   const organVolumeMatch = section?.match(/volume:\s*([\d.]+)\s*cc/i);
-  const organHuMatch = section?.match(/Mean HU value:\s*([\d.]+)/i);
+  const organHuMatch = section?.match(/Mean HU value:\s*(-?[\d.]+)/i);
 
   const sizeMatches = section?.match(/Size:\s*[^()]+?cm/gi) ?? [];
   const lesionCount = sizeMatches.length || (lesionVolumeMatch ? 1 : 0);
@@ -168,21 +188,39 @@ function detectFindingTerm(detail: string): FindingTerm | null {
   if (d.includes('nodule')) return { term: 'nodule', kind: 'noun', definition: 'A nodule is a small rounded area.' };
   if (d.includes('mass')) return { term: 'mass', kind: 'noun', definition: 'A mass is an area of tissue that appears different from the surrounding tissue.' };
   if (d.includes('tumor')) return { term: 'tumor', kind: 'noun', definition: 'A tumor is a growth made up of abnormal cells.' };
+  // A lesion named anywhere in the text outranks the organ-state words:
+  // "enlarged lymph node near the liver" is not an enlarged liver.
+  if (d.includes('lesion')) return { term: 'lesion', kind: 'noun', definition: 'A lesion is an area that looks different from the surrounding tissue.' };
   if (d.includes('enlarged')) return { term: 'enlarged', kind: 'descriptor', definition: 'Enlarged means larger than expected.' };
   if (d.includes('dilated') || d.includes('widened')) return { term: 'dilated', kind: 'descriptor', definition: 'Dilated means wider than expected.' };
-  if (d.includes('lesion')) return { term: 'lesion', kind: 'noun', definition: 'A lesion is an area that looks different from the surrounding tissue.' };
   return null;
 }
+
+// What older servers send for a case with no impression. It is a stand-in, not
+// report text, so it must not reach a card, a callout or a fallback sentence.
+const NO_IMPRESSION_PLACEHOLDER = 'No impression available for this case.';
 
 export function getImpressionText(data: ReportData | null): string {
   if (!data?.impression?.length) return '';
   return data.impression
     .map(t => t.replace(/^\d+\.\s*/, '').replace(/^\[([^\]]+)\]:\s*/, '$1: '))
+    .filter(t => t.trim() && t.trim() !== NO_IMPRESSION_PLACEHOLDER)
     .join(' ');
 }
 
 export function capFirst(s: string): string {
   return s.length ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+// A finding as a patient reads it: a side leads ("Left lung", like "your left
+// lung") and a sub-region trails ("Pancreas tail"). An id with neither keeps the
+// plain sentence-case label.
+export function findingLabel(name: string): string {
+  const root = labelize(organRoot(name)).toLowerCase();
+  const loc = organLocation(name);
+  if (loc?.type === 'lateral') return capFirst(`${loc.word} ${root}`);
+  if (loc?.type === 'subregion') return capFirst(`${root} ${loc.word}`);
+  return labelize(name);
 }
 
 // Single job now: explain the finding. What to do about it (see your
@@ -199,25 +237,27 @@ export function patientFindingText(organ: string, measurements: ReportMeasuremen
   const detail = measurements.section || '';
 
   if (!detail) {
-    return `The scan flagged ${subject} for review — the report text wasn't specific enough to describe here.`;
+    return `${capFirst(subject)}: the report text wasn't specific enough to describe here.`;
   }
 
   const found = detectFindingTerm(detail);
   if (!found) {
-    return `${capFirst(subject)} was flagged for review, but the report doesn't describe a specific spot or growth.`;
+    return `${capFirst(subject)}: the report doesn't describe a specific spot or growth.`;
   }
 
   const sizeWord = sizeDescriptor(measurements.lesionVolumeCc ?? measurements.volumeCc, measurements.sizeCm);
-  const sizePart = measurements.sizeCm ? ` measuring ${measurements.sizeCm} cm` : '';
+  // sizeCm is only the first Size entry, so it describes one lesion, not several.
+  const sizePart = measurements.sizeCm && measurements.lesionCount <= 1 ? ` measuring ${measurements.sizeCm} cm` : '';
 
   if (found.kind === 'descriptor') {
-    return `The scan found that ${subject} is ${found.term}. ${found.definition}`;
+    return `The report text describes ${subject} as ${found.term}. ${found.definition}`;
   }
 
   const article = sizeWord ? `a ${sizeWord} ${found.term}` : `a ${found.term}`;
-  const countPart = measurements.lesionCount > 1 ? `${measurements.lesionCount} ${found.term}s` : article;
+  const plural = found.term.endsWith('s') ? `${found.term}es` : `${found.term}s`;
+  const countPart = measurements.lesionCount > 1 ? `${measurements.lesionCount} ${plural}` : article;
 
-  return `The scan found ${countPart}${sizePart} in ${subject}. ${found.definition}`;
+  return `The report text describes ${countPart}${sizePart} in ${subject}. ${found.definition}`;
 }
 
 /** Same >5cc-or-flagged filter ReportScreen uses to build its organ list. */

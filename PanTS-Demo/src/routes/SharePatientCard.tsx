@@ -1,115 +1,140 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router';
+import { encode } from 'uqr';
+import MessagePage from '../components/MessagePage';
+import Header from '../components/Header';
+import SiteFooter from '../components/SiteFooter';
 import { APP_CONSTANTS } from '../helpers/constants';
+import { prefersReducedMotion } from '../helpers/motion';
 import type { ReportData, OrganData } from '../helpers/reportFindings';
 import {
   splitOrgans,
-  labelize,
   organRoot,
+  findingLabel,
   getReportMeasurements,
   patientFindingText,
 } from '../helpers/reportFindings';
 
-const NAVY = '#14265C';
-const NAVY_DEEP = '#0D1B47';
-const SPIRIT_TEXT = '#3E6FB5';
-const AMBER = '#B8720A';
-const AMBER_BG = '#FBF1E1';
-const GREEN = '#0E7C4A';
-const INK = '#141A26';
-const MUTED = '#5A6B85';
-const HAIRLINE = '#E7EAF0';
-const PANEL = '#F7F9FC';
-
-// Save the JHU shield you provided into your repo at this exact path
-// (e.g. PanTS-Demo/public/jhu-shield-white.png) — Vite serves anything in
-// public/ from the site root, so this path resolves automatically once
-// the file's there. If it's missing, the <img> just quietly hides itself.
-const JHU_SHIELD_SRC = '/jhu-shield-white.png';
+// The site's JHU blue and brand neutrals, so this page reads as part of the site.
+const NAVY = '#002d72';
+const NAVY_DEEP = '#001d4a';
+const SPIRIT_TEXT = '#002d72';
+const AMBER = '#8A5200';
+const GREEN = '#0A6A3E';
+const INK = '#0F172A';
+const MUTED = '#5A6175';
+const HAIRLINE = '#E2E1DA';
+const PANEL = 'var(--paper-2)';
 
 const STYLES = `
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Poppins:wght@600;700;800&display=swap');
 @keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
-@keyframes shareGlow { 0%,100% { box-shadow: 0 6px 20px rgba(20,38,92,0.28); } 50% { box-shadow: 0 8px 26px rgba(20,38,92,0.4); } }
 
-.spc-share {
-  position: relative;
-  overflow: hidden;
-  background: linear-gradient(135deg, #14265C 0%, #1E3573 60%, #2A4590 100%);
-  animation: shareGlow 2.8s ease-in-out infinite;
-  transition: transform 0.28s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.28s ease;
-}
-.spc-share::before {
-  content: '';
-  position: absolute;
-  top: 0; left: -60%;
-  width: 40%; height: 100%;
-  background: linear-gradient(120deg, transparent, rgba(255,255,255,0.4), transparent);
-  transform: skewX(-20deg);
-  transition: left 0.65s cubic-bezier(0.16,1,0.3,1);
-}
-.spc-share:hover {
-  transform: translateY(-2px) scale(1.035);
-  animation-play-state: paused;
-  box-shadow: 0 12px 28px rgba(20,38,92,0.42);
-}
-.spc-share:hover::before { left: 140%; }
-.spc-share:active { transform: translateY(0) scale(0.97); }
-.spc-share .spc-share-icon { transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1); }
-.spc-share:hover .spc-share-icon { transform: translateY(-2px) rotate(-8deg); }
+/* The site's flat primary button: solid JHU blue, a darker blue on hover. */
+.spc-share { background: ${NAVY}; transition: background 0.15s ease; }
+.spc-share:hover { background: ${NAVY_DEEP}; }
 
-.spc-chip { transition: background 0.2s, color 0.2s; cursor: pointer; }
+.spc-chip { transition: background 0.2s, color 0.2s; cursor: pointer; border: 1px solid transparent; font-family: inherit; }
+.spc-chip:hover { border-color: ${NAVY}; }
+.spc-chip:focus-visible,
+.spc-share:focus-visible,
+.spc-brand:focus-visible,
+.spc-ad:focus-visible { outline: 2px solid ${NAVY}; outline-offset: 3px; }
+.spc-ad:focus-visible { outline-color: #ffffff; outline-offset: -4px; }
 .spc-ad:hover { background: ${NAVY_DEEP} !important; }
 .spc-qr-wrap { transition: transform 0.25s cubic-bezier(0.34,1.5,0.64,1); }
 .spc-qr-wrap:hover { transform: scale(1.05); }
+
+/* Status dot before the headline: amber when something is flagged, green when clear.
+   It hangs in the left padding so every wrapped line shares the card's text edge. */
+.spc-stat { position: relative; padding-left: 20px; }
+.spc-stat::before { content: ""; position: absolute; left: 0; top: 10px; width: 10px; height: 10px; border-radius: 50%; }
+.spc-stat-flagged::before { background: ${AMBER}; }
+.spc-stat-clear::before { background: ${GREEN}; }
+
+/* Side by side while there is room; on a narrow card the icon sits above the
+   label so the sentence gets the full width instead of a squeezed column. */
+.spc-impression { flex-direction: row; gap: 14px; }
+@media (max-width: 520px) {
+  .spc-impression { flex-direction: column; gap: 10px; }
+}
 `;
 
 const CARD_MAX = 640;
 
+// What the server sends as the comments when a case has no report text.
+const NO_REPORT_COMMENTS = 'Clinical comments unavailable.';
+
 // Dedupe by organ root — pancreas + pancreas_tail are the same underlying
 // finding; without this a case can wrongly claim "2 findings" for one organ.
-function dedupeFindingsByRoot(flagged: [string, OrganData][]): { root: string; organ: string; data: OrganData }[] {
-  const byRoot = new Map<string, { root: string; organ: string; data: OrganData }>();
+// A left and a right twin (kidney, adrenal gland, lung) stay separate, as in
+// the report walkthrough, so a flagged right kidney is not dropped. `name` is
+// what the card calls the finding: "kidney_left" for a twin, the bare root otherwise.
+type Finding = { root: string; organ: string; name: string; data: OrganData };
+function dedupeFindingsByRoot(flagged: [string, OrganData][]): Finding[] {
+  const byRoot = new Map<string, Finding>();
   for (const [organ, data] of flagged) {
     const root = organRoot(organ);
-    const existing = byRoot.get(root);
-    if (!existing || organ === root) byRoot.set(root, { root, organ, data });
+    const side = organ.match(/_(left|right)$/)?.[1] ?? '';
+    const key = `${root}|${side}`;
+    const existing = byRoot.get(key);
+    if (!existing || organ === root) byRoot.set(key, { root, organ, name: side ? organ : root, data });
   }
   return Array.from(byRoot.values());
 }
 
 // Staggered entrance delay helper — each major section fades/rises in a
 // beat after the previous one instead of everything appearing at once.
+// Skipped entirely when the visitor asks for reduced motion.
 function stagger(revealed: boolean, index: number): React.CSSProperties {
+  if (prefersReducedMotion()) return {};
   return revealed ? { animation: `fadeUp 0.45s cubic-bezier(0.16,1,0.3,1) ${index * 0.08}s both` } : { opacity: 0 };
 }
 
 export default function SharePatientCard() {
   const { shareId = '' } = useParams<{ shareId: string }>();
   const [data, setData] = useState<ReportData | null>(null);
-  const [error, setError] = useState(false);
+  // 'dead' is a link the server rejected; 'unreachable' is a failed or broken response, worth another try.
+  const [error, setError] = useState<'dead' | 'unreachable' | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [noOrganData, setNoOrganData] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [activeIdx, setActiveIdx] = useState(0);
+  // Set by Try again: the button unmounts when the page swaps to the loading
+  // card, so focus is handed to the page's main landmark (and then its heading
+  // once a message or the card arrives) instead of dropping to <body>.
+  const retried = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
+    setError(null);
     fetch(`${APP_CONSTANTS.API_ORIGIN}/api/share/${shareId}`)
-      .then(r => r.json())
-      .then(j => {
+      .then(async r => ({ status: r.status, j: await r.json() }))
+      .then(({ status, j }) => {
         if (cancelled) return;
-        if (j.error) { setError(true); return; }
+        if (status >= 500) { setError('unreachable'); return; }
+        if (j.error) { setError('dead'); return; }
         if (j.masks_available === false || !j.organ_volumes || Object.keys(j.organ_volumes).length === 0) {
           setNoOrganData(true);
           return;
         }
         setData(j);
       })
-      .catch(() => { if (!cancelled) setError(true); });
+      .catch(() => { if (!cancelled) setError('unreachable'); });
     return () => { cancelled = true; };
-  }, [shareId]);
+  }, [shareId, attempt]);
+
+  useEffect(() => {
+    if (!retried.current) return;
+    const target = document.querySelector<HTMLElement>('main h1') ?? document.querySelector<HTMLElement>('main');
+    if (!target) return;
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus();
+    if (error || noOrganData || data) retried.current = false;
+  }, [error, noOrganData, data]);
 
   useEffect(() => {
     if (!data) return;
@@ -123,36 +148,79 @@ export default function SharePatientCard() {
 
   const active = findings[activeIdx] ?? null;
   const measurements = active && data ? getReportMeasurements(active.organ, data.comments || '') : null;
-  const plainLanguage = active && measurements ? patientFindingText(active.organ, measurements) : null;
+  // With no report text the server still flags an organ from its measured density, so the
+  // card falls back to the structured volume and mean HU that caused the flag.
+  const noReportText = !data?.comments?.trim() || data.comments.trim() === NO_REPORT_COMMENTS;
+  const measured = active && data ? data.organ_volumes[active.organ] : null;
+  const volumeCc = measurements?.organVolumeCc ?? measured?.volume ?? null;
+  const meanHu = measurements?.organMeanHu ?? measured?.mean_hu ?? null;
+  const plainLanguage = active && measurements
+    ? noReportText
+      ? 'No report text is available for this case. The flag comes from the measured density.'
+      : patientFindingText(active.organ, measurements)
+    : null;
+
+  useEffect(() => () => clearTimeout(copiedTimer.current), []);
 
   const handleShare = async () => {
+    const url = window.location.href;
+    setCopyFailed(false);
     try {
-      await navigator.clipboard.writeText(window.location.href);
+      await navigator.clipboard.writeText(url);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch { /* clipboard unavailable */ }
+      clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setCopied(false), 2000);
+      return;
+    } catch { /* clipboard unavailable, try the share sheet next */ }
+    // In-app browsers and non-secure pages have no clipboard but often a share sheet.
+    if (typeof navigator.share === 'function') {
+      try {
+        await navigator.share({ url });
+        return;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return; // the visitor closed the sheet
+      }
+    }
+    setCopyFailed(true);
   };
 
-  const bodyMapsUrl = 'https://bodymaps.wse.jhu.edu';
+  const bodyMapsUrl = 'https://thebodymaps.com';
   const shareUrl = typeof window !== 'undefined' ? window.location.href : '';
-  const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=96x96&margin=0&color=255-255-255&bgcolor=20-38-92&data=${encodeURIComponent(shareUrl)}`;
+
+  if (error || noOrganData) {
+    const unreachable = error === 'unreachable';
+    return (
+      <MessagePage
+        eyebrow="Shared summary"
+        title={unreachable ? "We couldn't load this summary" : error ? "This report link isn't available" : "This summary has no organ data"}
+        actions={[
+          ...(unreachable ? [{ label: 'Try again', onClick: () => { retried.current = true; setAttempt(n => n + 1); } }] : []),
+          { label: 'Browse the dataset', to: '/dashboard' },
+          { label: 'Go to the overview', to: '/' },
+        ]}
+        alert
+      >
+        <p>
+          {unreachable
+            ? 'Check your connection and try again.'
+            : error
+              ? 'The link may be incomplete, or the summary it pointed to is no longer available. Ask the person who shared it for a new link.'
+              : 'No mapped organ data is available for this case, so there is nothing to summarize.'}
+        </p>
+      </MessagePage>
+    );
+  }
 
   return (
     <div style={page}>
       <style>{STYLES}</style>
+      <Header />
 
-      <div style={stage}>
-        {!data && !error && !noOrganData && (
-          <div style={loadingWrap}><div style={spinnerRing} /></div>
-        )}
-
-        {error && (
-          <div style={emptyState}><div style={emptyStateTitle}>This report link isn't available.</div></div>
-        )}
-
-        {noOrganData && (
-          <div style={emptyState}>
-            <div style={emptyStateTitle}>No mapped organ data available for this case.</div>
+      <main style={stage}>
+        {!data && (
+          <div style={loadingWrap} role="status">
+            <div style={spinnerRing} aria-hidden="true" />
+            <span style={visuallyHidden}>Loading the shared summary…</span>
           </div>
         )}
 
@@ -160,38 +228,38 @@ export default function SharePatientCard() {
           <div style={{ ...card, ...stagger(revealed, 0) }}>
             <div style={cardBody}>
               {/* Identity */}
-              <a href={bodyMapsUrl} target="_blank" rel="noreferrer" style={{ ...brandLockup, ...stagger(revealed, 1) }}>
-                <div style={brandMark}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                    <circle cx="12" cy="12" r="8.4" stroke="#fff" strokeWidth="1.6" />
-                    <circle cx="12" cy="12" r="3" fill="#fff" />
-                  </svg>
-                </div>
-                <div>
-                  <div style={brandName}>BodyMaps</div>
-                  <div style={brandSub}>Johns Hopkins University</div>
-                </div>
+              <a href={bodyMapsUrl} target="_blank" rel="noreferrer" className="spc-brand" style={{ ...brandLockup, ...stagger(revealed, 1) }}>
+                <img src="/bodymaps-logo.svg" alt="" width={18} height={18} style={brandMark} />
+                <span style={brandName}>BodyMaps</span>
+                <span style={brandSub}>Johns Hopkins University</span>
               </a>
 
               <div style={stagger(revealed, 2)}>
-                <div style={eyebrow}>CT SCAN SUMMARY</div>
-                <div style={statLineWrap}>
-                  <span style={{ ...statAccentBar, background: allClear ? GREEN : AMBER }} />
-                  <span style={{ ...statLine, color: allClear ? GREEN : AMBER }}>
-                    {allClear ? 'All clear' : `${findings.length} organ${findings.length === 1 ? '' : 's'} with findings`}
-                  </span>
-                </div>
+                <div style={eyebrow}>CT scan summary</div>
+                {/* The headline states the status once; the dot before it (drawn in
+                    CSS, so it is not read out) only carries the colour cue. */}
+                <h1 className={allClear ? 'spc-stat spc-stat-clear' : 'spc-stat spc-stat-flagged'} style={statLine}>
+                  {allClear ? 'Nothing flagged' : `${findings.length} organ${findings.length === 1 ? '' : 's'} flagged for review`}
+                </h1>
                 {!allClear && normal.length > 0 && (
-                  <p style={subStatLine}>{normal.length} other mapped structure{normal.length === 1 ? '' : 's'} showed no flagged findings.</p>
+                  <p style={subStatLine}>{normal.length} other mapped structure{normal.length === 1 ? ' is' : 's are'} not listed here.</p>
                 )}
               </div>
 
+              {/* Real buttons: reachable by Tab, and the pressed one is the finding shown below. */}
               {!allClear && active && findings.length > 1 && (
-                <div style={{ ...chipRow, ...stagger(revealed, 3) }}>
+                <div role="group" aria-label="Flagged organs" style={{ ...chipRow, ...stagger(revealed, 3) }}>
                   {findings.map((f, i) => (
-                    <span key={f.root} className="spc-chip" onClick={() => setActiveIdx(i)} style={chip(i === activeIdx)}>
-                      {labelize(f.root)}
-                    </span>
+                    <button
+                      key={f.name}
+                      type="button"
+                      className="spc-chip"
+                      aria-pressed={i === activeIdx}
+                      onClick={() => setActiveIdx(i)}
+                      style={chip(i === activeIdx)}
+                    >
+                      {findingLabel(f.name)}
+                    </button>
                   ))}
                 </div>
               )}
@@ -200,49 +268,43 @@ export default function SharePatientCard() {
                 <>
                   <div style={{ ...panel, ...stagger(revealed, 4) }}>
                     <div style={panelInner}>
-                      {/* Organ image slot — intentionally left empty for your
-                          own illustration/render. */}
-                      <div style={organImageSlot} />
-
                       <div style={{ flex: 1, minWidth: 200 }}>
-                        <div style={panelLabel}>PRIMARY FINDING</div>
-                        <div style={organNameBig}>{labelize(active.root)}</div>
-                        <div style={findingBadge}>
-                          <GearIcon /> Finding to review
-                        </div>
+                        <div style={panelLabel}>Organ</div>
+                        <h2 style={organNameBig}>{findingLabel(active.name)}</h2>
                       </div>
                     </div>
                   </div>
 
-                  {/* Radiology Impression sits right below the organ name —
-                      this is the most important line on the card, sized up
-                      accordingly. */}
-                  <div style={{ ...impressionPanel, ...stagger(revealed, 5) }}>
-                    <div style={impressionIconWrap}><DocIcon /></div>
+                  {/* The report summary sits right below the organ name — this is
+                      the most important line on the card, sized up accordingly.
+                      Labelled as an automated summary, not a radiology
+                      impression: nothing here has been reviewed by a radiologist. */}
+                  <div className="spc-impression" style={{ ...impressionPanel, ...stagger(revealed, 5) }}>
+                    <div style={impressionIconWrap} aria-hidden="true"><DocIcon /></div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={impressionLabel}>RADIOLOGY IMPRESSION</div>
-                      <p style={impressionText}>{plainLanguage || 'This organ was flagged for your doctor to review.'}</p>
+                      <div style={impressionLabel}>Report summary</div>
+                      <p style={impressionText}>{plainLanguage || 'The automated summary has no more detail on this organ.'}</p>
                     </div>
                   </div>
 
-                  {(measurements?.organVolumeCc != null || measurements?.organMeanHu != null) && (
+                  {(volumeCc != null || meanHu != null) && (
                     <div style={stagger(revealed, 6)}>
-                      <div style={sectionLabel}>KEY MEASUREMENTS</div>
+                      <div style={sectionLabel}>Key measurements</div>
                       <div style={measureCardsRow}>
-                        {measurements?.organVolumeCc != null && (
+                        {volumeCc != null && (
                           <div style={measureCard}>
-                            <div style={measureIconWrap}><CubeIcon /></div>
-                            <div style={measureLabel}>{labelize(active.root)} volume</div>
-                            <div style={measureValue}>{measurements.organVolumeCc.toFixed(1)} cm³</div>
-                            <div style={measureSub}>Measured from segmentation</div>
+                            <div style={measureIconWrap} aria-hidden="true"><CubeIcon /></div>
+                            <div style={measureLabel}>{findingLabel(active.name)} volume</div>
+                            <div style={measureValue}>{volumeCc.toFixed(1)} cm³</div>
+                            <div style={measureSub}>Estimated from the AI segmentation</div>
                           </div>
                         )}
-                        {measurements?.organMeanHu != null && (
+                        {meanHu != null && (
                           <div style={measureCard}>
-                            <div style={measureIconWrap}><PulseIcon /></div>
+                            <div style={measureIconWrap} aria-hidden="true"><PulseIcon /></div>
                             <div style={measureLabel}>Mean attenuation</div>
-                            <div style={measureValue}>{measurements.organMeanHu.toFixed(1)} HU</div>
-                            <div style={measureSub}>Measured from CT data</div>
+                            <div style={measureValue}>{meanHu.toFixed(1).replace(/^-/, '−')} HU</div>
+                            <div style={measureSub}>Estimated from the CT scan</div>
                           </div>
                         )}
                       </div>
@@ -253,23 +315,30 @@ export default function SharePatientCard() {
 
               {allClear && (
                 <p style={{ ...impressionText, marginTop: 14, fontSize: 14 }}>
-                  All {normal.length} reviewed structure{normal.length === 1 ? '' : 's'} looked healthy on this scan.
+                  The automated summary covered {normal.length} mapped structure{normal.length === 1 ? '' : 's'} on this scan.
                 </p>
               )}
+
+              {/* The site footer carries the nonclinical-use sentences, so only the card-specific one goes here. */}
+              <p style={notice}>
+                This summary was generated automatically and has not been reviewed by a radiologist.
+              </p>
 
               <div style={hairline} />
 
               <div style={{ ...actionsRow, ...stagger(revealed, 7) }}>
-                <button className="spc-share" onClick={handleShare} style={shareInlineBtn}>
-                  <span className="spc-share-icon" style={{ display: 'inline-flex' }}><ShareIcon /></span>
+                <button type="button" className="spc-share" onClick={handleShare} style={shareInlineBtn}>
+                  <span style={{ display: 'inline-flex' }} aria-hidden="true"><ShareIcon /></span>
                   {copied ? 'Link copied' : 'Share this BodyMap'}
                 </button>
               </div>
+              <p role="status" style={copyFailed ? copyFailedNote : visuallyHidden}>
+                {copied ? 'Link copied to the clipboard.' : copyFailed ? "Couldn't copy the link. Copy the address from your browser instead." : ''}
+              </p>
             </div>
 
-            {/* Big navy advertising footer — JHU shield, BodyMaps, link, and
-                the QR code all together, replacing the smaller de-identified
-                text block that used to sit above it. */}
+            {/* Navy band with the site link and the QR code together. The
+                BodyMaps wordmark is already at the top of the card. */}
             <a
               href={bodyMapsUrl}
               target="_blank"
@@ -277,33 +346,44 @@ export default function SharePatientCard() {
               className="spc-ad"
               style={{ ...adBar, ...stagger(revealed, 8) }}
             >
-              <div style={adLeft}>
-                <img
-                  src={JHU_SHIELD_SRC}
-                  alt="Johns Hopkins University"
-                  style={adShield}
-                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                />
-                <div style={adDivider} />
-                <div>
-                  <div style={adTitle}>BodyMaps</div>
-                  <div style={adUrl}>bodymaps.wse.jhu.edu</div>
-                </div>
-              </div>
+              <div style={adUrl}>thebodymaps.com</div>
               <div className="spc-qr-wrap" style={adQrWrap}>
-                <img src={qrSrc} alt="QR code to this BodyMap" width={56} height={56} style={adQrImg} />
+                <ShareQrCode text={shareUrl} size={96} />
               </div>
             </a>
           </div>
         )}
-      </div>
+      </main>
+      <SiteFooter />
     </div>
   );
 }
 
-function GearIcon() {
-  return <svg width="11" height="11" viewBox="0 0 24 24" fill="none" style={{ marginRight: 5 }}><circle cx="12" cy="12" r="3" stroke={AMBER} strokeWidth="2" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" stroke={AMBER} strokeWidth="2" strokeLinecap="round" /></svg>;
+// Drawn here rather than fetched from a QR service, so the share link and its
+// token never leave the page. Navy on white, the way scanners expect; the white
+// frame around it is the quiet zone.
+function ShareQrCode({ text, size }: { text: string; size: number }) {
+  const path = useMemo(() => {
+    const { data } = encode(text, { ecc: 'L', boostEcc: true, border: 0 });
+    let d = '';
+    data.forEach((row, y) => row.forEach((dark, x) => { if (dark) d += `M${x} ${y}h1v1h-1z`; }));
+    return { d, modules: data.length };
+  }, [text]);
+  return (
+    <svg
+      role="img"
+      aria-label="QR code to this BodyMap"
+      width={size}
+      height={size}
+      viewBox={`0 0 ${path.modules} ${path.modules}`}
+      shapeRendering="crispEdges"
+      style={adQrImg}
+    >
+      <path d={path.d} fill={NAVY} />
+    </svg>
+  );
 }
+
 function CubeIcon() {
   return <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z" stroke={SPIRIT_TEXT} strokeWidth="1.7" strokeLinejoin="round" /><path d="M4 7.5L12 12l8-4.5M12 12v9" stroke={SPIRIT_TEXT} strokeWidth="1.7" strokeLinejoin="round" /></svg>;
 }
@@ -320,89 +400,96 @@ function ShareIcon() {
 // ─── Style tokens ───────────────────────────────────────────────────────────
 
 const page: React.CSSProperties = {
-  minHeight: '100vh', width: '100%', background: '#FBFCFE',
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
-  padding: '36px 20px', fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+  minHeight: '100vh', width: '100%', background: 'var(--paper)', color: INK,
+  display: 'flex', flexDirection: 'column', fontFamily: 'var(--font-sans)',
 };
 
-const stage: React.CSSProperties = { width: '100%', maxWidth: CARD_MAX };
+// The card column sits between the site header and footer, centred in the space
+// they leave.
+const stage: React.CSSProperties = {
+  flex: 1, width: '100%', maxWidth: CARD_MAX + 40, margin: '0 auto', boxSizing: 'border-box',
+  display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '36px 20px',
+};
 
 const loadingWrap: React.CSSProperties = { display: 'flex', justifyContent: 'center', padding: '80px 0' };
 const spinnerRing: React.CSSProperties = { width: 22, height: 22, borderRadius: '50%', border: `2px solid ${HAIRLINE}`, borderTopColor: NAVY, animation: 'spin 0.8s linear infinite' };
 
-const emptyState: React.CSSProperties = { textAlign: 'center', padding: '44px 24px', border: `1px solid ${HAIRLINE}`, borderRadius: 16, background: '#fff' };
-const emptyStateTitle: React.CSSProperties = { fontSize: 14.5, fontWeight: 600, color: MUTED };
+const visuallyHidden: React.CSSProperties = {
+  position: 'absolute', width: 1, height: 1, padding: 0, margin: -1,
+  overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', border: 0,
+};
 
 const card: React.CSSProperties = {
-  background: '#ffffff', borderRadius: 18, border: `1px solid ${HAIRLINE}`,
-  boxShadow: '0 12px 32px rgba(20,38,92,0.08)', overflow: 'hidden',
+  background: '#ffffff', borderRadius: 8, border: `1px solid ${HAIRLINE}`,
+  boxShadow: '0 1px 3px rgba(15,23,42,0.06)', overflow: 'hidden',
 };
-const cardBody: React.CSSProperties = { padding: '24px 26px 6px' };
+const cardBody: React.CSSProperties = { padding: '24px 26px 0' };
 
-const brandLockup: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none', marginBottom: 14 };
-const brandMark: React.CSSProperties = { width: 30, height: 30, borderRadius: 8, background: NAVY, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
-const brandName: React.CSSProperties = { fontFamily: "'Poppins', sans-serif", fontWeight: 700, fontSize: 19, color: NAVY, lineHeight: 1.15 };
-const brandSub: React.CSSProperties = { fontSize: 11, color: MUTED, fontWeight: 500 };
+// One quiet line: the site header already carries the brand, this only keeps a
+// screenshot of the card alone identifiable.
+const brandLockup: React.CSSProperties = { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px 8px', textDecoration: 'none', marginBottom: 12 };
+const brandMark: React.CSSProperties = { display: 'block', width: 18, height: 18, flexShrink: 0 };
+const brandName: React.CSSProperties = { fontWeight: 600, fontSize: 13, color: NAVY, lineHeight: 1.2 };
+const brandSub: React.CSSProperties = { fontSize: 12, color: MUTED, fontWeight: 500, lineHeight: 1.2 };
 
-const eyebrow: React.CSSProperties = { fontSize: 10.5, fontWeight: 750, letterSpacing: '0.1em', color: SPIRIT_TEXT };
-const statLineWrap: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 10, marginTop: 5 };
-const statAccentBar: React.CSSProperties = { width: 4, height: 24, borderRadius: 2, flexShrink: 0 };
-const statLine: React.CSSProperties = { fontSize: 26, fontWeight: 700, fontFamily: "'Poppins', sans-serif" };
-const subStatLine: React.CSSProperties = { fontSize: 13, color: MUTED, marginTop: 6, marginBottom: 4, marginLeft: 14 };
+// The one small-label style: eyebrow, panel and section labels, the report
+// summary label and the measurement captions all share it. Sentence case in the
+// source and uppercase by style only.
+const label: React.CSSProperties = { fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', color: SPIRIT_TEXT, textTransform: 'uppercase' };
 
-const chipRow: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 14 };
+const eyebrow: React.CSSProperties = { ...label };
+const statLine: React.CSSProperties = { fontSize: 24, lineHeight: 1.25, fontWeight: 600, color: INK, marginTop: 6, marginBottom: 0, textWrap: 'balance' };
+const subStatLine: React.CSSProperties = { fontSize: 13, color: MUTED, marginTop: 6, marginBottom: 4, textWrap: 'balance' };
+
+const chipRow: React.CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 14 };
 const chip = (active: boolean): React.CSSProperties => ({
-  fontSize: 11.5, fontWeight: 650, padding: '5px 11px', borderRadius: 999,
-  background: active ? NAVY : '#F1F4F9', color: active ? '#fff' : MUTED,
+  fontSize: 12, fontWeight: 600, padding: '8px 14px', borderRadius: 999,
+  background: active ? NAVY : 'var(--paper-3)', color: active ? '#fff' : MUTED,
+  borderColor: active ? NAVY : undefined,
 });
 
-const panel: React.CSSProperties = { marginTop: 14, padding: '18px 20px', borderRadius: 14, background: PANEL, border: `1px solid ${HAIRLINE}` };
+const panel: React.CSSProperties = { marginTop: 14, padding: '18px 20px', borderRadius: 8, background: PANEL, border: `1px solid ${HAIRLINE}` };
 const panelInner: React.CSSProperties = { display: 'flex', gap: 18, flexWrap: 'wrap' };
-const organImageSlot: React.CSSProperties = {
-  width: 140, height: 140, borderRadius: 12, flexShrink: 0,
-  background: '#fff', border: `1px dashed ${HAIRLINE}`,
-};
-const panelLabel: React.CSSProperties = { fontSize: 10, fontWeight: 750, letterSpacing: '0.08em', color: SPIRIT_TEXT };
-const organNameBig: React.CSSProperties = { fontFamily: "'Poppins', sans-serif", fontSize: 26, fontWeight: 700, color: INK, marginTop: 4, marginBottom: 10 };
-const findingBadge: React.CSSProperties = {
-  display: 'inline-flex', alignItems: 'center', fontSize: 12, fontWeight: 700, color: AMBER, background: AMBER_BG,
-  padding: '5px 12px', borderRadius: 999, border: '1px solid #EAD2A6',
-};
+const panelLabel: React.CSSProperties = { ...label };
+const organNameBig: React.CSSProperties = { fontSize: 20, fontWeight: 600, color: INK, marginTop: 4, marginBottom: 0, textWrap: 'balance' };
 
-const sectionLabel: React.CSSProperties = { fontSize: 10.5, fontWeight: 750, letterSpacing: '0.08em', color: SPIRIT_TEXT, marginTop: 20, marginBottom: 8 };
+const sectionLabel: React.CSSProperties = { ...label, marginTop: 20, marginBottom: 8 };
 const measureCardsRow: React.CSSProperties = { display: 'flex', gap: 10 };
-const measureCard: React.CSSProperties = { flex: 1, padding: '13px 14px', borderRadius: 12, background: PANEL, border: `1px solid ${HAIRLINE}` };
-const measureIconWrap: React.CSSProperties = { width: 26, height: 26, borderRadius: 8, background: '#E8F0FB', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 8 };
-const measureLabel: React.CSSProperties = { fontSize: 10, fontWeight: 700, color: SPIRIT_TEXT, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.02em' };
-const measureValue: React.CSSProperties = { fontFamily: "'Poppins', sans-serif", fontSize: 19, fontWeight: 700, color: INK };
-const measureSub: React.CSSProperties = { fontSize: 10.5, color: '#9AA5B8', marginTop: 2 };
+const measureCard: React.CSSProperties = { flex: 1, padding: '13px 14px', borderRadius: 8, background: PANEL, border: `1px solid ${HAIRLINE}` };
+const measureIconWrap: React.CSSProperties = { width: 26, height: 26, borderRadius: 6, background: '#E8F0FB', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 8 };
+const measureLabel: React.CSSProperties = { ...label, marginBottom: 4 };
+const measureValue: React.CSSProperties = { fontSize: 20, fontWeight: 600, color: INK };
+const measureSub: React.CSSProperties = { fontSize: 11, color: MUTED, marginTop: 2 };
 
+// Direction and gap come from .spc-impression so the narrow-width rule can restack it.
 const impressionPanel: React.CSSProperties = {
-  display: 'flex', gap: 14, marginTop: 14, padding: '18px 20px',
-  background: '#EFF4FB', border: `1px solid ${HAIRLINE}`, borderRadius: 14,
+  display: 'flex', marginTop: 14, padding: '18px 20px',
+  background: '#EFF4FB', border: `1px solid ${HAIRLINE}`, borderRadius: 8,
 };
-const impressionIconWrap: React.CSSProperties = { width: 32, height: 32, borderRadius: 9, background: SPIRIT_TEXT, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 };
-const impressionLabel: React.CSSProperties = { fontSize: 11, fontWeight: 750, letterSpacing: '0.08em', color: SPIRIT_TEXT, marginBottom: 7 };
-const impressionText: React.CSSProperties = { fontSize: 17, lineHeight: 1.5, color: INK, margin: 0, fontWeight: 500 };
+const impressionIconWrap: React.CSSProperties = { width: 32, height: 32, borderRadius: 6, background: SPIRIT_TEXT, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 };
+const impressionLabel: React.CSSProperties = { ...label, marginBottom: 7 };
+const impressionText: React.CSSProperties = { fontSize: 15, lineHeight: 1.5, color: INK, margin: 0, fontWeight: 500, textWrap: 'pretty' };
 
-const hairline: React.CSSProperties = { height: 1, background: HAIRLINE, margin: '16px 0 12px' };
+const notice: React.CSSProperties = { fontSize: 12, lineHeight: 1.5, color: MUTED, margin: '18px 0 0' };
 
-const actionsRow: React.CSSProperties = { display: 'flex', justifyContent: 'center', marginBottom: 16 };
+// Only shown when copying failed; the same region stays visually hidden otherwise.
+const copyFailedNote: React.CSSProperties = { fontSize: 12, lineHeight: 1.5, color: AMBER, margin: '-8px 0 16px' };
+
+const hairline: React.CSSProperties = { height: 1, background: HAIRLINE, margin: '16px 0 20px' };
+
+// Left-aligned with the rest of the card; the 20px above and below the button match.
+const actionsRow: React.CSSProperties = { display: 'flex', justifyContent: 'flex-start', marginBottom: 20 };
+// The site's primary button: flat, 4px corners; the fill and hover come from .spc-share.
 const shareInlineBtn: React.CSSProperties = {
-  display: 'inline-flex', alignItems: 'center', padding: '13px 28px', borderRadius: 999, border: 'none',
-  color: '#fff', fontSize: 14, fontWeight: 700, letterSpacing: '0.01em', cursor: 'pointer', fontFamily: 'inherit',
+  display: 'inline-flex', alignItems: 'center', padding: '9px 16px', borderRadius: 4, border: 'none',
+  color: '#fff', fontSize: 15, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit',
 };
 
-// Bigger, single "advertising" footer — replaces both the old small
-// de-identified text block and the thin bottom bar with one prominent band.
+// One navy band closes the card: the site link and the QR code.
 const adBar: React.CSSProperties = {
   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-  padding: '22px 28px', background: NAVY, textDecoration: 'none', transition: 'background 0.2s',
+  padding: '22px 26px', background: NAVY, textDecoration: 'none', transition: 'background 0.2s',
 };
-const adLeft: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 16 };
-const adShield: React.CSSProperties = { height: 40, width: 'auto' };
-const adDivider: React.CSSProperties = { width: 1, height: 34, background: 'rgba(255,255,255,0.22)' };
-const adTitle: React.CSSProperties = { fontFamily: "'Poppins', sans-serif", fontSize: 16, fontWeight: 700, color: '#fff' };
-const adUrl: React.CSSProperties = { fontSize: 12, color: '#AFC2E8', marginTop: 2, fontWeight: 600 };
-const adQrWrap: React.CSSProperties = { padding: 5, background: '#fff', borderRadius: 10, flexShrink: 0 };
-const adQrImg: React.CSSProperties = { display: 'block', borderRadius: 4 };
+const adUrl: React.CSSProperties = { fontSize: 15, color: '#fff', fontWeight: 500 };
+const adQrWrap: React.CSSProperties = { padding: 5, background: '#fff', borderRadius: 6, flexShrink: 0 };
+const adQrImg: React.CSSProperties = { display: 'block' };

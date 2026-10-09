@@ -136,7 +136,7 @@ const PRIVACY: Section[] = [
 	},
 	{
 		heading: "Sharing",
-		body: "We do not sell account data, uploads, or outputs. Anyone who has a share link or live room link can open its content. When you create a share card, the share link, including its token, is sent to api.qrserver.com to generate the QR code. Google Fonts may load on some pages, and some viewer paths fetch public dataset assets from Hugging Face. Google or GitHub processes your sign-in when you choose them. Password-reset email is sent through an email provider. BodyMaps, Inc. receives and routes inquiries and requests sent through its [contact form](contact). No third-party analytics or advertising trackers run on this site.",
+		body: "We do not sell account data, uploads, or outputs. Anyone who has a share link or live room link can open its content. Google Fonts may load on some pages, and some viewer paths fetch public dataset assets from Hugging Face. Google or GitHub processes your sign-in when you choose them. Password-reset email is sent through an email provider. BodyMaps, Inc. receives and routes inquiries and requests sent through its [contact form](contact). No third-party analytics or advertising trackers run on this site.",
 	},
 	{
 		heading: "Your rights",

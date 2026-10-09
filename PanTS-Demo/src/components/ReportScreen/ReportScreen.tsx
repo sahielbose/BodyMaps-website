@@ -1,6 +1,10 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { APP_CONSTANTS } from '../../helpers/constants';
-import FindingsTimeline from './FindingsTimeline';
+import { appRootRelativeUrl } from '../../liveRooms/protocol';
+import { formatSex } from '../../helpers/demographics';
+import FindingsTimeline, { sortByReadingOrder } from './FindingsTimeline';
+import { filenameToName } from '../../helpers/utils.name';
+import { findingLabel, getImpressionText, narrowSectionToLocation, organLocation, organRoot } from '../../helpers/reportFindings';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,6 +39,7 @@ type Lang = 'patient' | 'clinical';
 type Step = number;
 
 export const cache: { [key: string]: ReportData } = {};
+const REPORT_DATA_TIMEOUT_MS = 30000;
 const reportDataRequests = new Map<string, Promise<ReportData | null>>();
 
 /**
@@ -50,7 +55,12 @@ export function prefetchReportData(id: string): Promise<ReportData | null> {
   const inFlight = reportDataRequests.get(id);
   if (inFlight) return inFlight;
 
-  const request = fetch(`${APP_CONSTANTS.API_ORIGIN}/api/get-report-data/${encodeURIComponent(id)}`)
+  // A cold case can make the server download the scan first. Past this point the
+  // report shows "Report unavailable." instead of an endless spinner, and the
+  // Report button can ask again.
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REPORT_DATA_TIMEOUT_MS);
+  const request = fetch(`${APP_CONSTANTS.API_ORIGIN}/api/get-report-data/${encodeURIComponent(id)}`, { signal: controller.signal })
     .then(async (response) => {
       if (!response.ok) return null;
       const payload: unknown = await response.json();
@@ -64,13 +74,23 @@ export function prefetchReportData(id: string): Promise<ReportData | null> {
       }
 
       const report = payload as ReportData;
+      // A scan with no organ to report on would read as "all clear". Treat it as no report,
+      // so the viewer shows "Report unavailable." instead.
+      if (reportOrgans(report).length === 0) return null;
+      // A case with no written report comes back with placeholder comments and no impression.
+      // Only the HU checks would speak, so the walkthrough would call the scan healthy and
+      // "all clear" though nobody read it. Treat it as no report too.
+      if (isReportTextMissing(report)) return null;
       cache[id] = report;
       return report;
     })
     // Report preparation is optional. The Report button remains usable and can
     // request the data again if a background request fails.
     .catch(() => null)
-    .finally(() => reportDataRequests.delete(id));
+    .finally(() => {
+      window.clearTimeout(timeout);
+      reportDataRequests.delete(id);
+    });
 
   reportDataRequests.set(id, request);
   return request;
@@ -98,10 +118,14 @@ const STYLES = `
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function labelize(organ: string): string {
-  return organ
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, c => c.toUpperCase());
+// Organ keys as sentence-case labels ("cbd_stent" -> "CBD stent"); a sided organ
+// reads through findingLabel instead ("kidney_left" -> "Left kidney").
+const labelize = filenameToName;
+
+// "1 organ looks healthy", "3 organs look healthy": noun and verb agree. The
+// no-break space keeps the count with its noun so a phone never wraps after the digit.
+function organsLookHealthy(count: number): string {
+  return count === 1 ? '1\u00a0organ looks healthy' : `${count}\u00a0organs look healthy`;
 }
 
 function getDetail(organ: string, comments: string): string | null {
@@ -117,19 +141,46 @@ function getDetail(organ: string, comments: string): string | null {
 }
 
 
-function organRoot(organ: string): string {
-  if (organ.startsWith('pancreas')) return 'pancreas';
-  if (organ.startsWith('kidney')) return 'kidney';
-  // BUG FIX: this used to end with .split(' ')[0], which truncated every
-  // multi-word organ down to its first word — "adrenal_gland_right" became
-  // just "adrenal", "common_bile_duct" became just "common". That broke
-  // section-heading lookup (the report heading wouldn't match a truncated
-  // root) and produced mangled patient sentences ("...in your adrenal.").
-  // Only the trailing location/anatomy-suffix word should ever be stripped.
-  return organ
-    .replace(/_(gland|body|tail|head|left|right)$/, '')
-    .replace(/_/g, ' ')
-    .toLowerCase();
+// True for "kidney_left" and "kidney_right": same organ root, opposite sides.
+function areLateralTwins(a: string, b: string): boolean {
+  const side = (organ: string) => organ.match(/_(left|right)$/)?.[1];
+  const sa = side(a);
+  const sb = side(b);
+  return !!sa && !!sb && sa !== sb;
+}
+
+// The server sends this placeholder as the comments when the case has no report row.
+const NO_REPORT_COMMENTS = 'Clinical comments unavailable.';
+
+function isReportTextMissing(report: ReportData): boolean {
+  const comments = typeof report.comments === 'string' ? report.comments.trim() : '';
+  return (!comments || comments === NO_REPORT_COMMENTS) && !getImpressionText(report);
+}
+
+// The organs the walkthrough covers. Lesion/stent masks are excluded from the volume-based
+// inclusion, but any entry the backend flags as 'check' still passes through.
+function reportOrgans(report: ReportData): [string, OrganData][] {
+  return Object.entries(report.organ_volumes ?? {}).filter(([o, v]) => v.status === 'check' || (!isNonOrganLabel(o) && v.volume > 5));
+}
+
+// Mask labels that are findings or hardware, not organs. They must never be
+// presented in the patient-facing healthy organs list.
+function isNonOrganLabel(organ: string): boolean {
+  return organ.endsWith('_lesion') || organ === 'cbd_stent';
+}
+
+// Renders "Case 12" plus " · Female · 61y" only for demographics the backend
+// actually has. It returns the string "N/A" for missing age/sex (despite the
+// declared types), which used to render as "Case 12 · N/A · N/Ay".
+function caseSummary(id: string, patient: ReportData['patient']): string {
+  const parts = [`Case ${id}`];
+  const sex: unknown = patient.sex;
+  const age: unknown = patient.age;
+  const named = formatSex(typeof sex === 'string' ? sex : null);
+  if (named) parts.push(named);
+  if (typeof age === 'number' && Number.isFinite(age)) parts.push(`${age}y`);
+  else if (typeof age === 'string' && /^\d+(\.\d+)?$/.test(age.trim())) parts.push(`${age.trim()}y`);
+  return parts.join(' · ');
 }
 
 function getReportSection(organ: string, comments: string): string | null {
@@ -156,7 +207,8 @@ function getReportSection(organ: string, comments: string): string | null {
     if (i > start && /^IMPRESSION:\s*$/i.test(trimmed)) break;
     if (trimmed) collected.push(trimmed);
   }
-  return collected.join(' ').replace(/\s+/g, ' ').trim() || null;
+  const text = collected.join(' ').replace(/\s+/g, ' ').trim();
+  return text ? narrowSectionToLocation(organ, text) : null;
 }
 
 type ReportMeasurements = {
@@ -178,7 +230,7 @@ function getReportMeasurements(organ: string, comments: string): ReportMeasureme
   const lesionVolumeMatch = section?.match(/lesion[\s\S]*?volume:\s*([\d.]+)\s*cc/i);
   const lesionHuMatch = section?.match(/hu\s*value\s*is\s*(-?[\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
   const volumeMatch = lesionVolumeMatch ?? section?.match(/volume:\s*([\d.]+)\s*cc/i);
-  const huMatch = lesionHuMatch ?? section?.match(/Mean HU value:\s*([\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
+  const huMatch = lesionHuMatch ?? section?.match(/Mean HU value:\s*(-?[\d.]+)(?:\s*\+\/-\s*([\d.]+))?/i);
   // BUG FIX: the size capture excluded '.' from its own character class, so it
   // could never match decimal sizes like "1.0 x 0.5 cm" — only whole numbers.
   // That silently broke "Report size" for virtually every real lesion.
@@ -192,7 +244,7 @@ function getReportMeasurements(organ: string, comments: string): ReportMeasureme
   // the lesion's enhancement line reads "HU value is X", a different phrase,
   // so this regex can't accidentally pick up the lesion's number.
   const organVolumeMatch = section?.match(/volume:\s*([\d.]+)\s*cc/i);
-  const organHuMatch = section?.match(/Mean HU value:\s*([\d.]+)/i);
+  const organHuMatch = section?.match(/Mean HU value:\s*(-?[\d.]+)/i);
 
   // Each distinct lesion in a report section carries its own "Size: ... cm" line,
   // so counting those is a reasonable proxy for lesion count without the backend
@@ -211,19 +263,6 @@ function getReportMeasurements(organ: string, comments: string): ReportMeasureme
     sizeCm: sizeMatch ? sizeMatch[1].trim() : null,
     lesionCount,
   };
-}
-
-// Suffix on organ keys like "pancreas_tail" / "kidney_left" already encodes the
-// anatomical location the backend split out — reuse it instead of re-parsing
-// the report text for location. Paired organs (left/right) read better as
-// "your left kidney"; sub-regions of a single organ (head/body/tail) read
-// better as "in the tail of your pancreas" — so these are kept distinct
-// rather than forced through one phrasing template.
-function organLocation(organ: string): { type: 'lateral' | 'subregion'; word: string } | null {
-  const suffix = organ.split('_').pop() ?? '';
-  if (suffix === 'left' || suffix === 'right') return { type: 'lateral', word: suffix };
-  if (suffix === 'tail' || suffix === 'head' || suffix === 'body') return { type: 'subregion', word: suffix };
-  return null;
 }
 
 // Rough qualitative size bucket from whichever number we have — used only to
@@ -256,19 +295,16 @@ function sizeDescriptor(volumeCc: number | null, sizeCm: string | null): string 
 function findingNoun(detail: string): string | null {
   const d = detail.toLowerCase();
   if (d.includes('cyst')) return 'fluid-filled spot';
-  if (d.includes('nodule')) return 'small bump';
+  // No size word of its own: sizeDescriptor() goes in front of this noun, and
+  // "a tiny small bump" or "a sizable small bump" contradicts itself.
+  if (d.includes('nodule')) return 'bump';
   if (d.includes('mass') || d.includes('tumor')) return 'growth';
+  // A lesion named anywhere in the text outranks the organ-state words:
+  // "enlarged lymph node near the liver" is not an enlarged liver.
+  if (d.includes('lesion')) return 'spot';
   if (d.includes('enlarged')) return 'enlarged area';
   if (d.includes('dilated') || d.includes('widened')) return 'widened area';
-  if (d.includes('lesion')) return 'spot';
   return null;
-}
-
-function getImpressionText(data: ReportData | null): string {
-  if (!data?.impression?.length) return '';
-  return data.impression
-    .map(t => t.replace(/^\d+\.\s*/, '').replace(/^\[([^\]]+)\]:\s*/, '$1: '))
-    .join(' ');
 }
 
 function capFirst(s: string): string {
@@ -281,7 +317,7 @@ function capFirst(s: string): string {
 // honest, still-specific sentence when the report text doesn't describe an
 // actual lesion (e.g. flagged purely on an HU-range anomaly) — it never
 // invents "a spot" or similar when none is described.
-function patientFindingText(organ: string, measurements: ReportMeasurements): string {
+export function patientFindingText(organ: string, measurements: ReportMeasurements): string {
   const organLabel = labelize(organRoot(organ)).toLowerCase();
   const loc = organLocation(organ);
   const subject =
@@ -291,7 +327,7 @@ function patientFindingText(organ: string, measurements: ReportMeasurements): st
   const detail = measurements.section || '';
 
   if (!detail) {
-    return `The scan flagged ${subject} for your doctor to review — the report text wasn't specific enough to describe here.`;
+    return `The scan flagged ${subject} for your doctor to review. The report text wasn't specific enough to describe here.`;
   }
 
   const noun = findingNoun(detail);
@@ -299,11 +335,21 @@ function patientFindingText(organ: string, measurements: ReportMeasurements): st
     // Flagged, but the text doesn't describe an actual lesion/mass — don't
     // invent one. Most common cause: flagged on an HU-range check, not a
     // described finding.
-    return `${capFirst(subject)} was flagged for review, but the report doesn't describe a specific spot or growth — ask your doctor what stood out.`;
+    return `${capFirst(subject)} was flagged for review, but the report doesn't describe a specific spot or growth. Ask your doctor what stood out.`;
+  }
+
+  // "Enlarged" and "widened" describe the organ as a whole. Putting a size word
+  // in front would say an area inside it is large ("a sizable enlarged area").
+  // The text may be about one part of the organ (a duct), so say what it says
+  // rather than claiming the scan found the whole organ changed.
+  if (noun === 'enlarged area' || noun === 'widened area') {
+    const word = /enlarged/i.test(detail) ? 'enlarged' : /dilated/i.test(detail) ? 'dilated' : 'widened';
+    return `The report describes ${subject} as ${word}.`;
   }
 
   const sizeWord = sizeDescriptor(measurements.lesionVolumeCc ?? measurements.volumeCc, measurements.sizeCm);
-  const sizePart = measurements.sizeCm ? ` (${measurements.sizeCm} cm)` : '';
+  // sizeCm is only the first Size entry, so it describes one lesion, not several.
+  const sizePart = measurements.sizeCm && measurements.lesionCount <= 1 ? ` (${measurements.sizeCm} cm)` : '';
   const article = sizeWord ? `a ${sizeWord} ${noun}` : `a ${noun}`;
   const countPart = measurements.lesionCount > 1 ? `${measurements.lesionCount} spots` : article;
 
@@ -393,7 +439,7 @@ function OrganList({ organs, max = 5 }: { organs: [string, OrganData][]; max?: n
         {visible.map(([organ], i) => (
           <div key={organ} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 16, background: 'rgba(110,231,183,0.075)', border: '1px solid rgba(110,231,183,0.17)', animation: `riseIn 0.25s ease ${i * 26}ms both` }}>
             <span style={{ width: 21, height: 21, borderRadius: 999, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(110,231,183,0.14)', color: '#6ee7b7', fontSize: 12, fontWeight: 850, flexShrink: 0 }}>✓</span>
-            <span style={{ color: 'rgba(255,255,255,0.84)', fontSize: 15, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{labelize(organ)}</span>
+            <span style={{ color: 'rgba(255,255,255,0.84)', fontSize: 15, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{findingLabel(organ)}</span>
           </div>
         ))}
       </div>
@@ -410,17 +456,6 @@ function OrganList({ organs, max = 5 }: { organs: [string, OrganData][]; max?: n
   );
 }
 
-function MetricRow({ label, value, sub, tone = 'white' }: { label: string; value: string; sub?: string; tone?: 'white' | 'green' | 'amber' }) {
-  const color = tone === 'green' ? '#6ee7b7' : tone === 'amber' ? '#fbbf24' : 'rgba(255,255,255,0.92)';
-  return (
-    <div style={{ padding: '13px 0', borderBottom: '1px solid rgba(255,255,255,0.075)' }}>
-      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.42)', marginBottom: 5, letterSpacing: '0.03em' }}>{label}</div>
-      <div style={{ fontSize: 22, lineHeight: 1.08, fontWeight: 780, color, letterSpacing: '-0.03em' }}>{value}</div>
-      {sub && <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.38)', marginTop: 5, lineHeight: 1.42 }}>{sub}</div>}
-    </div>
-  );
-}
-
 function Badge({ tone, children }: { tone: 'amber' | 'green'; children: React.ReactNode }) {
   const color = tone === 'amber' ? '#fbbf24' : '#6ee7b7';
   const bg = tone === 'amber' ? 'rgba(251,191,36,0.14)' : 'rgba(110,231,183,0.12)';
@@ -429,7 +464,7 @@ function Badge({ tone, children }: { tone: 'amber' | 'green'; children: React.Re
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 11px', borderRadius: 999,
       background: bg, border: `1px solid ${border}`, color, fontSize: 11, fontWeight: 820, letterSpacing: '0.05em',
-      whiteSpace: 'nowrap',
+      textTransform: 'uppercase', whiteSpace: 'nowrap',
     }}>
       {children}
     </span>
@@ -445,8 +480,8 @@ function MetricLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Structured doctor-view card: labeled metric rows + a review badge, in place
-// of dumping the raw report-comments string. Deliberately sources HU/volume
+// Structured doctor-view card: labeled metric rows, in place of dumping the
+// raw report-comments string. The panel's own heading carries the review badge. Deliberately sources HU/volume
 // from the report's organ-baseline numbers (report.organMeanHu/organVolumeCc)
 // rather than curData — curData can be a small anatomical sub-label (e.g.
 // "pancreas_tail") whose own segmented mask is tiny, which previously showed
@@ -454,27 +489,19 @@ function MetricLine({ label, value }: { label: string; value: string }) {
 function OrganMetricsCard({
   curData,
   report,
-  needsReview,
 }: {
   curData: OrganData;
   report: ReportMeasurements;
-  needsReview: boolean;
 }) {
   const meanHu = report.organMeanHu ?? curData.mean_hu;
   const organVolume = report.organVolumeCc ?? curData.volume;
   return (
-    <div style={{ marginTop: 4, marginBottom: 6 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-        <div style={{ fontSize: 11, letterSpacing: '0.12em', color: 'rgba(255,255,255,0.42)', fontWeight: 820, textTransform: 'uppercase' }}>
-          Organ Metrics
-        </div>
-        {needsReview && <Badge tone="amber">NEEDS REVIEW</Badge>}
-      </div>
-      <MetricLine label="Mean attenuation (HU)" value={meanHu !== null ? `${Math.round(meanHu * 10) / 10} HU` : 'Not listed'} />
-      <MetricLine label="Organ volume" value={`${organVolume.toFixed(1).replace(/\.0$/, '')} cc`} />
+    <div>
+      <MetricLine label="Mean attenuation" value={meanHu !== null ? `${String(Math.round(meanHu * 10) / 10).replace(/^-/, '\u2212')} HU` : 'Not listed'} />
+      <MetricLine label="Organ volume" value={`${organVolume.toFixed(1).replace(/\.0$/, '')} cm³`} />
       <MetricLine
-        label="Lesion volume"
-        value={report.lesionVolumeCc !== null ? `${report.lesionVolumeCc.toFixed(1).replace(/\.0$/, '')} cc` : 'None detected'}
+        label={report.lesionCount > 1 ? 'First lesion volume' : 'Lesion volume'}
+        value={report.lesionVolumeCc !== null ? `${report.lesionVolumeCc.toFixed(1).replace(/\.0$/, '')} cm³` : (report.lesionCount > 0 ? 'Not reported' : 'None detected')}
       />
       <MetricLine label="Lesion count" value={String(report.lesionCount)} />
     </div>
@@ -505,7 +532,10 @@ function EvidencePanel({
   const firstMeasurements = firstFinding ? getReportMeasurements(firstFinding, data.comments) : null;
   const impression = getImpressionText(data);
   const report = curOrgan ? getReportMeasurements(curOrgan, data.comments) : null;
-  const reportVolume = report?.volumeCc ?? null;
+  // The lesion's own volume, never the organ's baseline that volumeCc falls back to.
+  // With several lesions the report lists the first one's, as the Doctor card says.
+  const reportVolume = report?.lesionVolumeCc ?? null;
+  const reportVolumeLabel = report && report.lesionCount > 1 ? 'First lesion volume' : 'Volume in report';
   
   if (step === 1) {
     // On the healthy-organs page, do not show the finding preview.
@@ -522,7 +552,7 @@ function EvidencePanel({
         {flagged.length ? (
           <>
             <div style={{ fontSize: 34, lineHeight: 1.08, fontWeight: 830, letterSpacing: '-0.05em', color: '#fbbf24', marginBottom: 14 }}>
-              {labelize(firstFinding!)}
+              {findingLabel(firstFinding!)}
             </div>
             <p style={{ color: 'rgba(255,255,255,0.70)', fontSize: 16, lineHeight: 1.55, margin: 0 }}>
               {lang === 'patient'
@@ -550,25 +580,25 @@ function EvidencePanel({
   if (step >= 2 && curOrgan && curData) {
     return (
       <div style={{ ...glass, width: 350, padding: 24, animation: `${anim} 0.36s cubic-bezier(0.22,1,0.36,1) both` }}>
-        <div style={{ fontSize: 12, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'rgba(251,191,36,0.72)', fontWeight: 800, marginBottom: 18 }}>
-          Measurements
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+          <div style={{ fontSize: 12, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'rgba(251,191,36,0.72)', fontWeight: 800 }}>
+            Measurements
+          </div>
+          {lang === 'clinical' && curData.status === 'check' && <Badge tone="amber">Needs review</Badge>}
         </div>
 
-        <MetricRow label="Organ" value={labelize(curOrgan)} tone="amber" />
-
         {lang === 'clinical' && report && (
-          <OrganMetricsCard curData={curData} report={report} needsReview={curData.status === 'check'} />
+          <OrganMetricsCard curData={curData} report={report} />
         )}
 
         {lang === 'clinical' && report?.sizeCm && (
-          <MetricRow label="Report size" value={`${report.sizeCm} cm`} sub="From the report text." />
+          <MetricLine label={report.lesionCount > 1 ? 'First lesion size' : 'Size in report'} value={`${report.sizeCm} cm`} />
         )}
 
         {lang === 'clinical' && curData.dimensions && !report?.sizeCm && (
-          <MetricRow
-            label="Segmented dimensions"
-            value={`${curData.dimensions[0]} × ${curData.dimensions[1]} × ${curData.dimensions[2]} cm`}
-            sub="Computed from the segmented organ mask."
+          <MetricLine
+            label="Segmented size"
+            value={`${curData.dimensions.map((d) => d.toFixed(1)).join(' × ')} cm`}
           />
         )}
 
@@ -576,15 +606,21 @@ function EvidencePanel({
             same string already shown in the left story panel (medLocal), so
             showing it again just duplicated the same paragraph on screen. */}
 
+        {/* The story card already says to ask the doctor, so this panel only
+            describes itself, and only has something to say when a volume is shown. */}
         {lang === 'patient' && (
-          <>
-            {reportVolume !== null && (
-              <MetricRow label="Volume" value={`${reportVolume.toFixed(1).replace(/\.0$/, '')} cc`} tone="amber" sub="From the report text." />
-            )}
-            <p style={{ color: 'rgba(255,255,255,0.58)', fontSize: 14, lineHeight: 1.55, margin: '18px 0 0' }}>
-              This panel shows the key measurement from the report. Your doctor can explain what it means for you.
+          reportVolume !== null ? (
+            <>
+              <MetricLine label={reportVolumeLabel} value={`${reportVolume.toFixed(1).replace(/\.0$/, '')} cm³`} />
+              <p style={{ color: 'rgba(255,255,255,0.58)', fontSize: 14, lineHeight: 1.55, margin: '18px 0 0', textWrap: 'pretty' }}>
+                This is the key measurement from the report.
+              </p>
+            </>
+          ) : (
+            <p style={{ color: 'rgba(255,255,255,0.58)', fontSize: 14, lineHeight: 1.55, margin: 0, textWrap: 'pretty' }}>
+              No measurement was listed in the report for this finding.
             </p>
-          </>
+          )
         )}
       </div>
     );
@@ -602,6 +638,9 @@ function EvidencePanel({
   );
 }
 
+const COPY_FAILED_NOTE = "Couldn't copy the link. Select it and copy it yourself.";
+const SHARE_FAILED_NOTE = "Couldn't create a link. Try again.";
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlight, onClearHighlight, onHideOrgans }: Props) {
@@ -612,10 +651,16 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
   const [dir, setDir] = useState<'r' | 'l'>('r');
   const [lang, setLang] = useState<Lang>('patient');
   const [modePromptOpen, setModePromptOpen] = useState(false);
-  const [plain2, setPlain2] = useState<string[]>([]);
-  const [pLoad, setPLoad] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const shareLinkRef = useRef<HTMLInputElement>(null);
+  const shareBtnRef = useRef<HTMLButtonElement>(null);
+  const shareCopyBtnRef = useRef<HTMLButtonElement>(null);
+  const shareRetryBtnRef = useRef<HTMLButtonElement>(null);
+  // Set when a retry succeeds while Try again holds focus; see the effect below.
+  const refocusCopyRef = useRef(false);
+  const [shareFailed, setShareFailed] = useState(false);
   // De-identified share link, minted on demand (see mintShareLink below) —
   // this used to be a raw `${API_ORIGIN}/api/report/${id}` string built
   // straight from the real case id. That exposed the real id in the URL and
@@ -623,6 +668,9 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [shareLoading, setShareLoading] = useState(false);
   const startRef = useRef(Date.now());
+
+  // Bumped by Try again to ask for the report once more.
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -636,12 +684,13 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       setLoading(false);
     });
     return () => { active = false; };
-  }, [id]);
+  }, [id, loadAttempt]);
 
   // Reset any previously-minted link when the case changes, so a stale
   // token for a different case can never be shown/copied.
   useEffect(() => {
     setShareUrl(null);
+    setShareFailed(false);
   }, [id]);
 
   // Mints (or re-derives — the backend token is deterministic per case id)
@@ -653,20 +702,46 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
     setShareLoading(true);
     try {
       const r = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/share/${id}/token`, { method: 'POST' });
+      if (!r.ok) throw new Error(`Share token request failed with status ${r.status}`);
       const j = await r.json();
       const token = typeof j.url === 'string' ? j.url.split('/').pop() : null;
-      if (token) setShareUrl(`${window.location.origin}/share/${token}`);
+      if (!token) throw new Error('Share token response had no link');
+      refocusCopyRef.current = !!shareRetryBtnRef.current && document.activeElement === shareRetryBtnRef.current;
+      setShareUrl(`${window.location.origin}${appRootRelativeUrl(`/share/${token}`)}`);
+      setShareFailed(false);
     } catch (e) {
       console.error('Failed to create share link:', e);
+      setShareFailed(true);
     } finally {
       setShareLoading(false);
     }
   }, [id, shareUrl, shareLoading]);
 
+  // A successful retry unmounts the focused Try again button, which would drop
+  // focus to <body>. Hand it to the Copy button, which is now enabled.
+  useEffect(() => {
+    if (!shareUrl || !refocusCopyRef.current) return;
+    refocusCopyRef.current = false;
+    shareCopyBtnRef.current?.focus({ preventScroll: true });
+  }, [shareUrl]);
+
+  // A failed copy note belongs to one opening of the popover, so it is cleared on close.
+  useEffect(() => {
+    if (!shareOpen) setCopyFailed(false);
+  }, [shareOpen]);
+
+  // Closing the popover unmounts whatever inside it had focus, which drops focus
+  // to <body>. When focus was inside, hand it back to the Share button.
+  const closeShare = useCallback(() => {
+    const inside = !!document.getElementById('rs-share-popover')?.contains(document.activeElement);
+    setShareOpen(false);
+    if (inside) shareBtnRef.current?.focus({ preventScroll: true });
+  }, []);
+
   useEffect(() => {
     if (!shareOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShareOpen(false); };
-    const onClick = () => setShareOpen(false);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeShare(); };
+    const onClick = () => closeShare();
     document.addEventListener('keydown', onKey);
     // Deferred so the same click that opened the popover doesn't immediately close it.
     const t = setTimeout(() => document.addEventListener('click', onClick), 0);
@@ -675,45 +750,61 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       document.removeEventListener('click', onClick);
       clearTimeout(t);
     };
-  }, [shareOpen]);
+  }, [shareOpen, closeShare]);
 
   const handleCopyShareLink = async () => {
     if (!shareUrl) return;
+    setCopyFailed(false);
     try {
       await navigator.clipboard.writeText(shareUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (e) {
       console.error('Copy failed:', e);
+      // No clipboard here (plain http, some in-app browsers): select the link so
+      // the reader can copy it by hand.
+      setCopyFailed(true);
+      shareLinkRef.current?.focus();
+      shareLinkRef.current?.select();
     }
   };
-
-  const fetchPlain = useCallback(async () => {
-    if (plain2.length || !data) return;
-    setPLoad(true);
-    try {
-      const r = await fetch(`${APP_CONSTANTS.API_ORIGIN}/api/explain-impressions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ impression: data.impression }),
-      });
-      const j = await r.json();
-      setPlain2(j.plain_language || []);
-    } catch {
-      // Plain-language text is optional; retain the original report on failure.
-    } finally { setPLoad(false); }
-  }, [data, plain2]);
-
-  useEffect(() => { if (data) fetchPlain(); }, [data]);
 
   const go = useCallback((s: Step) => {
     setDir(s > step ? 'r' : 'l');
     setStep(s);
   }, [step]);
 
-  const all = React.useMemo(() => data ? Object.entries(data.organ_volumes).filter(([_, v]) => v.volume > 5 || v.status === 'check') : [], [data]);
-  const flagged = React.useMemo(() => all.filter(([_, v]) => v.status === 'check'), [all]);
-  const normal = React.useMemo(() => all.filter(([_, v]) => v.status !== 'check'), [all]);
+  // Lesion/stent masks are excluded from the volume-based inclusion so they
+  // can never appear in the healthy list ("Pancreatic Lesion" is not a healthy
+  // organ), but any entry the backend flags as 'check' still passes through so
+  // a flagged lesion is not silently dropped from the findings steps.
+  const all = React.useMemo(() => data ? reportOrgans(data) : [], [data]);
+  // Walked through in the same reading order the findings timeline shows, so
+  // the highlighted dot always moves left to right as "Finding N of M" counts up.
+  const flaggedSorted = React.useMemo(() => {
+    const flaggedRaw = all.filter(([_, v]) => v.status === 'check');
+    const order = sortByReadingOrder(flaggedRaw.map(([o]) => ({ organ: o, status: 'check' as const })), data?.comments ?? '').map(n => n.organ);
+    return order.map(o => flaggedRaw.find(([f]) => f === o)!);
+  }, [all, data]);
+  // The server flags the whole organ and its sub-region for one lesion
+  // ("pancreas" and "pancreas_tail"), so the bare organ is dropped when a
+  // sub-region of it is flagged. Left and right twins stay: they are two organs.
+  const flagged = React.useMemo(
+    () => flaggedSorted.filter(([o]) => organLocation(o) !== null || !flaggedSorted.some(([f]) => organRoot(f) === organRoot(o) && organLocation(f)?.type === 'subregion')),
+    [flaggedSorted],
+  );
+  // A parent organ (or sibling sub-part) is not listed as healthy while one of
+  // its parts is a finding, e.g. "Pancreas" is not a healthy organ on step 1
+  // when "Pancreas Body" is presented as the finding on step 2.
+  // A left or right twin is its own organ, though: a flagged left kidney does
+  // not hide a healthy right kidney.
+  // The server also lists a pancreas sub-region (head, body, tail) next to the
+  // whole pancreas, so a sub-region is not counted or listed as a second organ
+  // while its bare parent is already in the list.
+  const normal = React.useMemo(() => {
+    const healthy = all.filter(([o, v]) => v.status !== 'check' && !flagged.some(([f]) => organRoot(f) === organRoot(o) && !areLateralTwins(f, o)));
+    return healthy.filter(([o]) => organLocation(o)?.type !== 'subregion' || !healthy.some(([p]) => p === organRoot(o)));
+  }, [all, flagged]);
   const totalSteps = 2 + flagged.length + 1;
 
   const curOrganName = step >= 2 && step < 2 + flagged.length ? flagged[step - 2]?.[0] : null;
@@ -724,7 +815,9 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
     if (!data) return;
     onClearHighlight?.();
     if (step === 1) {
-      onHideOrgans?.(flagged.map(([o]) => o));
+      // Every flagged organ is hidden, including the bare organ the findings
+      // list folded into its sub-region: it is a separate mesh in the viewer.
+      onHideOrgans?.(flaggedSorted.map(([o]) => o));
     } else if (step >= 2 && step < 2 + flagged.length) {
       const highlightName = curOrganName === 'pancreas' ? 'pancreas_body' : curOrganName;
       if (highlightName && curOrganData) onOrganHighlight?.(highlightName, curOrganData.centroid_mm);
@@ -761,10 +854,10 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       <div style={{ animation: `${anim} 0.38s cubic-bezier(0.22,1,0.36,1) both` }}>
         <div style={{ fontSize: 12, letterSpacing: '0.13em', color: 'rgba(110,231,183,0.72)', textTransform: 'uppercase', marginBottom: 16, fontWeight: 800 }}>Healthy organs</div>
         <h1 style={{ fontSize: 40, lineHeight: 1.05, letterSpacing: '-0.06em', color: '#6ee7b7', margin: '0 0 14px', fontWeight: 850 }}>
-          {normal.length} organs look healthy.
+          {organsLookHealthy(normal.length)}.
         </h1>
         <p style={{ fontSize: 17, color: 'rgba(255,255,255,0.66)', lineHeight: 1.5, margin: '0 0 20px' }}>
-          These organs looked healthy on this scan.
+          {normal.length === 1 ? 'This organ looked' : 'These organs looked'} healthy on this scan.
         </p>
         <OrganList organs={normal} />
         <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
@@ -782,10 +875,10 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
           Finding {step - 1} of {flagged.length}
         </div>
         <h1 style={{ fontSize: 44, lineHeight: 1.02, letterSpacing: '-0.065em', color: '#fbbf24', margin: '0 0 16px', fontWeight: 860 }}>
-          {labelize(curOrganLocal)}
+          {findingLabel(curOrganLocal)}
         </h1>
         <p style={{ fontSize: 18, color: 'rgba(255,255,255,0.78)', lineHeight: 1.56, margin: '0 0 18px' }}>
-          {lang === 'patient' ? patientLocal : (medLocal || impressionText || 'This finding is listed in the report.')}
+          {lang === 'patient' ? patientLocal : (medLocal || impressionText || 'The report has no written detail for this finding.')}
         </p>
         {lang === 'patient' && (
           <p style={{ fontSize: 15, color: 'rgba(255,255,255,0.50)', lineHeight: 1.55, margin: '0 0 22px' }}>
@@ -794,7 +887,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
         )}
         {lang === 'clinical' && (
           <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.48)', lineHeight: 1.55, margin: '0 0 22px' }}>
-            Measurements and original report text are shown in the panel on the right.
+            Measurements are in the panel on the right.
           </p>
         )}
         <div style={{ display: 'flex', gap: 10 }}>
@@ -811,18 +904,20 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       <div style={{ animation: `${anim} 0.42s cubic-bezier(0.22,1,0.36,1) both`, textAlign: 'center' }}>
         <div style={{ fontSize: 12, letterSpacing: '0.14em', color: allClear ? 'rgba(110,231,183,0.72)' : 'rgba(255,255,255,0.44)', textTransform: 'uppercase', marginBottom: 18, fontWeight: 800 }}>Final impressions</div>
         <h1 style={{ fontSize: 46, lineHeight: 1.02, letterSpacing: '-0.065em', color: allClear ? '#6ee7b7' : '#fff', margin: '0 0 20px', fontWeight: 860 }}>
-          {allClear ? 'All clear.' : (data.impression?.length === 1 ? 'Final Impressions:' : 'Final findings.')}
+          {allClear ? 'All clear.' : `${flagged.length} ${flagged.length === 1 ? 'finding' : 'findings'} to review.`}
         </h1>
-        {data.impression?.length > 0 && (
+        {impressionText && (
           <div style={{ padding: '20px 22px', borderRadius: 22, background: allClear ? 'rgba(110,231,183,0.075)' : 'rgba(251,191,36,0.075)', border: `1px solid ${allClear ? 'rgba(110,231,183,0.18)' : 'rgba(251,191,36,0.18)'}`, margin: '0 0 22px', textAlign: 'left' }}>
             <div style={{ fontSize: 12, color: allClear ? 'rgba(110,231,183,0.72)' : 'rgba(251,191,36,0.72)', marginBottom: 10, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 780 }}>Report impression</div>
             <p style={{ fontSize: 21, color: 'rgba(255,255,255,0.90)', lineHeight: 1.45, margin: 0, fontWeight: 650 }}>
-              {getImpressionText(data)}
+              {impressionText}
             </p>
           </div>
         )}
         <p style={{ fontSize: 15, color: 'rgba(255,255,255,0.55)', lineHeight: 1.55, margin: '0 auto 26px', maxWidth: 430 }}>
-          Final note: discuss this report with your doctor so they can interpret it with your symptoms, history, and other tests.
+          {lang === 'patient'
+            ? 'Final note: discuss this report with your doctor so they can interpret it with your symptoms, history, and other tests.'
+            : 'Final note: these findings come from an automated analysis, so confirm them against the source images and the full report.'}
         </p>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
           <SecondaryButton onClick={() => go(step - 1)}>← Back</SecondaryButton>
@@ -831,7 +926,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
       </div>
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, lang, data, plain2, pLoad]);
+  }, [step, lang, data]);
 
   if (!loading && !data) return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 9998, pointerEvents: 'none' }}>
@@ -845,7 +940,10 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
             : `.render { filter: none !important; transform: translateX(0) !important; transition: filter 0.45s cubic-bezier(0.22,1,0.36,1), transform 0.45s cubic-bezier(0.22,1,0.36,1) !important; }`}</style>
       <div style={{ position: 'fixed', inset: 0, zIndex: 10001, pointerEvents: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
         <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: 14, margin: 0 }}>Report unavailable.</p>
-        <button onClick={onClose} style={{ fontSize: 11, background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.5)', borderRadius: 8, padding: '7px 20px', cursor: 'pointer', fontFamily: 'inherit' }}>Close</button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button onClick={() => setLoadAttempt(n => n + 1)} style={{ fontSize: 11, background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.5)', borderRadius: 8, padding: '7px 20px', cursor: 'pointer', fontFamily: 'inherit' }}>Try again</button>
+          <button onClick={onClose} style={{ fontSize: 11, background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.5)', borderRadius: 8, padding: '7px 20px', cursor: 'pointer', fontFamily: 'inherit' }}>Close</button>
+        </div>
       </div>
     </div>
   );
@@ -884,7 +982,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 270 }}>
               <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.36)', letterSpacing: '0.12em', fontWeight: 760 }}>BODYMAPS</span>
               <span style={{ color: 'rgba(255,255,255,0.16)', fontSize: 11 }}>·</span>
-              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.52)' }}>Case {id} · {data.patient.sex} · {data.patient.age}y</span>
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.52)' }}>{caseSummary(id, data.patient)}</span>
             </div>
 
             <div style={{ position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%, -50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 9 }}>
@@ -912,6 +1010,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
               )}
               <div style={{ position: 'relative' }}>
                 <button
+                  ref={shareBtnRef}
                   onClick={() => { setShareOpen((v) => !v); mintShareLink(); }}
                   style={{
                     display: 'flex',
@@ -933,6 +1032,7 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
 
                 {shareOpen && (
                   <div
+                    id="rs-share-popover"
                     onClick={(e) => e.stopPropagation()}
                     style={{
                     position: 'absolute', top: 'calc(100% + 10px)', right: 0, zIndex: 20000,
@@ -940,18 +1040,25 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
                     borderRadius: 14, padding: 16, boxShadow: '0 18px 60px rgba(0,0,0,0.5)',
                   }}>
                     <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.86)', lineHeight: 1.5, marginBottom: 12 }}>
-                      Share this link with anyone — a family member, your doctor, whoever needs it. It opens a
+                      Share this link with anyone who needs it, such as a family member or your doctor. It opens a
                       de-identified, readable summary of this scan.
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <div style={{
-                        flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)',
-                        borderRadius: 10, padding: '8px 10px', fontSize: 12, color: 'rgba(255,255,255,0.65)',
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      }}>
-                        {shareLoading ? 'Generating link…' : (shareUrl || 'Link unavailable')}
-                      </div>
+                      <input
+                        ref={shareLinkRef}
+                        type="text"
+                        readOnly
+                        aria-label="Share link"
+                        value={shareLoading ? 'Generating link…' : (shareUrl || 'Link unavailable')}
+                        onFocus={(e) => e.currentTarget.select()}
+                        style={{
+                          flex: 1, minWidth: 0, boxSizing: 'border-box', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)',
+                          borderRadius: 10, padding: '8px 10px', fontSize: 12, fontFamily: 'inherit', color: 'rgba(255,255,255,0.72)',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }}
+                      />
                       <button
+                        ref={shareCopyBtnRef}
                         onClick={handleCopyShareLink}
                         disabled={!shareUrl}
                         style={{
@@ -967,7 +1074,28 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
                       >
                         {copied ? 'Copied' : 'Copy'}
                       </button>
+                      <span className="sr-only" role="status">{copied ? 'Link copied' : copyFailed ? COPY_FAILED_NOTE : shareFailed && !shareLoading ? SHARE_FAILED_NOTE : ''}</span>
                     </div>
+                    {/* The retry row stays mounted while a retry runs, so the focused Try again button keeps focus. */}
+                    {shareFailed && !shareUrl && (
+                      <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, lineHeight: 1.45, color: 'rgba(251,191,36,0.92)' }}>
+                        <span aria-hidden="true">{shareLoading ? 'Generating link…' : "Couldn't create a link."}</span>
+                        <button
+                          ref={shareRetryBtnRef}
+                          type="button"
+                          onClick={mintShareLink}
+                          aria-disabled={shareLoading || undefined}
+                          style={{ flexShrink: 0, background: 'rgba(255,255,255,0.10)', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 10, padding: '6px 10px', cursor: shareLoading ? 'progress' : 'pointer', opacity: shareLoading ? 0.6 : 1, fontFamily: 'inherit', fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.86)' }}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    )}
+                    {copyFailed && (
+                      <div aria-hidden="true" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.45, color: 'rgba(251,191,36,0.92)' }}>
+                        {COPY_FAILED_NOTE}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1005,8 +1133,8 @@ export default function ReportScreen({ id, onClose, onViewChange, onOrganHighlig
                 </h1>
                 <p style={{ fontSize: 18, color: 'rgba(255,255,255,0.70)', lineHeight: 1.55, margin: '0 auto 26px', maxWidth: 430 }}>
                   {flagged.length > 0
-                    ? `${normal.length} organ${normal.length === 1 ? '' : 's'} look healthy. ${flagged.length} finding${flagged.length === 1 ? '' : 's'} will be explained.`
-                    : `All ${normal.length} organ${normal.length === 1 ? '' : 's'} look healthy. No findings to review.`}
+                    ? `${organsLookHealthy(normal.length)}. ${flagged.length}\u00a0finding${flagged.length === 1 ? '' : 's'} will be explained.`
+                    : `${normal.length === 1 ? '' : 'All '}${organsLookHealthy(normal.length)}. No findings to review.`}
                 </p>
                 <button
                   className="rs-primary"
