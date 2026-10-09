@@ -8,17 +8,6 @@
      (src/components/AIAssistant/AISidebar.css) and by the content shift below,
      so the CT views sit flush against the panel with no overlap. */
   --vp-ai-width: 400px;
-  /* Declared here (not just inside .annotation-open) so the property has a
-     transition defined in BOTH states — opening AND closing the segments
-     panel animates the viewport's width smoothly instead of the
-     padding-right jumping straight from 0 to ~320px (or back) the instant
-     the annotation-open class toggles. Matches .vp-stage's own
-     margin-top transition below so the ribbon opening and the panel
-     opening read as one coordinated resize instead of two different
-     speeds.
-   */
-  padding-right: 0px;
-  transition: padding-right 0.2s ease;
   box-sizing: border-box;
 }
 
@@ -33,12 +22,14 @@
    instead of floating over the canvas. When open, push the whole grid down by
    the ribbon's height via padding on the outer container. --atb-ribbon-h is
    defined in AnnotationToolbar.css and tracks the ribbon's actual height. */
-.VisualizationPage.annotation-open {
-  /* The root is a flex column (.vp-topbar and .vp-stage as siblings); the
-     fixed-position ribbon anchors via `top: var(--vp-topbar-h)` in
-     AnnotationToolbar.css, so only .vp-stage (not the topbar) needs pushing
-     down to make room for it. */
-  padding-right: var(--atb-segpanel-w, 320px);
+.VisualizationPage.annotation-open .vp-body {
+  /* The segments panel is fixed to the right edge below the toolbar
+     (SegmentsPopup's DOCK_CLEARANCE), so only the body row gives way to it.
+     The toolbar keeps its full width and doesn't wrap onto a second row
+     just because annotate mode opened. Clamped against the viewport so the
+     reserved gutter (the class panel is user-resizable up to 560px) can
+     never crush the CT stage at narrow window widths. */
+  margin-right: min(var(--atb-segpanel-w, 320px), 45vw);
 }
 
 .VisualizationPage.annotation-open .vp-stage {
@@ -59,6 +50,16 @@
 
   .VisualizationPage.ai-panel-open .checkbox-bottom-bar {
     width: 100vw;
+  }
+}
+
+/* Phone width. There is no room to dock anything beside a usable stage, so
+   annotate mode stacks the segments panel under the stage rather than beside it. */
+@media (max-width: 640px) {
+  .VisualizationPage.annotation-open .vp-body {
+    margin-right: 0;
+    /* SegmentsPopup.css turns the panel into a bottom sheet this tall. */
+    margin-bottom: var(--segpop-sheet-h, 34vh);
   }
 }
 

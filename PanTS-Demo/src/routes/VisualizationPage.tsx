@@ -3564,13 +3564,16 @@ const aiAvailableOrgans = useMemo(() => {
 		return `#${[r, g, b].map((c) => Math.max(0, Math.min(255, Math.round(c))).toString(16).padStart(2, "0")).join("")}`;
 	};
 
-	const handleCreateClass = (name: string, colorHex: string): CheckBoxData | null => {
+	// A string is the reason the class was not created; the popup shows it as is.
+	const handleCreateClass = (name: string, colorHex: string): CheckBoxData | string | null => {
 		const trimmed = name.trim();
 		const dup = checkBoxData.some((s) => s.label.toLowerCase() === trimmed.toLowerCase());
-		if (dup) return null; // name collides with an existing organ (catalog or custom)
+		// The name collides with an organ of the full list, including one this scan lacks
+		// (the popup's own check only sees the organs present).
+		if (dup) return "That name matches an existing class.";
 	
 		const result = createNewAnnotationClass(trimmed, hexToColor(colorHex));
-		if (!result) return null;
+		if (!result) return "Wait for the scan to finish loading, then try again.";
 	
 		const newOrgan: CheckBoxData = { id: result.segmentIndex, label: trimmed };
 		setCheckBoxData((prev) => [...prev, newOrgan]);
