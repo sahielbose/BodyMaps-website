@@ -20,6 +20,7 @@ import {
 	type SliceInfo,
 } from "../CornerstoneNifti2";
 import type { MaskEditMode } from "../../routes/VisualizationPage";
+import { NON_TEXT_INPUT_TYPES } from "./escapeUsed";
 
 const TOOL_BY_KEY: Record<string, PrimaryMouseToolName> = {
 	l: LENGTH_TOOL,
@@ -44,6 +45,10 @@ const BRUSH_STEP_MM = 2;
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 8;
+
+// What a focused range slider moves itself with.
+const RANGE_NATIVE_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
+
 const ZOOM_STEP_FACTOR = 1.15; // per keypress, matches a moderate scroll-wheel zoom
 
 interface UseKeyboardShortcutsArgs {
@@ -194,11 +199,17 @@ export function useKeyboardShortcuts({
 
 		const onKey = (e: KeyboardEvent) => {
 			const target = e.target as HTMLElement | null;
-			if (
-				target &&
-				(target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
-			)
-				return;
+			// A focused select needs its letters (typeahead), Home/End and the
+			// brackets for itself, same as a text field.
+			if (target && (target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
+			if (target?.tagName === "INPUT") {
+				const type = (target as HTMLInputElement).type;
+				// Buttons, checkboxes, radios and sliders keep focus after a click
+				// or drag, so their letters must still reach the viewer. A slider
+				// keeps only the keys it moves itself.
+				if (!NON_TEXT_INPUT_TYPES.has(type)) return;
+				if (type === "range" && !e.metaKey && !e.ctrlKey && !e.altKey && RANGE_NATIVE_KEYS.has(e.key)) return;
+			}
 
 			const key = e.key.toLowerCase();
 

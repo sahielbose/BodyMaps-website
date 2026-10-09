@@ -13,6 +13,7 @@ import {
 	IconCopy,
 	IconWaveSine,
 	IconCircleDashed,
+	IconCheck,
 } from "@tabler/icons-react";
 import "./AnnotationToolbar.css";
 import NumberSliderField from "../NumberSliderField";
@@ -231,6 +232,9 @@ function ScissorsFlyout({ options, onChange, onCloseSettings }: {
 						checked={options.magnetEnabled !== false}
 						onChange={(e) => set("magnetEnabled", e.target.checked)}
 					/>
+					<span className={`atb-checkbox-box ${options.magnetEnabled !== false ? "is-checked" : ""}`} aria-hidden="true">
+						<IconCheck size={12} stroke={3} className="atb-checkbox-box__check" />
+					</span>
 				</label>
 			</MenuColumn>
 
@@ -958,6 +962,9 @@ export default function AnnotationToolbar({
 				// Forces a reposition when settings reopen for a different tool
 				// icon, so the panel doesn't stay glued under the previous one.
 				anchorKey={activeTool}
+				// Escape and tabbing out leave it like an outside click does.
+				label={activeDef ? `${activeDef.label} settings` : undefined}
+				onDismiss={toolFlyout.dismiss}
 				// Guided-overlay tools (GrowFromSeeds, Copy/FillAcrossSlices,
 				// Islands) close settings the instant their overlay takes over
 				// picking; keepMounted stops that from unmounting the picker

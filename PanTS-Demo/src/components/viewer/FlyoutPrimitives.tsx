@@ -4,9 +4,13 @@
 // etc). Nothing tool-specific lives here — see GrowFromSeedFlyout.tsx,
 // HollowFlyout.tsx, MarginPanel.tsx, etc. for the per-tool panels built
 // out of these pieces.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Children, cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconChevronDown, IconChevronRight, IconCheck } from "@tabler/icons-react";
+import { focusableWithin } from "../../hooks/useDialogFocus";
+import { escapeWasUsed, markEscapeUsed } from "../../helpers/viewer/escapeUsed";
+import { initialFocusTarget } from "../../helpers/viewer/useToolbarFlyout";
+import { prefersReducedMotion } from "../../helpers/motion";
 import "../viewer/FlyoutPrimitives.css";
 
 export interface FlyoutState {
@@ -18,6 +22,10 @@ export interface FlyoutState {
 	/** The portaled panel's own root — also part of the outside-click
 	 *  boundary, so clicking inside the open panel never closes it. */
 	panelRef: React.RefObject<HTMLDivElement | null>;
+	/** Closes the panel the way an outside click does, onOutsideClose
+	 *  included. Pass it to FlyoutPanel's `onDismiss` so Escape and tabbing
+	 *  out of the panel leave it the same way. */
+	dismiss: () => void;
 }
 
 // Every currently-mounted flyout registers itself here so opening one can
@@ -59,6 +67,21 @@ export function useFlyout(initialOpen = false, options?: { closeOnOutsideClick?:
 	const [open, setOpenState] = useState(initialOpen);
 	const anchorRef = useRef<HTMLElement | null>(null);
 	const panelRef = useRef<HTMLDivElement | null>(null);
+	// Latest onOutsideClose, so a dismissal reads the caller's current state
+	// (the active tool can change while the panel stays open).
+	const onOutsideCloseRef = useRef(onOutsideClose);
+	useEffect(() => {
+		onOutsideCloseRef.current = onOutsideClose;
+	}, [onOutsideClose]);
+	// Distinct from other ways this flyout closes (Apply, Exit, re-clicking
+	// the tool icon, ...). This is "clicked away from it" (or Escape, or
+	// tabbed out of it), which should also fully deselect the owning tool.
+	// Callers wire that up in onOutsideClose rather than this hook reaching
+	// into tool-selection state itself.
+	const dismiss = useCallback(() => {
+		setOpenState(false);
+		onOutsideCloseRef.current?.();
+	}, []);
 
 	const setOpen = useCallback<React.Dispatch<React.SetStateAction<boolean>>>((value) => {
 		setOpenState((prev) => {
@@ -89,20 +112,22 @@ export function useFlyout(initialOpen = false, options?: { closeOnOutsideClick?:
 			// outside click on the parent and close it before the row's
 			// own onClick fires.
 			if (t instanceof Element && (t.closest(".atb-pop__panel") || t.closest(".atb-pop__overlay"))) return;
-			setOpenState(false);
-			// Distinct from other ways this flyout closes (Apply, Exit,
-			// re-clicking the tool icon, ...) — this is "clicked away from
-			// it", which should also fully deselect the owning tool.
-			// Callers wire that up here rather than this hook reaching
-			// into tool-selection state itself.
-			onOutsideClose?.();
+			// The settings arrow sits outside anchorRef/panelRef (the panel
+			// anchors to the tool's icon), so its press is skipped here rather
+			// than stopped at the button. Pressing it to CLOSE an open flyout
+			// would otherwise dismiss it on mousedown and the arrow's own
+			// onClick would reopen it. Leaving the event to bubble still lets
+			// every other document-level closer (class editor, colour popover,
+			// top-bar flyouts) see the press.
+			if (t instanceof Element && t.closest(".atb-pop__arrow")) return;
+			dismiss();
 		};
 		document.addEventListener("mousedown", onPointerDown);
 		return () => document.removeEventListener("mousedown", onPointerDown);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, closeOnOutsideClick]);
 
-	return { open, setOpen, anchorRef, panelRef };
+	return { open, setOpen, anchorRef, panelRef, dismiss };
 }
 
 /** The small standalone downward-chevron trigger that sits directly next to
@@ -122,34 +147,29 @@ export function FlyoutArrow({
 			type="button"
 			className={`atb-pop__arrow ${open ? "is-open" : ""}`}
 			onClick={onClick}
-			// The panel this arrow toggles anchors to the tool's ICON, not the
-			// arrow itself (so the flyout centers under the icon rather than
-			// the wider icon+arrow wrapper) — so the arrow sits outside the
-			// anchorRef/panelRef boundary useFlyout's outside-click listener
-			// checks. Without this, pressing the arrow to CLOSE an open
-			// flyout raced with that listener: its `mousedown` handler fired
-			// first (mousedown bubbles to `document` before `click` fires),
-			// saw the arrow wasn't inside the boundary, and closed the panel
-			// right there — then this button's own `onClick` ran a beat
-			// later against an already-`open:false` render and reopened it,
-			// so the arrow appeared to do nothing on the second press.
-			// Stopping propagation here keeps that mousedown from ever
-			// reaching the document listener, so this button's own toggle
-			// logic is the only thing that decides open/closed.
-			onMouseDown={(e) => e.stopPropagation()}
 			aria-label={label}
 			aria-expanded={open}
+			aria-haspopup="dialog"
 		>
 			<IconChevronDown size={14} stroke={2.25} />
 		</button>
 	);
 }
 
+/** Body class set while an open flyout sits against the right edge of the
+ *  screen. The panes' slice-slider thumbs live in that outer strip, so
+ *  the stylesheet hides them while it is set rather than let their tips show
+ *  beside the panel's rounded corner. A set of panels, so one closing never
+ *  clears the class for another that is still at the edge. */
+const EDGE_CLASS = "atb-flyout-at-edge";
+const panelsAtEdge = new Set<object>();
+
 /** The portaled popup rectangle itself — positioned against `anchorRef`,
  *  either directly below it (a tool's top-level settings flyout) or to its
  *  right (a grandchild opened from a MenuRow inside another flyout).
- *  Closes/repositions are the caller's job via `useFlyout`; this component
- *  only handles "where does the box go" + "render it above everything". */
+ *  Opening and closing are the caller's job via `useFlyout`; this component
+ *  handles "where does the box go", "render it above everything" and
+ *  keyboard focus in and out of it. */
 export function FlyoutPanel({
 	open,
 	anchorRef,
@@ -159,6 +179,8 @@ export function FlyoutPanel({
 	children,
 	keepMounted = false,
 	anchorKey,
+	label,
+	onDismiss,
 }: {
 	open: boolean;
 	anchorRef: React.RefObject<HTMLElement | null>;
@@ -166,6 +188,12 @@ export function FlyoutPanel({
 	placement?: "below" | "right";
 	minWidth?: number;
 	children: React.ReactNode;
+	/** Accessible name, e.g. "Brush settings". The panel is a dialog only
+	 *  when it has one. */
+	label?: string;
+	/** Escape, or tabbing past either end of the panel, calls this (pass
+	 *  useFlyout's `dismiss`). Without it the panel ignores those keys. */
+	onDismiss?: () => void;
 	/** Bump this (e.g. pass the active tool's id) whenever `anchorRef.current`
 	 *  is swapped to point at a DIFFERENT element while the panel is already
 	 *  open. `anchorRef` is a plain ref — mutating `.current` doesn't change
@@ -195,36 +223,67 @@ export function FlyoutPanel({
 	// .atb-pop__pointer. Computed off the anchor's own center, same
 	// approach as SegmentsPopup's FormFlyout arrowLeft.
 	const [pos, setPos] = useState<{ top: number; left: number; pointer: number } | null>(null);
+	// The latest position calculation, for the size observer below.
+	const computeRef = useRef<() => void>(() => {});
 
 	// How long the panel's grow-in/shrink-out transition takes — mirrors the
 	// entrance animation's own duration (see .atb-pop__panel's
 	// atb-pop-grow-in keyframes) so opening and closing feel symmetric.
 	const PANEL_ANIM_MS = 160;
-	// Lags one tick behind `open` on the way out so a non-keepMounted panel
-	// stays mounted long enough to play its shrink/fade-out transition
-	// instead of snapping straight to unmounted the instant a tool
-	// deselects or an outside click lands.
+	// True from the render where `open` goes false until the shrink/fade-out
+	// has had time to play, so the panel stays shown (and a non-keepMounted
+	// one stays mounted) while it eases out. Set during that same render, not
+	// in an effect: an effect only ran after the first closed commit had
+	// already hidden (display:none) or unmounted the panel, which then came
+	// back already faded with nothing left to transition.
 	const [closing, setClosing] = useState(false);
-	const closeTimerRef = useRef<number | null>(null);
-	const [everOpened, setEverOpened] = useState(open);
+	const [prevOpen, setPrevOpen] = useState(open);
+	// The anchorKey the panel last showed while open, to tell when a close
+	// also swaps the content for another tool's.
+	const [shownKey, setShownKey] = useState(anchorKey);
+	// A static copy of the panel's last content, faded out in place of the
+	// live children when a close also takes that content away: a deselected
+	// tool (Apply, Escape, an outside click) leaves no children, and a switch
+	// to a tool whose settings stay shut brings that tool's instead. A copy
+	// of the DOM rather than the old React children, so the departing tool
+	// still unmounts at once and its cleanup (window listeners, guided
+	// controls) runs exactly when it always did.
+	const [departing, setDeparting] = useState<Node[] | null>(null);
+	// Whether focus was inside the panel when it began to close. A one-shot
+	// action (Smooth, Grow, Hollow...) deselects its tool, which unmounts the
+	// focused button with the panel's content, so by the time the focus effect
+	// runs the active element is already <body> and `panel.contains` says no.
+	const focusWasInsideRef = useRef(false);
+	if (open !== prevOpen) {
+		if (!open) {
+			// Read during render, before this commit unmounts what has focus.
+			// eslint-disable-next-line react-hooks/refs
+			focusWasInsideRef.current = !!panelRef.current?.contains(document.activeElement);
+		}
+		setPrevOpen(open);
+		setClosing(!open);
+		setDeparting(null);
+	}
+	if (open && anchorKey !== shownKey) setShownKey(anchorKey);
+	const contentLeaves = children == null || children === false || anchorKey !== shownKey;
+	if (closing && !open && contentLeaves && departing === null) {
+		// Read during render, before this commit replaces what's on screen.
+		// eslint-disable-next-line react-hooks/refs
+		setDeparting(copyPanelContent(panelRef.current));
+	}
 
 	useEffect(() => {
-		if (open) {
-			if (closeTimerRef.current != null) { window.clearTimeout(closeTimerRef.current); closeTimerRef.current = null; }
+		if (!closing) return;
+		// A timer, not transitionend, which never fires when the transition
+		// is skipped (reduced motion, a panel that never painted) and would
+		// leave the panel stuck closing.
+		const id = window.setTimeout(() => {
 			setClosing(false);
-			setEverOpened(true);
-			return;
-		}
-		if (!everOpened) return; // never shown yet — nothing to animate out
-		setClosing(true);
-		closeTimerRef.current = window.setTimeout(() => {
-			setClosing(false);
-			closeTimerRef.current = null;
+			setDeparting(null);
 			if (!keepMounted) setPos(null);
-		}, PANEL_ANIM_MS);
-		return () => { if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current); };
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [open]);
+		}, prefersReducedMotion() ? 0 : PANEL_ANIM_MS);
+		return () => window.clearTimeout(id);
+	}, [closing, keepMounted]);
 
 	useEffect(() => {
 		if (!open) {
@@ -242,13 +301,13 @@ export function FlyoutPanel({
 			const margin = 8;
 			const vw = typeof window !== "undefined" ? window.innerWidth : 1024;
 			const vh = typeof window !== "undefined" ? window.innerHeight : 768;
-			// Panel isn't mounted yet on this pass, so we don't have its real
-			// rendered width — estimate from minWidth (every caller passes one
-			// for panels that could realistically hit an edge) so the clamp
-			// still keeps the panel on-screen instead of letting it run off
-			// the right edge, which is what was happening for grandchildren
-			// anchored to icons/rows near the right side of the ribbon.
-			const estWidth = minWidth ?? 240;
+			// The panel's real width once it has rendered (the pass below re-runs
+			// this whenever its size changes), so the clamp keeps it fully on
+			// screen whatever its content. Before its first render there is no
+			// width to read, so estimate from minWidth — every caller passes one
+			// for panels that could realistically hit an edge.
+			const measured = panelRef.current?.offsetWidth ?? 0;
+			const estWidth = measured || (minWidth ?? 240);
 			let left: number;
 			let top: number;
 			if (placement === "right") {
@@ -273,8 +332,11 @@ export function FlyoutPanel({
 			const pointer = placement === "right"
 				? Math.max(14, Math.min(r.top + r.height / 2 - top, (panelRef.current?.offsetHeight ?? 200) - 14))
 				: Math.max(14, Math.min(r.left + r.width / 2 - left, estWidth - 14));
-			setPos({ top, left, pointer });
+			// Same spot as last time: keep the state (and skip a render), so
+			// measuring after every size change can't loop.
+			setPos((cur) => (cur && cur.top === top && cur.left === left && cur.pointer === pointer ? cur : { top, left, pointer }));
 		};
+		computeRef.current = compute;
 		compute();
 		window.addEventListener("resize", compute);
 		window.addEventListener("scroll", compute, true);
@@ -283,6 +345,121 @@ export function FlyoutPanel({
 			window.removeEventListener("scroll", compute, true);
 		};
 	}, [open, anchorRef, placement, anchorKey]);
+
+	// The first pass positions the panel before it exists, so its width is
+	// unknown: once it renders, and again whenever its content resizes,
+	// place it from its real width so it never runs off the screen edge.
+	const placed = pos !== null;
+	useLayoutEffect(() => {
+		const panel = panelRef.current;
+		if (!open || !placed || !panel) return;
+		computeRef.current();
+		if (typeof ResizeObserver === "undefined") return;
+		const ro = new ResizeObserver(() => computeRef.current());
+		ro.observe(panel);
+		return () => ro.disconnect();
+	}, [open, placed, anchorKey, panelRef]);
+
+	// The panel reaches the screen's right edge (the clamp in compute() stops
+	// it 8px short): flag the body so the slice sliders under that strip hide.
+	const [edgeToken] = useState(() => ({}));
+	useEffect(() => {
+		const panel = panelRef.current;
+		const atEdge = open && pos !== null && !!panel && pos.left + panel.offsetWidth >= window.innerWidth - 9;
+		if (atEdge) panelsAtEdge.add(edgeToken);
+		else panelsAtEdge.delete(edgeToken);
+		document.body.classList.toggle(EDGE_CLASS, panelsAtEdge.size > 0);
+		return () => {
+			panelsAtEdge.delete(edgeToken);
+			document.body.classList.toggle(EDGE_CLASS, panelsAtEdge.size > 0);
+		};
+	}, [open, pos, panelRef, edgeToken]);
+
+	// Keyboard access, the same disclosure pattern as the viewer toolbar's
+	// flyouts (see useToolbarFlyout): focus moves into the panel when it
+	// opens, Escape dismisses it, and tabbing past either end dismisses it and
+	// carries on from the control that opened it, as if the panel sat right
+	// after that control. Without this the panel, portaled to the end of
+	// <body>, was only reachable by tabbing through the rest of the page.
+	const openerRef = useRef<HTMLElement | null>(null);
+	const onDismissRef = useRef(onDismiss);
+	useEffect(() => {
+		onDismissRef.current = onDismiss;
+	}, [onDismiss]);
+	const shown = open && pos !== null;
+	useEffect(() => {
+		const panel = panelRef.current;
+		if (!panel) return;
+		const active = document.activeElement;
+		if (!shown) {
+			// Closed while focus was still inside (a mode picked with the
+			// keyboard): hand it back rather than lose it with the panel.
+			// The same goes for focus the closing panel already dropped to
+			// <body> (its focused button unmounted with the content).
+			const wasInside = focusWasInsideRef.current;
+			focusWasInsideRef.current = false;
+			if (
+				active instanceof Node
+				&& (panel.contains(active) || (wasInside && (active === document.body || !active.isConnected)))
+			) openerRef.current?.focus({ preventScroll: true });
+			return;
+		}
+		// Safari doesn't focus a clicked button, so fall back to the anchor's.
+		const anchor = anchorRef.current;
+		openerRef.current = active instanceof HTMLElement && active !== document.body && !panel.contains(active)
+			? active
+			: anchor?.closest<HTMLElement>("button") ?? anchor?.querySelector<HTMLElement>("button") ?? null;
+		const target = initialFocusTarget(panel);
+		if (target === panel && !panel.hasAttribute("tabindex")) panel.setAttribute("tabindex", "-1");
+		target.focus({ preventScroll: true });
+		// Only on open (or a switch to another tool's settings), not on every
+		// render, which would pull focus back into the panel.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [shown, anchorKey]);
+
+	useEffect(() => {
+		if (!shown) return;
+		const onKeyDown = (e: KeyboardEvent) => {
+			const panel = panelRef.current;
+			const dismiss = onDismissRef.current;
+			if (!panel || !dismiss) return;
+			const active = document.activeElement;
+			const inside = active instanceof Node && panel.contains(active);
+			const opener = openerRef.current;
+			if (e.key === "Escape") {
+				// Bubble phase plus the used check, so a popover or dialog in or
+				// over the panel takes its own Escape first. Marked as used, so
+				// the viewer doesn't also disarm the tool with it.
+				if (escapeWasUsed(e)) return;
+				markEscapeUsed(e);
+				dismiss();
+				if (inside || active === document.body) opener?.focus({ preventScroll: true });
+				return;
+			}
+			if (e.key !== "Tab" || !inside) return;
+			// Radios that are not their group's Tab stop (tabindex -1) are left
+			// out: the browser skips them, so they are not where Tab leaves from.
+			const items = focusableWithin(panel).filter((el) => el.getAttribute("tabindex") !== "-1");
+			// A radio focused with the arrow keys is not the group's Tab stop;
+			// treat the group as one stop so Tab still leaves from its end.
+			const stop = active instanceof HTMLElement && active.getAttribute("role") === "radio"
+				? active.closest('[role="radiogroup"]')?.querySelector<HTMLElement>('[role="radio"][tabindex="0"]') ?? active
+				: active;
+			if (e.shiftKey && (stop === items[0] || stop === panel)) {
+				e.preventDefault();
+				dismiss();
+				opener?.focus({ preventScroll: true });
+			} else if (!e.shiftKey && (stop === items[items.length - 1] || stop === panel || items.length === 0)) {
+				e.preventDefault();
+				const order = focusableWithin(document.body).filter((el) => !panel.contains(el));
+				const next = opener ? order[order.indexOf(opener) + 1] : undefined;
+				dismiss();
+				(next ?? opener)?.focus({ preventScroll: true });
+			}
+		};
+		document.addEventListener("keydown", onKeyDown);
+		return () => document.removeEventListener("keydown", onKeyDown);
+	}, [shown, panelRef]);
 
 	// Non-persistent flyouts: stay mounted through `closing` so the
 	// shrink/fade-out transition can play, and unmount once it's done (pos
@@ -297,11 +474,16 @@ export function FlyoutPanel({
 	return createPortal(
 		<div
 			ref={panelRef}
+			role={label ? "dialog" : undefined}
+			aria-label={label}
 			className={`atb-pop__panel ${placement === "right" ? "atb-pop__panel--right" : "atb-pop__panel--below"} ${!open ? "is-closing" : ""}`}
 			style={{
 				position: "fixed",
 				top: pos.top,
 				left: pos.left,
+				// What a short viewport has left under the panel's top edge, for
+				// the scroll cap on its content (see FlyoutPrimitives.css).
+				["--atb-pop-top" as string]: `${pos.top}px`,
 				minWidth,
 				// Keep-mounted panels fade/scale out via the is-closing CSS
 				// class instead of vanishing behind display:none — but once
@@ -322,16 +504,79 @@ export function FlyoutPanel({
 				className={`atb-pop__pointer ${placement === "right" ? "atb-pop__pointer--left" : "atb-pop__pointer--top"}`}
 				style={placement === "right" ? { top: pos.pointer } : { left: pos.pointer }}
 			/>
-			{children}
+			{closing && departing ? <DepartingCopy nodes={departing} /> : children}
 		</div>,
 		document.body
 	);
 }
 
+/** Copies a panel's content (everything but its pointer) for DepartingCopy,
+ *  ids dropped so no id is on the page twice while the copy fades. */
+function copyPanelContent(panel: HTMLElement | null): Node[] {
+	if (!panel) return [];
+	return Array.from(panel.children)
+		.filter((el) => !el.classList.contains("atb-pop__pointer"))
+		.map((el) => {
+			const copy = el.cloneNode(true) as Element;
+			copy.removeAttribute("id");
+			copy.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
+			return copy;
+		});
+}
+
+/** The copy a closing panel fades out once its live content has gone (see
+ *  `departing` in FlyoutPanel). Inert and hidden from assistive tech: it
+ *  only looks like the panel that just closed. */
+function DepartingCopy({ nodes }: { nodes: Node[] }) {
+	const hostRef = useRef<HTMLDivElement | null>(null);
+	useLayoutEffect(() => {
+		const host = hostRef.current;
+		if (!host) return;
+		host.replaceChildren(...nodes);
+		return () => host.replaceChildren();
+	}, [nodes]);
+	return <div ref={hostRef} className="atb-pop__departing" aria-hidden="true" inert />;
+}
+
 /** A vertical stack of MenuRows — the Google-Docs-style column layout used
  *  by Margin, Hollow, Islands, and the Scissors operation picker. */
-export function MenuColumn({ children }: { children: React.ReactNode }) {
-	return <div className="atb-menu-col">{children}</div>;
+export function MenuColumn({ children, role, ariaLabel }: { children: React.ReactNode; role?: "radiogroup"; ariaLabel?: string }) {
+	let rows = children;
+	if (role === "radiogroup") {
+		// With nothing checked the group would have no Tab stop; the first
+		// radio takes it, as in the ARIA radio pattern.
+		const list = Children.toArray(children);
+		const isRadio = (c: React.ReactNode): c is React.ReactElement<{ open?: boolean }> =>
+			isValidElement(c) && c.type === MenuRow && !!(c.props as { radio?: boolean }).radio;
+		const firstRadio = list.findIndex(isRadio);
+		if (firstRadio >= 0 && !list.some((c) => isRadio(c) && c.props.open)) {
+			rows = list.map((c, i) => (i === firstRadio && isValidElement(c) ? cloneElement(c, { tabStop: true } as object) : c));
+		}
+	}
+	return (
+		<div className="atb-menu-col" role={role} aria-label={ariaLabel} onKeyDown={role === "radiogroup" ? moveRadioFocus : undefined}>
+			{rows}
+		</div>
+	);
+}
+
+/** The arrow keys, Home and End move focus between the radios of a group,
+ *  wrapping at the ends. They only move focus: picking stays with Space,
+ *  Enter or a click, so a flyout that closes on a pick (Scissors) does not
+ *  close on every arrow press. */
+function moveRadioFocus(e: React.KeyboardEvent<HTMLDivElement>) {
+	if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+	const radios = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]:not(:disabled)'));
+	const at = radios.indexOf(e.target as HTMLElement);
+	if (at < 0) return;
+	let next: number;
+	if (e.key === "ArrowDown" || e.key === "ArrowRight") next = (at + 1) % radios.length;
+	else if (e.key === "ArrowUp" || e.key === "ArrowLeft") next = (at - 1 + radios.length) % radios.length;
+	else if (e.key === "Home") next = 0;
+	else if (e.key === "End") next = radios.length - 1;
+	else return;
+	e.preventDefault();
+	radios[next].focus({ preventScroll: true });
 }
 
 /** One row of plain text inside a MenuColumn. Two roles, distinguished by
@@ -351,6 +596,9 @@ export function MenuRow({
 	rowRef,
 	disabled,
 	expandIcon,
+	pill,
+	radio,
+	tabStop,
 }: {
 	label: string;
 	onClick?: () => void;
@@ -379,17 +627,33 @@ export function MenuRow({
 	 *  trailing arrow (Islands' "Remove picked" etc.), which performs an
 	 *  edit immediately and never rotates. */
 	expandIcon?: boolean;
+	/** Draw the row as a bordered pill like an ActionButton, for a row that
+	 *  sits among ActionButtons (Islands' "Remove small") instead of a plain
+	 *  list of rows. */
+	pill?: boolean;
+	/** Expose the row as one choice of a radio group (inside a MenuColumn with
+	 *  role="radiogroup"); `open` then also means checked. */
+	radio?: boolean;
+	/** Make this radio the group's Tab stop although it is not checked (set by
+	 *  MenuColumn on the first radio when none is checked). */
+	tabStop?: boolean;
 }) {
 	return (
 		<button
 			ref={rowRef}
 			type="button"
-			className={`atb-menu-row ${open ? "is-active" : ""}`}
+			className={`atb-menu-row ${pill ? "atb-menu-row--pill" : ""} ${open ? "is-active" : ""}`}
 			onClick={onClick}
 			onMouseEnter={onHover}
 			onMouseLeave={onLeave}
 			disabled={disabled}
 			aria-expanded={expandIcon ? !!open : undefined}
+			aria-pressed={!radio && !expandIcon && !rowRef && open !== undefined ? open : undefined}
+			role={radio ? "radio" : undefined}
+			aria-checked={radio ? !!open : undefined}
+			// One Tab stop per group, on the checked choice; the arrow keys
+			// reach the rest (see MenuColumn).
+			tabIndex={radio ? (open || tabStop ? 0 : -1) : undefined}
 		>
 			<span className="atb-menu-row__label">{label}</span>
 			{expandIcon ? (
@@ -404,13 +668,19 @@ export function MenuRow({
 				<>
 					{/* Leaf rows (no rowRef) show a check when selected; rows that
 					 *  open a further grandchild show a chevron instead. */}
-					{!rowRef && open && <IconCheck size={14} stroke={2.5} className="atb-menu-row__check" style={{ color: 'cyan' }} />}
+					{!rowRef && open && <IconCheck size={14} stroke={2.5} className="atb-menu-row__check" />}
 					{rowRef && <IconChevronRight size={13} stroke={2.25} className="atb-menu-row__chevron" />}
 				</>
 			)}
 		</button>
 	);
 }
+
+/** Added to a GrandchildRow's card when it would run off the right edge of the
+ *  screen beside its row; the stylesheet then lays it out in the column. */
+const CARD_INLINE_CLASS = "atb-menu-expand__body--inline";
+/** How close to the screen's edge the card may get, matching FlyoutPanel's margin. */
+const CARD_EDGE_GAP = 8;
 
 /** A MenuRow that reveals its extra settings INLINE, directly beneath
  *  itself in the same column — a plain accordion, like a nested item in a
@@ -432,9 +702,12 @@ export function GrandchildRow({
 	children,
 	expanded: expandedProp,
 	onToggle,
+	pill,
 }: {
 	label: string;
 	children: React.ReactNode;
+	/** Style the row like an ActionButton — see MenuRow's `pill`. */
+	pill?: boolean;
 	/** Controlled mode — pass both together. Lets a parent coordinate
 	 *  several GrandchildRows so opening one closes any other that's
 	 *  already open (see LogicalOperatorsPanel, which has one row per
@@ -452,15 +725,60 @@ export function GrandchildRow({
 	const expanded = isControlled ? expandedProp : internalExpanded;
 	const toggle = isControlled ? onToggle! : () => setInternalExpanded((v) => !v);
 
+	// The card hangs off the right of its row, and FlyoutPanel clamps the panel
+	// by the panel's own width only, so between phone and desktop widths the
+	// card can end past the screen's edge (a fixed panel cannot be scrolled to
+	// it). When it would, it drops into the column beneath its row instead, as
+	// it already does on a phone (see the media queries in the stylesheet). A
+	// flip to the left would not help: there is no room on that side either.
+	const anchorRef = useRef<HTMLDivElement>(null);
+	const bodyRef = useRef<HTMLDivElement>(null);
+	useLayoutEffect(() => {
+		if (!expanded) return;
+		const fit = () => {
+			const anchor = anchorRef.current;
+			const body = bodyRef.current;
+			// A card in a closed (display:none) panel has no box to measure; keep
+			// the layout it had until the panel is shown again (see the observer).
+			if (!anchor || !body || body.offsetWidth === 0) return;
+			// Measure where the card sits beside the row, not where it sits now.
+			// offsetLeft/offsetWidth ignore the slide-in transform.
+			body.classList.remove(CARD_INLINE_CLASS);
+			const right = anchor.getBoundingClientRect().left + body.offsetLeft + body.offsetWidth;
+			body.classList.toggle(CARD_INLINE_CLASS, right > window.innerWidth - CARD_EDGE_GAP);
+		};
+		fit();
+		// FlyoutPanel re-places itself on a resize in its own listener, so the
+		// row has only moved by the time this second pass runs.
+		let later = 0;
+		const onResize = () => {
+			fit();
+			window.clearTimeout(later);
+			later = window.setTimeout(fit, 120);
+		};
+		window.addEventListener("resize", onResize);
+		// The Islands panel stays mounted while closed, so a resize in that time
+		// was skipped above; the card gets its box back when the panel reopens.
+		const bodyEl = bodyRef.current;
+		const ro = typeof ResizeObserver === "undefined" || !bodyEl ? null : new ResizeObserver(fit);
+		ro?.observe(bodyEl!);
+		return () => {
+			window.removeEventListener("resize", onResize);
+			window.clearTimeout(later);
+			ro?.disconnect();
+		};
+	}, [expanded]);
+
 	return (
-		<div className="atb-menu-expand">
+		<div className="atb-menu-expand" ref={anchorRef}>
 			<MenuRow
 				label={label}
 				open={expanded}
 				expandIcon
+				pill={pill}
 				onClick={toggle}
 			/>
-			{expanded && <div className="atb-menu-expand__body">{children}</div>}
+			{expanded && <div className="atb-menu-expand__body" ref={bodyRef}>{children}</div>}
 		</div>
 	);
 }
@@ -524,23 +842,50 @@ export function ActionButton({
 	title?: string;
 }) {
 	return (
-		<button
-			type="button"
-			className={`atb-action-btn ${success ? "is-success" : ""}`}
-			onClick={onClick}
-			disabled={disabled || busy || success}
-			title={title}
-		>
-			<span className="atb-action-btn__label">
-				{success ? (successLabel ?? "Done") : busy ? (runningLabel ?? label) : label}
+		<>
+			<button
+				type="button"
+				className={`atb-action-btn ${success ? "is-success" : ""}`}
+				// Busy and success are aria-disabled, not disabled, so a focused
+				// button keeps focus through the beat (see ApplyButton). Callers
+				// also fold their own busy state into `disabled` to lock the
+				// sibling buttons, so it only counts when this one is idle.
+				onClick={busy || success ? undefined : onClick}
+				disabled={disabled && !busy && !success}
+				aria-disabled={busy || success || undefined}
+				aria-busy={busy || undefined}
+				title={title}
+			>
+				<span className="atb-action-btn__label">
+					{success ? (successLabel ?? "Done") : busy ? (runningLabel ?? label) : label}
+				</span>
+				{success ? (
+					<IconCheck size={14} stroke={3} className="atb-action-btn__check" />
+				) : busy ? (
+					<span className="atb-action-btn__spinner" aria-hidden="true" />
+				) : (
+					<IconChevronRight size={14} stroke={2.5} className="atb-action-btn__arrow" />
+				)}
+			</button>
+			{/* The button disables itself while it works, so its changing label
+			 *  is not read out; this stays mounted so the change is announced. */}
+			<span className="sr-only" role="status">
+				{success ? (successLabel ?? "Done") : busy ? (runningLabel ?? label) : ""}
 			</span>
-			{success ? (
-				<IconCheck size={14} stroke={3} className="atb-action-btn__check" />
-			) : busy ? (
-				<span className="atb-action-btn__spinner" aria-hidden="true" />
-			) : (
-				<IconChevronRight size={14} stroke={2.5} className="atb-action-btn__arrow" />
-			)}
-		</button>
+		</>
+	);
+}
+/** What a millimetre slider really does on this scan. Edits move in whole
+ *  voxels per axis, so on thick slices an axis can round well past the
+ *  requested size; showing the result keeps the label from overpromising. */
+export function EffectiveSizeNote({ requestedMm, actual }: { requestedMm: number; actual: { mm: [number, number, number] } | null }) {
+	if (!actual) return null;
+	const [x, y, z] = actual.mm;
+	const roundedUp = actual.mm.some((v) => v > requestedMm * 1.25 + 0.05);
+	return (
+		<p className="atb-flyout-note" data-testid="effective-size-note">
+			{`About ${x.toFixed(1)} × ${y.toFixed(1)} × ${z.toFixed(1)} mm.`}
+			{roundedUp ? " The scan's voxels are coarser than this along some axes, so the edit moves in whole voxels." : ""}
+		</p>
 	);
 }

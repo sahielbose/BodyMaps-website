@@ -5,7 +5,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 16px;
+    /* 28px wide so a fingertip lands on it, not on the icon beside it. */
+    width: 28px;
     height: 36px;
     padding: 0;
     border: none;
@@ -49,6 +50,11 @@
     flex-direction: column;
     gap: 4px;
     padding: 10px;
+    /* Sized to its content (FlyoutPanel measures that width to keep the
+       panel on screen), but never wider than the screen itself. */
+    width: max-content;
+    max-width: calc(100vw - 16px);
+    box-sizing: border-box;
     border-radius: 10px;
     /* Slightly lighter than pure panel-black and with a hairline border
        that reads as ONE flat card, not a box nested inside another box —
@@ -115,6 +121,19 @@
        so it always eases back OUT from wherever it currently is instead
        of restarting the grow-in keyframe. */
     animation: none;
+}
+
+/* The static copy a closing panel fades out once the tool's own content
+   has gone (see DepartingCopy in FlyoutPrimitives.tsx). No box of its own,
+   so the copied content lays out in the panel exactly as it did, and no
+   animations: inserting the copy would otherwise replay every entrance
+   animation inside it (the Apply checkmark, a row's check) mid-fade. */
+.atb-pop__departing {
+    display: contents;
+}
+
+.atb-pop__departing * {
+    animation: none !important;
 }
 
 @keyframes atb-pop-grow-in {
@@ -272,6 +291,36 @@
     cursor: not-allowed;
 }
 
+/* An expandable row among ActionButtons (Islands' "Remove small"): the same
+   pill, so the flyout doesn't mix a third look in with its buttons. */
+.atb-menu-row--pill {
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    font-size: 12.5px;
+    font-weight: 600;
+    /* Same 36px as an .atb-action-btn beside it: the 20px expand chip would
+       otherwise make this pill a few px taller than the buttons above. */
+    box-sizing: border-box;
+    min-height: 36px;
+}
+
+.atb-menu-row--pill .atb-menu-row__expand-chip {
+    width: 18px;
+    height: 18px;
+}
+
+.atb-menu-row--pill:hover:not(:disabled) {
+    background: rgba(104, 172, 229, 0.14);
+    border-color: rgba(104, 172, 229, 0.45);
+}
+
+.atb-menu-row--pill.is-active {
+    background: rgba(104, 172, 229, 0.2);
+    border-color: rgba(104, 172, 229, 0.55);
+}
+
 .atb-menu-row__label {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -281,21 +330,63 @@
 /* A checkbox-carrying row (Scissors' "Magnetic snap") rendered as a
    <label> so the whole row toggles it, styled identically to a plain
    MenuRow — same height/hover/font — so it reads as one consistent list
-   instead of a differently-shaped control breaking the column's rhythm. */
+   instead of a differently-shaped control breaking the column's rhythm.
+   The sibling rows are <button>s, which the global button rule gives weight
+   500, so the label states it too. */
 .atb-menu-row--checkbox {
+    position: relative;
+    font-weight: 500;
     cursor: pointer;
-
-}
-.atb-menu-row_.check {
-    stroke: #3b82f6;
 }
 
+/* The native input is kept for toggling, focus and assistive tech but not
+   painted: .atb-checkbox-box beside it is what shows. */
 .atb-menu-row__checkbox-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* The one custom checkbox: this row's and the class panel's "Show only
+   target class" (SegmentsPopup.tsx) both draw it, so a ticked box looks the
+   same in both, in the same blue as a selected row's tick
+   (.atb-menu-row__check). */
+.atb-checkbox-box {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
-    width: 14px;
-    height: 14px;
-    accent-color: #3499ff;
-    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.atb-checkbox-box.is-checked {
+    background: rgba(104, 172, 229, 0.2);
+    border-color: #68ACE5;
+}
+
+.atb-checkbox-box__check {
+    color: #68ACE5;
+    opacity: 0;
+    transform: scale(0.5);
+    transition: opacity 0.14s ease, transform 0.14s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.atb-checkbox-box.is-checked .atb-checkbox-box__check {
+    opacity: 1;
+    transform: scale(1);
+}
+
+.atb-menu-row__checkbox-input:focus-visible+.atb-checkbox-box {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
 }
 
 .atb-menu-row__chevron {
@@ -431,6 +522,52 @@
     animation: atb-menu-expand-in-right 0.34s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* Phone width: there is no room beside the panel for a second card, so it
+   opens beneath its row and pushes the rows below it down, rather than
+   running off the right edge of the screen. */
+@media (max-width: 640px) {
+    .atb-menu-expand__body {
+        position: static;
+        margin: 6px 0 0;
+        min-width: 0;
+    }
+}
+
+/* A short window (a phone held sideways, a small browser pane): the panel
+   starts under the ribbon, so a tall flyout or an opened "Remove small" card
+   would run off the bottom of a screen that cannot scroll. The flyout's
+   content scrolls inside what is left under the panel's top edge instead
+   (--atb-pop-top, set by FlyoutPanel), and the card stays in the column, since
+   a scroll box would clip a card hanging off its right side. The scroll sits on
+   the body, not the panel, so the pointer outside the panel's box is not clipped.
+   Only here, because a scroll box also clips the card at every other height. */
+@media (max-height: 520px) {
+    .atb-pop__panel .atb-corner-panel--floating .atb-corner-panel__body {
+        max-height: max(120px, calc(100vh - var(--atb-pop-top, 0px) - 40px));
+        max-height: max(120px, calc(100dvh - var(--atb-pop-top, 0px) - 40px));
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        /* The body centers its content, and a scroll box cannot scroll to
+           what overflows above its start, so the top rows would be lost. */
+        align-items: flex-start;
+    }
+
+    .atb-menu-expand__body {
+        position: static;
+        margin: 6px 0 0;
+        min-width: 0;
+    }
+}
+
+/* A card that would end past the screen's right edge (set by GrandchildRow
+   between phone and desktop widths) takes the same in-column layout. */
+.atb-menu-expand__body--inline {
+    position: static;
+    margin: 6px 0 0;
+    min-width: 0;
+}
+
 @keyframes atb-menu-expand-in-right {
     from {
         opacity: 0;
@@ -473,17 +610,13 @@
    pill, black text — so it's unmistakably a BUTTON that performs an
    edit, never confusable with a MenuRow's plain-text MODE row.
    ============================================================ */
-/* Single explicit column sized to `max-content`: CSS grid gives every row
-   in that column the SAME track width — the width of whichever button's
-   text is longest — instead of each button sizing independently to its
-   own text (ragged) or stretching to the full flyout width (the old
-   blocky look). `justify-items: stretch` fills that shared track exactly,
-   `justify-content: start` keeps the whole column left-aligned instead of
-   centered/stretched across the flyout. */
+/* One column that spans the flyout: every button in every list is the width
+   of the panel, so the labels, trailing arrows and right edges line up
+   whether a flyout has one list (Margin) or two (Islands) rather than each
+   button sizing to its own text. Left-aligned text, arrow at the right. */
 .atb-action-list {
     display: grid;
-    grid-template-columns: max-content;
-    justify-content: start;
+    grid-template-columns: minmax(0, 1fr);
     justify-items: stretch;
     gap: 8px;
 }
@@ -492,13 +625,17 @@
     margin-top: 10px;
 }
 
+/* A divider that follows a list (Islands' operations, then "Remove small")
+   sits the same 8px from the button above as from the row below, matching
+   the list's own 8px gap; the base divider margin is tuned for the other
+   flyouts, where it follows a slider instead. */
 .atb-action-list+.atb-menu-divider {
-    margin-top: 6px;
+    margin: 8px 2px;
 }
 
 /* Soft, bordered pill — same quiet-chip language as .segpop__new (the
-   "Add class" button) rather than a solid white slab. Sized to its own
-   text (see .atb-action-list above), not stretched full-width. */
+   "Add class" button) rather than a solid white slab. Fills the column
+   its .atb-action-list gives it. */
 .atb-action-btn {
     display: flex;
     align-items: center;
@@ -515,25 +652,28 @@
     font-weight: 600;
     text-align: left;
     cursor: pointer;
-    transition: background 0.22s ease, border-color 0.22s ease, color 0.22s ease, transform 0.1s ease, width 0.15s ease;
+    transition: background 0.22s ease, border-color 0.22s ease, color 0.22s ease, transform 0.1s ease;
     box-sizing: border-box;
+    min-height: 36px;
     /* Keeps digits a fixed width so labels that update live off a slider
-       (e.g. MarginPanel's "Grow by 1.5mm") resize smoothly instead of the
-       button jittering wider/narrower on every keystroke of the value. */
+       (e.g. MarginPanel's "Grow by 1.5mm") don't make the button jitter
+       wider/narrower on every change of the value. Width itself never
+       animates. */
     font-variant-numeric: tabular-nums;
 }
 
-.atb-action-btn:hover:not(:disabled) {
+.atb-action-btn:hover:not(:disabled):not([aria-disabled="true"]) {
     background: rgba(104, 172, 229, 0.14);
     border-color: rgba(104, 172, 229, 0.45);
     color: #ffffff;
 }
 
-.atb-action-btn:active:not(:disabled) {
+.atb-action-btn:active:not(:disabled):not([aria-disabled="true"]) {
     transform: scale(0.99);
 }
 
-.atb-action-btn:disabled {
+.atb-action-btn:disabled,
+.atb-action-btn[aria-disabled="true"] {
     opacity: 0.4;
     cursor: default;
 }
@@ -552,7 +692,7 @@
     transition: transform 0.22s ease, color 0.22s ease;
 }
 
-.atb-action-btn:hover:not(:disabled) .atb-action-btn__arrow {
+.atb-action-btn:hover:not(:disabled):not([aria-disabled="true"]) .atb-action-btn__arrow {
     color: rgba(255, 255, 255, 0.85);
     transform: translateX(1px);
 }
@@ -583,8 +723,8 @@
     border-color: rgba(104, 172, 229, 0.55);
     color: #ffffff;
     cursor: default;
-    /* is-success pairs with `disabled` on the button (ApplyButton disables
-       while showing success), so .atb-action-btn:disabled's opacity: 0.4
+    /* is-success pairs with aria-disabled on the button (ApplyButton marks
+       itself while showing success), so the disabled look's opacity: 0.4
        was washing out the checkmark/label for the whole success beat. */
     opacity: 1;
 }
@@ -605,4 +745,30 @@
         opacity: 1;
         transform: scale(1);
     }
+}
+
+/* A short explanation above a flyout's action, for tools whose effect isn't
+   obvious from the button label alone (Refine). */
+.atb-flyout-note {
+    margin: 0;
+    max-width: 272px;
+    font-family: "Space Grotesk", system-ui, sans-serif;
+    font-size: 12px;
+    line-height: 1.45;
+    color: rgba(255, 255, 255, 0.74);
+    /* Prose wraps, whatever nowrap the surrounding panel body sets. */
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.atb-flyout-note--error {
+    color: #ffb9ad;
+}
+
+/* A flyout pressed against the right edge of the screen (a phone, or the
+   scissors and islands panels on a tablet) leaves the outer 8px to the
+   Sagittal pane's slice slider, whose thumb would poke out beside the
+   panel's rounded corner. Hidden while the panel is open. */
+body.atb-flyout-at-edge .vp-slice-scrollbar {
+    visibility: hidden;
 }
