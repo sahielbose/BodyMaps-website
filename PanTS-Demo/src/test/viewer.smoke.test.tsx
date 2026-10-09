@@ -77,7 +77,7 @@ vi.mock("../helpers/CornerstoneNifti2", async (importOriginal) => {
 		getEditedSegments: vi.fn(() => new Set()),
 		getSegmentationExport: vi.fn(() => null),
 		hasSegmentation: vi.fn(() => false),
-		hasSegmentationVolume: vi.fn(() => false),
+		getPresentSegmentIndices: vi.fn(() => null),
 		buildMaskFilter: vi.fn(() => () => true),
 		setBrushMaskingScope: vi.fn(),
 		// Cine playback + oblique-MPR reset

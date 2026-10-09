@@ -1,7 +1,7 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import type { Color } from "@cornerstonejs/core/types";
-import { extractSegmentSurface, consumePreEditSegmentSnapshot } from "../../helpers/CornerstoneNifti2";
+import { extractSegmentSurface, subscribeToSegmentationEdits } from "../../helpers/CornerstoneNifti2";
 
 type LiveSegmentMeshProps = {
   segmentIndex: number;
@@ -9,58 +9,85 @@ type LiveSegmentMeshProps = {
   visible: boolean;
   opacity: number;
   manifestCenter: [number, number, number];
+  // Told whether the class has anything to draw, each time that changes, so the
+  // pane can frame a class once its first voxels arrive (it is empty when created).
+  onPresenceChange?: (segmentIndex: number, present: boolean) => void;
 };
 
-// Client-side isosurface for a custom/edited class, built once from the
-// labelmap voxels present the first time this segment switches into the
-// "live" render path (see MeshViewer: a static organ moves from its baked
-// GLB to this component the moment it picks up its first edit; a brand
-// new custom class renders through here from the start). Positioned in
-// the same Three.js scene space as the pre-baked organ GLBs (see
-// extractSegmentSurface's transform comments).
+// How long edits to a class must pause before its mesh is rebuilt, so a brush drag or a
+// burst of prompt clicks costs one marching-cubes run rather than one per stroke.
+const REBUILD_AFTER_EDITS_MS = 400;
+
+// Client-side isosurface for a custom class, built from the live labelmap and
+// positioned in the same Three.js scene space as the pre-baked organ GLBs (see
+// extractSegmentSurface's transform comments). Catalog organs always draw their
+// baked GLB (see MeshViewer); a custom class renders through here from the start.
 //
-// Deliberately NOT rebuilt on every segmentation edit — re-running marching
-// cubes on every brush stroke was expensive enough to cause visible stutter
-// in the 2D panes while the 3D pane was open. Instead the geometry is
-// extracted once (via the useMemo below, keyed only on segmentIndex /
-// manifestCenter, never on paint activity) and then just reused: the mesh
-// keeps showing that snapshot for the rest of the annotation session
-// instead of vanishing. Toggling the 3D pane off and back on (which
-// remounts this component) or switching target picks up the latest edits.
+// The mesh follows the 2D edits: once edits to this class settle for
+// REBUILD_AFTER_EDITS_MS it is rebuilt from the labelmap, so marching cubes never
+// runs per stroke, and extraction only covers the class's own bounding box. A
+// hidden class is only marked stale and is rebuilt when it is shown again. A class
+// with no voxels (created but not painted, or emptied by an undo) draws nothing.
 export function LiveSegmentMesh({
   segmentIndex,
   color,
   visible,
   opacity,
   manifestCenter,
+  onPresenceChange,
 }: LiveSegmentMeshProps) {
-  // Cache extraction results per segmentIndex so switching targets back and
-  // forth within one mount doesn't blow away a mesh we already built, and so
-  // a re-render triggered by an unrelated edit (bumping editVersion in the
-  // parent) never re-triggers marching cubes for a segment we've already
-  // captured.
+  // Extraction results per segmentIndex, so switching targets back and forth or
+  // toggling the class's checkbox reuses a mesh that is still current. An edit to
+  // the class drops its entry, and the next render after that rebuilds it.
   const cacheRef = useRef<Map<number, ReturnType<typeof extractSegmentSurface>>>(new Map());
+
+  // Bumped when edits to this class settle while it is shown.
+  const [version, setVersion] = useState(0);
+  const visibleRef = useRef(visible);
+  useEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
 
   const surface = useMemo(() => {
     const cache = cacheRef.current;
     if (cache.has(segmentIndex)) return cache.get(segmentIndex) ?? null;
-    // If a pre-edit baseline was captured for this segment (see
-    // setActiveEditSegment / _capturePreEditSnapshotIfAbsent), build from
-    // that instead of the current live labelmap — the live data already
-    // includes the stroke that caused this component to mount, and we
-    // don't want that first stroke baked into the "original" mesh.
-    // This is a one-shot read: it's consumed here and won't be available
-    // again, so a later remount (3D pane toggled off/on) correctly falls
-    // through to the live labelmap and picks up everything painted so far.
-    const preEditSnapshot = consumePreEditSegmentSnapshot(segmentIndex);
-    const result = extractSegmentSurface(segmentIndex, manifestCenter, preEditSnapshot);
-    cache.set(segmentIndex, result);
+    // Always the live labelmap, never a copy taken before the first edit: that copy
+    // drew a stale mesh, so none is kept now (see consumePreEditSegmentSnapshot).
+    const result = extractSegmentSurface(segmentIndex, manifestCenter);
+    // An empty mask (a class created but not painted yet, emptied by an undo, or a
+    // volume that is not in the cache yet) gives null and is not kept, so the next
+    // edit or showing the class again reads the labelmap afresh.
+    if (result) cache.set(segmentIndex, result);
     return result;
-    // Intentionally excludes anything that changes on every paint stroke
-    // (e.g. an edit-version counter) — this must only re-run when the
-    // target segment itself changes, not on every mask edit.
+    // Never keyed on a per-stroke counter: `version` only moves once edits to this
+    // class settle, and `visible` lets a class that went stale while hidden rebuild
+    // when it is shown again. Anything still cached is served as is.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segmentIndex, manifestCenter]);
+  }, [segmentIndex, manifestCenter, visible, version]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = subscribeToSegmentationEdits((detail) => {
+      // The eraser reports class 0, and a brush undo or an edit that changed several
+      // classes reports none, so those may have changed this class too.
+      const index = detail?.segmentIndex;
+      if (index !== undefined && index !== 0 && index !== segmentIndex) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        cacheRef.current.delete(segmentIndex);
+        if (visibleRef.current) setVersion((n) => n + 1);
+      }, REBUILD_AFTER_EDITS_MS);
+    });
+    return () => {
+      unsubscribe();
+      clearTimeout(timer);
+    };
+  }, [segmentIndex]);
+
+  // Built as sRGB, the way OrganMesh does, so a custom class matches its swatch and the 2D overlay
+  // instead of drawing as a lighter pastel. Memoised on the channels so a render does not make a new one.
+  const [r, g, b] = color;
+  const tint = useMemo(() => new THREE.Color().setRGB(r / 255, g / 255, b / 255, THREE.SRGBColorSpace), [r, g, b]);
 
   const geometry = useMemo(() => {
     if (!surface) return null;
@@ -71,18 +98,28 @@ export function LiveSegmentMesh({
     return geo;
   }, [surface]);
 
+  const present = geometry !== null;
+  useEffect(() => {
+    onPresenceChange?.(segmentIndex, present);
+  }, [onPresenceChange, segmentIndex, present]);
+
+  // R3F only disposes what it built from JSX children, not a geometry handed in as a prop, so
+  // every remount (3D pane toggled, report opened) or rebuild would leave the old GPU buffers behind.
+  useEffect(() => () => geometry?.dispose(), [geometry]);
+
   // Nothing painted yet for this class (extractSegmentSurface returns null
   // when the mask is empty) — nothing to show, but don't throw.
   if (!geometry) return null;
 
-  const [r, g, b, a = 255] = color;
+  const a = color[3] ?? 255;
 
   return (
     <mesh geometry={geometry} visible={visible}>
       <meshStandardMaterial
-        color={new THREE.Color(r / 255, g / 255, b / 255)}
+        color={tint}
         transparent
         opacity={opacity * (a / 255)}
+        depthWrite={opacity * (a / 255) >= 1}
         side={THREE.DoubleSide}
       />
     </mesh>

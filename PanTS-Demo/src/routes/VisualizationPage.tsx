@@ -150,7 +150,8 @@ import {
     VOLUME_3D_PRESETS,
     VOLUME_3D_PRESETS_MR,
     zoomToFit,
-	isSegmentPresent,
+	getPresentSegmentIndices,
+	subscribeToSegmentationLoaded,
     type CinePane,
     type MeasurementSummary,
     type PrimaryMouseToolName,
@@ -162,7 +163,6 @@ import {
 	endBrushMaskGuard,
 } from "../helpers/CornerstoneNifti2";
 import { useSmartFill } from "../helpers/viewer/useSmartFill";
-import { hasSegmentationVolume } from "../helpers/CornerstoneNifti2"; 
 import { useLevelTracing } from "../helpers/viewer/useLevelTracing";
 import AnnotationToolbar, {
 	type PrimaryEditTool,
@@ -848,6 +848,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const stageRef = useRef<HTMLDivElement>(null);
 	const [showOrganDetails, setShowOrganDetails] = useState(false);
 	const [loading, setLoading] = useState(true);
+	// Bumped when the segmentation's slices have all arrived, which is after
+	// the viewer reports ready (Cornerstone streams them in the background).
+	const [segmentationLoads, setSegmentationLoads] = useState(0);
+	useEffect(() => subscribeToSegmentationLoaded(() => setSegmentationLoads((n) => n + 1)), []);
 	const [viewerReady, setViewerReady] = useState(false);
 	const [acceptedViewerVolumeId, setAcceptedViewerVolumeId] = useState<string | null>(null);
 	const viewerReadyRef = useRef(false);
@@ -1328,7 +1332,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	
 		const onDown = (e: Event) => {
 			if (!isOnPane(e)) return;
-			if (editMode === "brush" || editMode === "eraser") beginBrushMaskGuard();
+			if (editMode === "brush" || editMode === "eraser") beginBrushMaskGuard(resolvedMasking.effectiveArea);
 		};
 		const onUp = () => {
 			if (editMode === "brush" || editMode === "eraser") {
@@ -3505,22 +3509,14 @@ const customOrgans = useMemo(
 );
 
 
+// The organs this scan actually has. Until its segmentation has loaded (or if
+// it holds none of them) the full static list shows instead.
 const organCatalog = useMemo(() => {
-	if (!hasSegmentationVolume()) {
-		// Segmentation not cached yet — show the full static list rather than
-		// spamming isSegmentPresent before there's anything to check.
-		return segmentation_categories.map((filename, i) => ({ id: i + 1, label: filenameToName(filename) }));
-	}
-
-	const withPresence = segmentation_categories
-		.map((filename, i) => ({ id: i + 1, label: filenameToName(filename) }))
-		.filter((o) => isSegmentPresent(o.id));
-
-	if (withPresence.length === 0) {
-		return segmentation_categories.map((filename, i) => ({ id: i + 1, label: filenameToName(filename) }));
-	}
-	return withPresence;
-}, [renderingEngine, viewportIds, volumeId, checkBoxData, loading]);
+	const all = segmentation_categories.map((filename, i) => ({ id: i + 1, label: filenameToName(filename) }));
+	const present = getPresentSegmentIndices();
+	const withPresence = present ? all.filter((o) => present.has(o.id)) : [];
+	return withPresence.length ? withPresence : all;
+}, [renderingEngine, viewportIds, volumeId, checkBoxData, loading, segmentationLoads]);
 
 // Logical Operators' "With segment" dropdown should only offer organs that
 // actually exist in this scan (same presence check organCatalog already
