@@ -29,6 +29,7 @@ const USER = { id: "u1", email: "jane@example.com", name: null, plan: "free", ro
 beforeEach(() => {
 	calls = [];
 	localStorage.clear();
+	sessionStorage.clear();
 	global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
 		const u = String(url);
 		const method = init?.method ?? "GET";
@@ -181,7 +182,31 @@ describe("redeeming a reset link", () => {
 		await user.type(screen.getByLabelText("Confirm new password"), "brandnewpass");
 		await user.click(screen.getByRole("button", { name: "Set new password" }));
 
-		expect(await screen.findByText(/expired or has already been used/i)).toBeInTheDocument();
+		expect(await screen.findByRole("status")).toHaveTextContent(/expired or has already been used/i);
+	});
+
+	it("announces errors through an alert region that exists before the error does", async () => {
+		const user = userEvent.setup();
+		renderResetPage("?token=good-token");
+
+		const alert = await screen.findByRole("alert");
+		expect(alert).toBeEmptyDOMElement();
+		const input = screen.getByLabelText("New password");
+		await user.type(input, "short");
+		await user.type(screen.getByLabelText("Confirm new password"), "short");
+		await user.click(screen.getByRole("button", { name: "Set new password" }));
+
+		// Same element, now holding the message, and the fields point at it.
+		expect(screen.getByRole("alert")).toBe(alert);
+		expect(alert).toHaveTextContent(/at least 8 characters/i);
+		expect(input).toHaveAttribute("aria-describedby", alert.id);
+		expect(input).toHaveAttribute("aria-invalid", "true");
+	});
+
+	it("names the logo link and has a main landmark", async () => {
+		renderResetPage("?token=good-token");
+		expect(await screen.findByRole("link", { name: "BodyMaps home" })).toHaveAttribute("href", "/");
+		expect(screen.getByRole("main")).toBeInTheDocument();
 	});
 
 	it("says so when the link arrived without a token at all", async () => {

@@ -120,7 +120,7 @@ describe("signup popup", () => {
 
 		expect(screen.getByText(/By continuing, you agree to the/i)).toBeInTheDocument();
 		expect(screen.getByRole("link", { name: "Terms of Service" })).toHaveAttribute("href", "/terms");
-		expect(screen.getByRole("link", { name: "Privacy Policy" })).toHaveAttribute("href", "/privacy");
+		expect(screen.getByRole("link", { name: "Privacy Notice" })).toHaveAttribute("href", "/privacy");
 	});
 
 	it("offers both providers, with the same wording as sign-in", async () => {

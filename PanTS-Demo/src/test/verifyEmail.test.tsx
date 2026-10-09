@@ -16,6 +16,8 @@ let calls: string[] = [];
 
 beforeEach(() => {
 	calls = [];
+	// A redeemed token is remembered for the tab, so each test starts without one.
+	sessionStorage.clear();
 	global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
 		const u = String(url);
 		calls.push(`${init?.method ?? "GET"} ${u}`);
@@ -60,6 +62,16 @@ describe("verify-email landing page", () => {
 		renderAt("/verify-email?token=stale");
 		expect(await screen.findByText("Couldn't verify")).toBeInTheDocument();
 		expect(await screen.findByText(/expired or has already been used/)).toBeInTheDocument();
+	});
+
+	it("announces the outcome through a status line that was there from the start", async () => {
+		renderAt("/verify-email?token=good");
+		const status = screen.getByRole("status");
+		expect(status).toHaveTextContent("One moment.");
+		await waitFor(() => expect(status).toHaveTextContent("Your email address is confirmed."));
+		expect(screen.getByRole("status")).toBe(status);
+		expect(screen.getByRole("link", { name: "BodyMaps home" })).toBeInTheDocument();
+		expect(screen.getByRole("main")).toBeInTheDocument();
 	});
 
 	it("treats a link with no token as mangled, without calling the server", async () => {

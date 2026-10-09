@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import * as COPY from "../helpers/copy";
 import { SITE_DESCRIPTION, SITE_TITLE } from "../helpers/copy";
 
 const read = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
@@ -48,6 +49,8 @@ const RETIRED_PHRASES = [
   "30 days to change your mind",
   "open library of labeled body CT scans",
   "BodyMaps — the intelligence layer",
+  // The page is the Privacy Notice; the sign-in fine print called it this.
+  "Privacy Policy",
 ];
 
 describe("site copy guard", () => {
@@ -62,6 +65,14 @@ describe("site copy guard", () => {
       'name="twitter:description"',
     ]) {
       expect(html).toContain(`${attr} content="${SITE_DESCRIPTION}"`);
+    }
+  });
+
+  it("canonical strings follow the copy rules: no em dash, no spaced hyphen", () => {
+    for (const [name, value] of Object.entries(COPY)) {
+      if (typeof value !== "string") continue;
+      expect(value, name).not.toMatch(/\u2014/);
+      expect(value, name).not.toMatch(/ - /);
     }
   });
 

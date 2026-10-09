@@ -8,10 +8,15 @@
 	   drawer must surface the modal, not bury it under the drawer overlay. */
 	z-index: var(--z-modal);
 	background: rgba(17, 17, 17, 0.45);
+	/* The backdrop scrolls when the card is taller than the window (a phone
+	   held sideways is 390px tall; the sign-up card with an error is about
+	   550px). The card hangs from a fixed top offset, so its top edge stays put
+	   as the screens swap between different heights, and, unlike
+	   align-items: center, its top is never pushed out of reach. */
 	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: 5vh 5vw;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding: max(16px, 10vh) max(12px, 5vw) max(16px, 5vh);
 	animation: authm-fade 0.15s ease;
 	font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
@@ -23,31 +28,44 @@
 
 .authm-card {
 	position: relative;
+	margin: 0 auto auto;
+	flex-shrink: 0;
 	width: 100%;
 	max-width: 380px;
 	background: #ffffff;
-	border-radius: 16px;
-	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+	border-radius: 8px;
+	box-shadow: 0 16px 44px rgba(0, 0, 0, 0.22);
 	padding: 32px 28px 24px;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 }
+/* Focus only lands on the card itself as a fallback; the dialog is the
+   boundary, not a control, so it takes no ring. */
+.authm-card:focus {
+	outline: none;
+}
 
 .authm-close {
 	position: absolute;
-	top: 14px;
-	right: 14px;
-	width: 30px;
-	height: 30px;
+	/* 40px hit area; the offsets keep the glyph where the 30px button had it. */
+	top: 9px;
+	right: 9px;
+	width: 40px;
+	height: 40px;
+	/* The global button padding (index.css, unlayered) would stretch the box past
+	   40px, so the glyph is centred in a true 40px square. */
+	padding: 0;
+	box-sizing: border-box;
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	background: transparent;
 	border: none;
 	border-radius: 8px;
-	color: #8f8f8f;
-	font-size: 22px;
+	color: #6a6a6a;
+	font-size: 26px;
+	font-weight: 500;
 	line-height: 1;
 	cursor: pointer;
 	transition: background 0.15s, color 0.15s;
@@ -79,7 +97,7 @@
 	gap: 10px;
 	padding: 12px 16px;
 	margin-bottom: 10px;
-	border-radius: 10px;
+	border-radius: 4px;
 	background: #ffffff;
 	border: 1px solid rgba(0, 0, 0, 0.14);
 	color: #111111;
@@ -97,15 +115,20 @@
 	opacity: 0.45;
 	cursor: not-allowed;
 }
+.authm-provider:disabled,
+.authm-provider:disabled:hover {
+	background: #ffffff;
+	border-color: rgba(0, 0, 0, 0.14);
+}
 
 .authm-divider {
 	display: flex;
 	align-items: center;
 	width: 100%;
 	margin: 14px 0;
-	color: #b0b0b0;
-	font-family: "IBM Plex Mono", ui-monospace, monospace;
-	font-size: 11px;
+	color: var(--muted-2);
+	font-family: var(--font-sans);
+	font-size: 12px;
 }
 .authm-divider::before,
 .authm-divider::after {
@@ -121,7 +144,7 @@
 .authm-email-btn {
 	width: 100%;
 	padding: 12px 16px;
-	border-radius: 10px;
+	border-radius: 4px;
 	background: #002d72;
 	color: #ffffff;
 	border: 1px solid #002d72;
@@ -154,7 +177,7 @@
 }
 .authm-input {
 	padding: 11px 13px;
-	border-radius: 10px;
+	border-radius: 4px;
 	border: 1px solid rgba(0, 0, 0, 0.12);
 	background: #fafafa;
 	font-family: "IBM Plex Sans", system-ui, sans-serif;
@@ -162,19 +185,39 @@
 	color: #111111;
 	transition: border-color 0.15s, background 0.15s;
 }
+/* iOS Safari zooms the page when a field under 16px takes focus. The line
+   height is pinned so the bigger text keeps the field the height it had. */
+@media (max-width: 560px) {
+	.authm-input {
+		font-size: 16px;
+		line-height: 18px;
+	}
+}
 .authm-input:focus {
 	outline: none;
 	border-color: #002d72;
 	background: #ffffff;
 }
+/* A field the error is about: aria-invalid drives the look, so the state a
+   screen reader hears is the state a sighted user sees. Red-700 keeps the
+   edge above 3:1 on white. ResetPassword reuses the class. */
+.authm-input[aria-invalid="true"] {
+	border-color: #b91c1c;
+	background: #ffffff;
+}
+.authm-input[aria-invalid="true"]:focus {
+	border-color: #b91c1c;
+	box-shadow: 0 0 0 1px #b91c1c;
+}
+/* Red-700 on white is 6.5:1; the earlier #ef4444 was 3.8:1 at this size. */
 .authm-error {
-	font-family: "IBM Plex Mono", ui-monospace, monospace;
-	font-size: 12px;
-	color: #ef4444;
+	font-family: var(--font-sans);
+	font-size: 13px;
+	color: #b91c1c;
 }
 .authm-submit {
 	padding: 12px 16px;
-	border-radius: 10px;
+	border-radius: 4px;
 	background: #002d72;
 	color: #ffffff;
 	border: 1px solid #002d72;
@@ -184,17 +227,21 @@
 	cursor: pointer;
 	transition: background 0.2s;
 }
-.authm-submit:hover:not(:disabled) {
+.authm-submit:hover:not(:disabled):not([aria-disabled="true"]) {
 	background: #00399a;
 }
-.authm-submit:disabled {
+.authm-submit:disabled,
+.authm-submit[aria-disabled="true"] {
 	opacity: 0.6;
 	cursor: default;
 }
 .authm-back {
 	background: none;
 	border: none;
-	padding: 2px;
+	/* Padding is the hit area (about 36px tall); the negative margin gives the
+	   space back so the card keeps its rhythm. */
+	padding: 10px 12px;
+	margin: -6px 0;
 	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 12px;
 	color: #6a6a6a;
@@ -205,21 +252,30 @@
 	color: #111111;
 }
 
-/* Signup only — consent by continuing, in place of a checkbox. */
+/* Consent by continuing, in place of a checkbox. #6a6a6a is 5.4:1 on
+   white; the earlier #8f8f8f was 3.2:1. */
 .authm-fineprint {
 	width: 100%;
 	margin: 16px 0 0;
 	font-size: 11.5px;
 	line-height: 1.55;
-	color: #8f8f8f;
+	color: #6a6a6a;
 	text-align: center;
 }
 .authm-fineprint a {
-	color: #6a6a6a;
+	color: #002d72;
 	text-decoration: underline;
+	/* Inline padding takes no layout space; it only widens the hit area. */
+	padding: 8px 4px;
+	margin: 0 -4px;
+}
+.authm-fineprint a:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
+	border-radius: 2px;
 }
 .authm-fineprint a:hover {
-	color: #002d72;
+	color: #00399a;
 }
 
 .authm-toggle {
@@ -234,7 +290,10 @@
 .authm-link {
 	background: none;
 	border: none;
-	padding: 0;
+	/* 9px 10px of padding is the hit area; the matching negative margin keeps
+	   the text where it sat in its sentence. */
+	padding: 9px 10px;
+	margin: -9px -10px;
 	font: inherit;
 	font-weight: 600;
 	color: #002d72;
@@ -258,7 +317,7 @@
 /* Right-aligned under the password field, where every sign-in form puts it. */
 .authm-forgot {
 	align-self: flex-end;
-	margin-top: -4px;
+	margin: -13px -10px -9px 0;
 	font-size: 12px;
 	font-weight: 500;
 }
@@ -271,6 +330,11 @@
 	font-size: 14px;
 	line-height: 1.6;
 	color: #111111;
+}
+/* Two of them in a row (a status line, then what to do next) are separate
+   thoughts, not one run-on block. */
+.authm-sent + .authm-sent {
+	margin-top: 12px;
 }
 .authm-sent strong {
 	font-weight: 600;
