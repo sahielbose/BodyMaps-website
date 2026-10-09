@@ -1,12 +1,18 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	addRecentUpload,
+	adoptOwnedRuns,
 	formatRelativeTime,
+	friendlyScanName,
+	loadDismissedUploads,
 	loadRecentUploads,
 	markRecentUploadViewed,
 	MAX_RECENT_UPLOADS,
+	mergeServerRuns,
 	RECENT_WINDOW_MS,
 	recentStatusColor,
+	removeRecentUpload,
+	runsOf,
 	splitByAge,
 	groupUploads,
 	updateRecentUploadStatus,
@@ -180,5 +186,176 @@ describe("markRecentUploadViewed", () => {
 		localStorage.setItem("recentUploads", JSON.stringify([makeEntry({ sessionId: "a" })]));
 		const result = markRecentUploadViewed("nonexistent");
 		expect(result.find((u) => u.sessionId === "a")?.viewed).toBeUndefined();
+	});
+});
+
+describe("mergeServerRuns", () => {
+	const at = "2026-09-29T15:30:00+00:00";
+	const run = (overrides: Record<string, unknown> = {}) => ({
+		session_id: "srv-1",
+		model: "ePAI",
+		status: "completed",
+		created_at: at,
+		...overrides,
+	});
+
+	it("adds a run this browser lacks, named like a fresh run and owned by the account", () => {
+		const { list, added } = mergeServerRuns([], [run()], "u1", []);
+
+		expect(added).toEqual(list);
+		expect(list).toEqual([
+			{
+				sessionId: "srv-1",
+				label: friendlyScanName("ePAI", Date.parse(at)),
+				model: "ePAI",
+				status: "Completed",
+				timestamp: Date.parse(at),
+				isReconstruction: false,
+				ownerId: "u1",
+			},
+		]);
+	});
+
+	it("maps the server's statuses onto the list's", () => {
+		const statuses = ["queued", "running", "completed", "failed", "cancelled"];
+		const { list } = mergeServerRuns([], statuses.map((status) => run({ session_id: status, status })), "u1", []);
+
+		expect(list.map((u) => u.status)).toEqual(["Processing", "Processing", "Completed", "Failed", "Cancelled"]);
+	});
+
+	it("leaves a run the browser already has exactly as it is", () => {
+		const mine = makeEntry({ sessionId: "srv-1", label: "My renamed scan", status: "Processing", viewed: true });
+
+		const { list, added } = mergeServerRuns([mine], [run()], "u1", []);
+
+		expect(added).toEqual([]);
+		expect(list).toEqual([mine]);
+	});
+
+	it("puts the runs it adds after the ones the browser has", () => {
+		const mine = makeEntry({ sessionId: "local" });
+
+		const { list, added } = mergeServerRuns([mine], [run({ session_id: "a" }), run({ session_id: "b" })], "u1", []);
+
+		expect(list.map((u) => u.sessionId)).toEqual(["local", "a", "b"]);
+		expect(added.map((u) => u.sessionId)).toEqual(["a", "b"]);
+	});
+
+	it("skips a run removed in this browser", () => {
+		const { list } = mergeServerRuns([], [run()], "u1", ["srv-1"]);
+
+		expect(list).toEqual([]);
+	});
+
+	it("skips rows it cannot read", () => {
+		const { list } = mergeServerRuns(
+			[],
+			[
+				null,
+				"nope",
+				run({ session_id: 7 }),
+				run({ session_id: "no-status", status: "paused" }),
+				run({ session_id: "no-date", created_at: "not a date" }),
+				run({ session_id: "ok" }),
+			],
+			"u1",
+			[],
+		);
+
+		expect(list.map((u) => u.sessionId)).toEqual(["ok"]);
+	});
+
+	it("ignores a reply that is not a list", () => {
+		const local = [makeEntry()];
+
+		expect(mergeServerRuns(local, undefined, "u1", []).list).toBe(local);
+		expect(mergeServerRuns(local, { runs: [] }, "u1", []).added).toEqual([]);
+	});
+
+	it(`never grows the list past ${MAX_RECENT_UPLOADS} entries`, () => {
+		const local = Array.from({ length: MAX_RECENT_UPLOADS - 1 }, (_, i) => makeEntry({ sessionId: `l${i}` }));
+
+		const { list, added } = mergeServerRuns(local, [run({ session_id: "a" }), run({ session_id: "b" })], "u1", []);
+
+		expect(list).toHaveLength(MAX_RECENT_UPLOADS);
+		expect(added.map((u) => u.sessionId)).toEqual(["a"]);
+	});
+});
+
+describe("removeRecentUpload", () => {
+	it("remembers the removal, so a server run does not come back", () => {
+		addRecentUpload(makeEntry({ sessionId: "srv-1" }));
+
+		removeRecentUpload("srv-1");
+
+		expect(loadRecentUploads()).toEqual([]);
+		expect(loadDismissedUploads()).toEqual(["srv-1"]);
+		const { list } = mergeServerRuns(
+			loadRecentUploads(),
+			[{ session_id: "srv-1", model: "ePAI", status: "completed", created_at: "2026-09-29T15:30:00+00:00" }],
+			"u1",
+		);
+		expect(list).toEqual([]);
+	});
+});
+
+describe("runsOf", () => {
+	const mine = makeEntry({ sessionId: "mine", ownerId: "u1" });
+	const theirs = makeEntry({ sessionId: "theirs", ownerId: "u2" });
+	const nobodys = makeEntry({ sessionId: "nobodys" });
+	const list = [mine, theirs, nobodys];
+
+	it("gives a signed-in account only its own runs", () => {
+		expect(runsOf(list, "u1")).toEqual([mine]);
+		expect(runsOf(list, "u2")).toEqual([theirs]);
+	});
+
+	it("gives a signed-out visitor only the runs nobody owns", () => {
+		expect(runsOf(list, null)).toEqual([nobodys]);
+	});
+
+	it("gives nobody anything while sign-in is still being worked out", () => {
+		expect(runsOf(list, null, false)).toEqual([]);
+		expect(runsOf(list, "u1", false)).toEqual([]);
+	});
+
+	it("leaves the list itself alone", () => {
+		runsOf(list, "u1");
+		expect(list).toEqual([mine, theirs, nobodys]);
+	});
+});
+
+describe("adoptOwnedRuns", () => {
+	const owned = makeEntry({ sessionId: "owned" });
+	const unnamed = makeEntry({ sessionId: "unnamed" });
+	const theirs = makeEntry({ sessionId: "theirs", ownerId: "u2" });
+	const mine = makeEntry({ sessionId: "mine", ownerId: "u1" });
+
+	it("stamps the account on a run with no owner that the server names as its own", () => {
+		const { list, adopted } = adoptOwnedRuns([owned, unnamed], ["owned"], "u1");
+
+		expect(list).toEqual([{ ...owned, ownerId: "u1" }, unnamed]);
+		expect(adopted).toEqual([{ ...owned, ownerId: "u1" }]);
+		expect(runsOf(list, "u1").map((u) => u.sessionId)).toEqual(["owned"]);
+	});
+
+	it("leaves a run with no owner that the server does not name to whoever it belongs to", () => {
+		const { list, adopted } = adoptOwnedRuns([unnamed], ["other"], "u1");
+
+		expect(list).toEqual([unnamed]);
+		expect(adopted).toEqual([]);
+		expect(runsOf(list, null)).toEqual([unnamed]);
+	});
+
+	it("never takes a run that already has an owner", () => {
+		const { list, adopted } = adoptOwnedRuns([theirs, mine], ["theirs", "mine"], "u1");
+
+		expect(list).toEqual([theirs, mine]);
+		expect(adopted).toEqual([]);
+	});
+
+	it("ignores an answer that is not a list, and entries in it that are not ids", () => {
+		expect(adoptOwnedRuns([owned], undefined, "u1")).toEqual({ list: [owned], adopted: [] });
+		expect(adoptOwnedRuns([owned], [null, 7, {}], "u1").adopted).toEqual([]);
 	});
 });

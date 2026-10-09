@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../contexts/authContext";
-import UploadPage from "../routes/UploadPage";
+import UploadPage, { __resetUploadTabState } from "../routes/UploadPage";
 
 const USER = { id: "u1", email: "test.user@example.com", name: null, plan: "pro" };
 const CHUNK_SIZE = 512 * 1024;
@@ -21,6 +21,7 @@ const makeFile = (name: string) =>
 
 describe("completed inference actions", () => {
   beforeEach(() => {
+    __resetUploadTabState();
     global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       const endpoint = String(url);
       if (endpoint.includes("/api/auth/me")) return json({ user: USER });

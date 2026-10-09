@@ -26,6 +26,10 @@ export type RecentUpload = {
 	// finished scan for the age-based History split. Optional/undefined for
 	// older localStorage entries and for anything still Processing.
 	viewed?: boolean;
+	// Id of the account that started the run. The list lives in this browser,
+	// not the account, so the Upload page only resumes a leftover in-flight
+	// run for the account that owns it. Absent on older entries.
+	ownerId?: string;
 };
 
 export const RECENT_UPLOADS_KEY = "recentUploads";
@@ -146,6 +150,22 @@ export const persistRecentUploads = (list: RecentUpload[]) => {
 	}
 };
 
+// The list is one per browser, but each run in it belongs to someone: the
+// account that started it (or that the server lists it for), stamped as its
+// ownerId, and a run with no owner belongs to a signed-out visitor. Whoever is
+// looking sees, and counts against their limits, only what is theirs: a
+// signed-in account its own runs, a signed-out visitor the unowned ones.
+// The other accounts' runs stay in the list for their owners' next sign-in.
+// While sign-in is still being worked out nobody is anyone yet, so nothing
+// shows. Every reader of the list goes through here, so the rule lives in one
+// place.
+export const runsOf = (
+	list: RecentUpload[],
+	userId: string | null,
+	signInSettled = true
+): RecentUpload[] =>
+	signInSettled ? list.filter((u) => (u.ownerId ?? null) === userId) : [];
+
 export const addRecentUpload = (entry: RecentUpload): RecentUpload[] => {
 	const list = [entry, ...loadRecentUploads().filter((u) => u.sessionId !== entry.sessionId)];
 	const trimmed = list.slice(0, MAX_RECENT_UPLOADS);
@@ -156,7 +176,115 @@ export const addRecentUpload = (entry: RecentUpload): RecentUpload[] => {
 export const removeRecentUpload = (sessionId: string): RecentUpload[] => {
 	const list = loadRecentUploads().filter((u) => u.sessionId !== sessionId);
 	persistRecentUploads(list);
+	dismissUpload(sessionId);
 	return list;
+};
+
+// The scans a person removed from the list in this browser. The server still
+// lists them (mergeServerRuns), so without this a removed scan would come back
+// the next time the Upload page loads.
+export const DISMISSED_UPLOADS_KEY = "recentUploadsDismissed";
+const MAX_DISMISSED_UPLOADS = 200;
+
+export const loadDismissedUploads = (): string[] => {
+	try {
+		const arr = JSON.parse(localStorage.getItem(DISMISSED_UPLOADS_KEY) || "[]");
+		return Array.isArray(arr) ? arr.filter((id): id is string => typeof id === "string") : [];
+	} catch {
+		return [];
+	}
+};
+
+const dismissUpload = (sessionId: string) => {
+	try {
+		const rest = loadDismissedUploads().filter((id) => id !== sessionId);
+		localStorage.setItem(
+			DISMISSED_UPLOADS_KEY,
+			JSON.stringify([sessionId, ...rest].slice(0, MAX_DISMISSED_UPLOADS))
+		);
+	} catch (e) {
+		console.warn("dismissUpload failed", e);
+	}
+};
+
+// One run as GET /api/me/runs sends it: the account's own runs, kept on the
+// server, newest first. Anything else in the reply is ignored.
+export type ServerRun = {
+	session_id: string;
+	model: string;
+	status: string;
+	created_at: string;
+};
+
+const SERVER_STATUS: Record<string, RecentUploadStatus> = {
+	queued: "Processing",
+	running: "Processing",
+	completed: "Completed",
+	failed: "Failed",
+	cancelled: "Cancelled",
+};
+
+/** Adds the account's server-side runs that this browser's list lacks.
+ *  The list lives in localStorage, so on a browser or device that never ran a
+ *  scan it is empty even though the account has many. A run already in the list
+ *  is left exactly as it is (its name, whether it was viewed), one the person
+ *  removed here stays removed, and the rest are appended, newest first, as
+ *  unbatched entries named the way a fresh run is (friendlyScanName). `added` is
+ *  what was appended. Malformed rows are skipped. */
+export const mergeServerRuns = (
+	local: RecentUpload[],
+	runs: unknown,
+	ownerId: string,
+	dismissed: string[] = loadDismissedUploads()
+): { list: RecentUpload[]; added: RecentUpload[] } => {
+	if (!Array.isArray(runs)) return { list: local, added: [] };
+	const known = new Set([...local.map((u) => u.sessionId), ...dismissed]);
+	const added: RecentUpload[] = [];
+	for (const run of runs as Partial<ServerRun>[]) {
+		if (!run || typeof run.session_id !== "string" || known.has(run.session_id)) continue;
+		const status = SERVER_STATUS[String(run.status).toLowerCase()];
+		const timestamp = Date.parse(String(run.created_at));
+		if (!status || Number.isNaN(timestamp)) continue;
+		const model = typeof run.model === "string" ? run.model : "";
+		known.add(run.session_id);
+		added.push({
+			sessionId: run.session_id,
+			label: friendlyScanName(model, timestamp),
+			model,
+			status,
+			timestamp,
+			isReconstruction: model === "OpenVAE",
+			ownerId,
+		});
+	}
+	if (added.length === 0) return { list: local, added };
+	const list = [...local, ...added].slice(0, MAX_RECENT_UPLOADS);
+	return { list, added: added.filter((u) => list.includes(u)) };
+};
+
+/** Takes up the runs saved before entries carried an owner that the server says are this account's.
+ *  Such an entry has no ownerId, so it would otherwise be hidden from the very
+ *  account that started it once anyone signs in. ``ownedIds`` is the server's
+ *  answer (POST /api/me/runs/owned) for the session ids of exactly these
+ *  entries, so it is proof enough to stamp them. A run with no owner that the
+ *  server does not name is left as it is: it could be a signed-out visitor's or
+ *  another account's, and stays in the signed-out view, where it can be
+ *  removed. `adopted` is what was stamped. */
+export const adoptOwnedRuns = (
+	local: RecentUpload[],
+	ownedIds: unknown,
+	ownerId: string
+): { list: RecentUpload[]; adopted: RecentUpload[] } => {
+	if (!Array.isArray(ownedIds)) return { list: local, adopted: [] };
+	const owned = new Set(ownedIds.filter((id): id is string => typeof id === "string"));
+	const adopted: RecentUpload[] = [];
+	const list = local.map((u) => {
+		if (u.ownerId !== undefined || !owned.has(u.sessionId)) return u;
+		const taken = { ...u, ownerId };
+		adopted.push(taken);
+		return taken;
+	});
+	return adopted.length === 0 ? { list: local, adopted } : { list, adopted };
 };
 
 export const updateRecentUploadStatus = (

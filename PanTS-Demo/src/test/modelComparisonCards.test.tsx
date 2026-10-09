@@ -63,7 +63,8 @@ describe("model comparison cards", () => {
     // Default (pro) is ePAI - its card carries the Selected badge.
     const epaiCard = screen.getByText(/Full abdominal organ segmentation/).closest("[role=radio]")!;
     const atlasCard = screen.getByText(/anatomically consistent/).closest("[role=radio]")!;
-    expect(within(epaiCard as HTMLElement).getByText("Selected")).toBeInTheDocument();
+    // The banner no longer flashes while the session is checked, so wait for the plan's default.
+    await waitFor(() => expect(within(epaiCard as HTMLElement).getByText("Selected")).toBeInTheDocument());
 
     await user.click(atlasCard);
 

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../contexts/authContext";
-import UploadPage from "../routes/UploadPage";
+import UploadPage, { __resetUploadTabState } from "../routes/UploadPage";
 import { RECENT_UPLOADS_KEY, type RecentUpload } from "../helpers/recentUploads";
 
 // What a Free account runs into on the Upload page, and what it's told.
@@ -32,6 +32,8 @@ let inferenceRefusal: Record<string, unknown> | null = null;
 let adminCouponResponse: ReturnType<typeof json> | null = null;
 
 beforeEach(() => {
+
+  __resetUploadTabState();
   inferenceRefusal = null;
   adminCouponResponse = null;
   localStorage.clear();
@@ -244,7 +246,7 @@ describe("running several scans at once", () => {
   it("counts a scan already in flight against the limit", async () => {
     const running: RecentUpload = {
       sessionId: "s-running", label: "earlier.nii.gz", model: "LesionSegmenter",
-      status: "Processing", timestamp: Date.now(),
+      status: "Processing", timestamp: Date.now(), ownerId: "u1",
     };
     localStorage.setItem(RECENT_UPLOADS_KEY, JSON.stringify([running]));
 

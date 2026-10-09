@@ -41,6 +41,7 @@ import {
 	type PlanId,
 } from "../helpers/accountProfile";
 import { track } from "../helpers/analytics";
+import { adoptLegacyRunsUntilChecked } from "../helpers/adoptLegacyRuns";
 import { API_BASE } from "../helpers/constants";
 
 export type AuthUser = {
@@ -375,6 +376,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	useEffect(() => {
 		refreshMe();
 	}, [refreshMe]);
+
+	// Runs this browser saved before entries carried an owner belong to whoever
+	// the server says they are. Every page that reads the list (History, the
+	// viewer, Delete scan history, the Upload page) sits under this provider,
+	// so the adoption is done here when sign-in settles rather than by
+	// whichever page happens to be opened first. A check the server could not
+	// answer is asked again (later, and when the window gets focus).
+	const signedInId = loading ? null : (user?.id ?? null);
+	useEffect(() => {
+		if (!signedInId) return;
+		const controller = new AbortController();
+		void adoptLegacyRunsUntilChecked(signedInId, controller.signal);
+		return () => controller.abort();
+	}, [signedInId]);
 
 	// Which OAuth buttons to enable. Only an answer from the server switches a
 	// button off. A server that was busy or not reached says nothing about the

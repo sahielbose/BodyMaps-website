@@ -4,6 +4,7 @@ import React, {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -146,8 +147,11 @@ import {
   batchButtonNames,
   isGroupInFlight,
   loadRecentUploads,
+  mergeServerRuns,
+  persistRecentUploads,
   recentStatusColor,
   removeRecentUpload,
+  runsOf,
   splitByAge,
   updateRecentUploadStatus,
   type RecentUpload,
@@ -176,6 +180,7 @@ import {
   type PendingUpload,
 } from "../helpers/pendingUploads";
 import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
+import { fetchListedRuns, RUNS_ADOPTED_EVENT, type RunsAdopted } from "../helpers/adoptLegacyRuns";
 import SiteFooter from "../components/SiteFooter";
 
 const parseApiResponse = async (res: Response): Promise<any> => {
@@ -188,6 +193,67 @@ const parseApiResponse = async (res: Response): Promise<any> => {
   throw new Error(
     `Expected JSON but got ${contentType || "unknown content-type"} (HTTP ${res.status}). Body: ${shortBody}`,
   );
+};
+
+// Uploads outlive the page. Leaving /upload unmounts it, but an upload or
+// dispatch already under way carries on in the old page's closures, and the
+// page mounted on return used to start the same session again: a second copy
+// of the upload that raced the first to finalize (the loser marked a healthy
+// run Failed), or a poll for a job that didn't exist yet, which marked it
+// Failed after three misses. So the abort controllers, and a hold on every
+// session whose upload or dispatch is still running, live in module scope
+// where each mount of the page sees them. A held session is left to finish.
+const uploadControllers = new Map<string, AbortController>();
+// Upload progress lives out here for the same reason: a page mounted while an
+// earlier one is still sending reads the same bytes, so its "safe to close"
+// line and its unload warning describe the upload that is really running.
+const sharedUploadRemaining = new Map<string, number>();
+const sharedBytesSent = { current: 0 };
+const sharedUploadResumable = { current: false };
+
+type SessionHold = {
+  count: number;
+  settled: Promise<void>;
+  settle: () => void;
+};
+const sessionHolds = new Map<string, SessionHold>();
+
+/** Holds a session until the returned release is called (once is enough). */
+const holdSession = (sid: string): (() => void) => {
+  let hold = sessionHolds.get(sid);
+  if (!hold) {
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    hold = { count: 0, settled, settle };
+    sessionHolds.set(sid, hold);
+  }
+  const held = hold;
+  held.count += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    held.count -= 1;
+    if (held.count === 0) {
+      sessionHolds.delete(sid);
+      held.settle();
+    }
+  };
+};
+
+/**
+ * For tests. What is above belongs to the tab, not to a mounted page, so it
+ * outlives the page and, in a test file, outlives the test that filled it.
+ */
+export const __resetUploadTabState = () => {
+  uploadControllers.clear();
+  sharedUploadRemaining.clear();
+  sharedBytesSent.current = 0;
+  sharedUploadResumable.current = false;
+  sessionHolds.forEach((hold) => hold.settle());
+  sessionHolds.clear();
 };
 
 const formatBytes = (bytes: number): string => {
@@ -321,10 +387,22 @@ const UploadPage: React.FC = () => {
   // out opens the auth popup instead of proceeding. It opens on sign-in: most
   // people hitting this already have an account, and the popup switches to
   // sign-up in one click for the ones who don't.
-  const { isAuthenticated, promptAuth, user, refreshUsage, redeemAdminCoupon } = useAuth();
+  const { isAuthenticated, loading: authLoading, promptAuth, user, refreshUsage, redeemAdminCoupon } = useAuth();
+  // Upload work belongs to the account that started it. authUserIdRef is what
+  // the async upload code checks (it outlives the render that started it), and
+  // authEpochRef moves on every sign-in, sign-out or account switch so work
+  // queued under the previous account can tell it has been superseded. See
+  // the account-boundary effect further down.
+  const authUserId = user?.id ?? null;
+  const authUserIdRef = useRef<string | null>(null);
+  const authEpochRef = useRef(0);
+  // Resumes runs adopted after the account-boundary effect ran; set by it.
+  const resumeAdoptedRef = useRef<((entries: RecentUpload[]) => Promise<void>) | null>(null);
   const ensureAccount = (): boolean => {
     if (isAuthenticated) return true;
-    promptAuth();
+    // While /me is still answering the account is not known yet: a signed-in
+    // person must not be shown the sign-in popup for that split second.
+    if (!authLoading) promptAuth();
     return false;
   };
   // Everything the plan won't allow routes through one dialog; this is what's
@@ -347,11 +425,26 @@ const UploadPage: React.FC = () => {
     new Map(),
   );
   const pollGenerationRef = useRef<Map<string, symbol>>(new Map());
+  // Runs whose polling stopped because the server answered 401: taken up again
+  // when the person signs in (see the effect keyed on `user`).
+  const signedOutPollsRef = useRef<Map<string, { model: string }>>(new Map());
+  // Whether this page is the one showing. Leaving /upload stops its pollers,
+  // but an upload or dispatch it started carries on and can reach
+  // startInferencePolling afterwards; see there.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   // Whether the current foreground upload got stored in IndexedDB (resumable).
   // If IDB was unavailable we fall back to warning before an unload instead.
-  const uploadResumableRef = useRef<boolean>(false);
+  const uploadResumableRef = useRef(sharedUploadResumable).current;
   // AbortController per session so a mid-upload run can be cancelled cleanly.
-  const uploadAbortRef = useRef<Map<string, AbortController>>(new Map());
+  // Shared by every mount of the page (see uploadControllers), so Cancel and a
+  // sign-out also reach an upload started before the page was left.
+  const uploadAbortRef = useRef<Map<string, AbortController>>(uploadControllers);
   // Which session currently drives the foreground upload progress bar.
   const foregroundUploadSidRef = useRef<string | null>(null);
   // The batch (if any) claiming the drop zone's status slot right now. Set the
@@ -371,10 +464,10 @@ const UploadPage: React.FC = () => {
   // Bytes still to send, per in-flight session. Summed for the "safe to close"
   // estimate and dropped when a run ends, so a cancelled or failed file can't
   // leave phantom bytes inflating the estimate for its siblings.
-  const uploadRemainingRef = useRef<Map<string, number>>(new Map());
+  const uploadRemainingRef = useRef(sharedUploadRemaining);
   // Monotonic count of bytes actually put on the wire; the ticker below diffs
   // it to measure throughput.
-  const bytesSentRef = useRef(0);
+  const bytesSentRef = useRef(sharedBytesSent).current;
   // Background uploads started the moment a file is selected, keyed by the
   // selected item's id (not its session id, since Run hasn't created one of
   // those yet when this starts). Not IndexedDB-resumable: a reload drops
@@ -485,6 +578,15 @@ const UploadPage: React.FC = () => {
   const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() =>
     loadRecentUploads(),
   );
+  // The list is this browser's, but its runs are each someone's (see runsOf):
+  // another account's stay in it for their owner's next sign-in, and are not
+  // this account's to show or to count against its limit on scans at once. A
+  // signed-out visitor sees the runs nobody owns, as paused, and nothing shows
+  // until sign-in has settled.
+  const ownRecentUploads = useMemo(
+    () => runsOf(recentUploads, authUserId, !authLoading),
+    [recentUploads, authUserId, authLoading],
+  );
   // Inline rename of a scan in the history list: which one is being edited and
   // the working text.
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -576,12 +678,49 @@ const UploadPage: React.FC = () => {
     eta: number | null;
   }>({ active: false, eta: null });
 
-  // Queue a file's upload behind whatever is already uploading.
-  const enqueueUpload = (task: () => Promise<void>): void => {
-    uploadChainRef.current = uploadChainRef.current
+  // Queue a file's upload behind whatever is already uploading. A task that
+  // was queued under a different sign-in than the one current when its turn
+  // comes is skipped (onSkip runs instead): it belongs to an account that
+  // signed out, and nothing may go on the wire for it now. Its resumable
+  // record stays behind for that account's next sign-in. Resolves once the
+  // task has run or been skipped.
+  const enqueueUpload = (
+    task: () => Promise<void>,
+    onSkip?: () => void,
+    sid?: string,
+  ): Promise<void> => {
+    const epoch = authEpochRef.current;
+    const turn = uploadChainRef.current
       .catch(() => {})
-      .then(task)
+      .then(() => {
+        if (epoch !== authEpochRef.current) {
+          // Its bytes are not going now, so they no longer keep the tab open.
+          if (sid) {
+            uploadRemainingRef.current.delete(sid);
+            setPhase(sid);
+          }
+          onSkip?.();
+          return;
+        }
+        return task();
+      })
       .catch(() => {});
+    uploadChainRef.current = turn;
+    return turn;
+  };
+
+  const clearRunMessage = (...own: string[]) => setMessage((now) => (own.includes(now) ? "" : now));
+
+  // Stop and forget every background pre-upload (the ones started when a file
+  // is picked, before Run). Used when the account signs out or changes, so a
+  // later Run can never reuse a session id that belongs to another account.
+  // Refs only: each attempt's own continuation (see preStartUpload) notices it
+  // was forgotten and clears its chip.
+  const forgetPreUploads = () => {
+    itemUploadRef.current.forEach((pre) => {
+      uploadAbortRef.current.get(pre.sid)?.abort();
+    });
+    itemUploadRef.current.clear();
   };
 
   const setPhase = (sid: string, phase?: string) =>
@@ -638,7 +777,7 @@ const UploadPage: React.FC = () => {
     e.preventDefault();
     setIsDragOver(false);
     // Inlined (not via ensureAccount) so the memoized closure sees fresh auth.
-    if (!isAuthenticated) { promptAuth(); return; }
+    if (!isAuthenticated) { if (!authLoading) promptAuth(); return; }
     if (!e.dataTransfer.files) return;
     const filteredFiles = Array.from(e.dataTransfer.files).filter((file) =>
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
@@ -656,7 +795,7 @@ const UploadPage: React.FC = () => {
         file: f,
       })),
     ]);
-  }, [isAuthenticated, promptAuth]);
+  }, [isAuthenticated, authLoading, promptAuth]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -806,12 +945,14 @@ const UploadPage: React.FC = () => {
       pollTimersRef.current.delete(sid);
     }
     pollGenerationRef.current.delete(sid);
+    signedOutPollsRef.current.delete(sid);
   };
 
   const stopAllPolling = () => {
     pollTimersRef.current.forEach((timer) => clearTimeout(timer));
     pollTimersRef.current.clear();
     pollGenerationRef.current.clear();
+    signedOutPollsRef.current.clear();
   };
 
   // Ask the server for a real median duration for this model/file-size, once
@@ -861,6 +1002,11 @@ const UploadPage: React.FC = () => {
   };
 
   const startInferencePolling = (sid: string, model: string) => {
+    // Only the page that is showing polls. A dispatch the page left behind
+    // finishes in its old closures, and a poller started there would run on
+    // with nobody looking, next to the one the returned page starts for the
+    // same session (it takes the session up once the dispatch has settled).
+    if (!mountedRef.current) return;
     stopPolling(sid);
     const generation = Symbol(sid);
     pollGenerationRef.current.set(sid, generation);
@@ -872,6 +1018,19 @@ const UploadPage: React.FC = () => {
         });
         const data = await parseApiResponse(res);
         const status = (data.status || "").toLowerCase();
+
+        // The sign-in lapsed (or was ended elsewhere) while the run was going:
+        // every further poll would be refused the same way. Stop, say so and
+        // ask for sign-in; the run is taken up again once the person has.
+        if (res.status === 401) {
+          stopPolling(sid);
+          signedOutPollsRef.current.set(sid, { model });
+          setPhase(sid, "signin");
+          setQueuePosition(sid);
+          setMessage("Your session expired. Sign in to see this scan's progress.");
+          promptAuth();
+          return;
+        }
 
         // The server doesn't know this session: the upload never finished
         // (tab closed mid-upload) or the backend restarted and lost its
@@ -959,12 +1118,14 @@ const UploadPage: React.FC = () => {
 
     // Fire-and-forget: if the job never reached the server (upload phase)
     // this 404s, which is fine - the client side is already torn down.
-    fetch(`${API_BASE}/api/cancel-inference/${sid}`, {
-      method: "POST",
-      credentials: "include",
-    }).catch(
-      () => {},
-    );
+    // Signed out, there is no account to cancel it for: just drop the card.
+    if (authUserIdRef.current) {
+      fetch(`${API_BASE}/api/cancel-inference/${sid}`, {
+        method: "POST",
+        credentials: "include",
+      })
+        .catch(() => {});
+    }
 
     if (foregroundUploadSidRef.current === sid) {
       foregroundUploadSidRef.current = null;
@@ -974,68 +1135,20 @@ const UploadPage: React.FC = () => {
     setMessage(`Cancelled ${upload.label}`);
   };
 
-  useEffect(() => {
-    // Resume every in-flight run - there can be several in parallel. Uploads
-    // that were still mid-transfer live in IndexedDB and must be *resumed*
-    // (not polled - the server has no job for them yet); the rest are already
-    // inferencing server-side, so we reconnect their pollers.
-    let cancelled = false;
-    (async () => {
-      const processing = loadRecentUploads().filter(
-        (u) => u.status === "Processing",
-      );
-      const pending = await loadPendingUploads();
-      if (cancelled) return;
-      const pendingById = new Map(pending.map((p) => [p.sessionId, p]));
-
-      for (const u of processing) {
-        const p = pendingById.get(u.sessionId);
-        if (p?.uploadedFilename) {
-          // Fully uploaded, but the tab closed before its job was created. The
-          // file is already on the server - just replay the inference call. Not
-          // queued behind the resuming uploads: it costs one POST and getting it
-          // into the GPU queue now is the whole point.
-          dispatchInference(p.sessionId, p.model, p.uploadedFilename, false);
-        } else if (p) {
-          setPhase(u.sessionId, "waiting");
-          uploadRemainingRef.current.set(p.sessionId, p.file.size);
-          enqueueUpload(() => runUpload(p, false)); // resume the upload
-        } else {
-          startInferencePolling(u.sessionId, u.model); // resume polling
-        }
-      }
-
-      // Clean up IndexedDB entries whose card no longer exists (deleted or
-      // trimmed off the 8-entry list) so the store can't leak.
-      const known = new Set(loadRecentUploads().map((u) => u.sessionId));
-      pending
-        .filter((p) => !known.has(p.sessionId))
-        .forEach((p) => deletePendingUpload(p.sessionId));
-
-      if (processing.length > 0) {
-        // Keep a session id bound for the action bar, but don't surface a
-        // "Reconnected · N runs" message — the processing summary bar shows this.
-        setSessionId(processing[0].sessionId);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      stopAllPolling();
-    };
-  }, []);
-
   // Only warn before an unload if the current upload could NOT be stored in
   // IndexedDB (quota/private-mode) - otherwise an interrupted upload resumes
   // automatically on reopen, so no scary dialog is needed.
+  // closeInfo.active also covers bytes an earlier mount of this page is still
+  // sending, which never set this mount's isUploading.
   useEffect(() => {
-    if (!isUploading || uploadResumableRef.current) return;
+    if (!(isUploading || closeInfo.active) || uploadResumableRef.current) return;
     const handler = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [isUploading]);
+  }, [isUploading, closeInfo.active, uploadResumableRef]);
 
   // "Safe to close" estimate. Only the upload needs this tab: once a file is
   // dispatched it lives in the server's DB-backed job queue behind the GPU lock,
@@ -1092,6 +1205,9 @@ const UploadPage: React.FC = () => {
     uploadedName: string,
     foreground: boolean,
   ) => {
+    // Never dispatched signed out; the resumable record (if any) waits for
+    // the next sign-in, which replays this call.
+    if (!authUserIdRef.current) return;
     // Reuse the upload's controller when there is one, so a Cancel pressed
     // during the upload still aborts this call.
     let controller = uploadAbortRef.current.get(sid);
@@ -1169,6 +1285,7 @@ const UploadPage: React.FC = () => {
     file: File,
     onProgress?: (pct: number) => void,
   ): Promise<string | null> => {
+    if (!authUserIdRef.current) return null; // never uploads signed out
     const controller = new AbortController();
     uploadAbortRef.current.set(sid, controller);
     uploadRemainingRef.current.set(sid, file.size);
@@ -1265,46 +1382,52 @@ const UploadPage: React.FC = () => {
     setItemUploadStatus((prev) => ({ ...prev, [item.id]: "uploading" }));
     setItemUploadProgress((prev) => ({ ...prev, [item.id]: 0 }));
     const file = item.file;
-    enqueueUpload(async () => {
-      const uploadedName = await preUploadOnly(sid, file, (pct) => {
-        setItemUploadProgress((prev) => ({ ...prev, [item.id]: pct }));
+    const isCurrent = () => itemUploadRef.current.get(item.id)?.sid === sid;
+    // Forgotten (signed out, file removed) before or while it ran: the chip
+    // goes back to plain "selected", with no upload state.
+    const clearChip = () => {
+      setItemUploadStatus((prev) => {
+        if (prev[item.id] !== "uploading") return prev;
+        const { [item.id]: _dropped, ...rest } = prev;
+        return rest;
       });
-      setItemUploadStatus((prev) => ({
-        ...prev,
-        [item.id]: uploadedName ? "done" : "failed",
-      }));
-      resolveDone(uploadedName);
-    });
+    };
+    enqueueUpload(
+      async () => {
+        // Waited its turn on the chain; it may have been forgotten since.
+        if (!isCurrent()) {
+          clearChip();
+          resolveDone(null);
+          return;
+        }
+        const uploadedName = await preUploadOnly(
+          sid,
+          file,
+          (pct) => {
+            setItemUploadProgress((prev) => ({ ...prev, [item.id]: pct }));
+          },
+        );
+        // Only the still-registered attempt may report the chip's status or
+        // clean up - after an abort, or once a newer attempt for the same item
+        // superseded this one, the chip belongs to that attempt, not to this
+        // stale outcome.
+        const cur = itemUploadRef.current.get(item.id);
+        if (cur && cur.sid === sid) {
+          setItemUploadStatus((prev) => ({
+            ...prev,
+            [item.id]: uploadedName ? "done" : "failed",
+          }));
+        } else if (!cur) {
+          clearChip();
+        }
+        resolveDone(uploadedName);
+      },
+      () => {
+        clearChip();
+        resolveDone(null);
+      },
+    );
   };
-
-  // Start uploading every selected NIfTI file the instant it's selected -
-  // before a model is even picked. preStartUpload is idempotent per item id,
-  // so this can safely re-run on every render where any dependency changed;
-  // it only does real work the first time a given item appears. A file
-  // picked while model is still "None" uploads anyway: if the user then
-  // picks a real model, dispatchInference already has the bytes waiting and
-  // Run is instant. The rare case where they truly stay on "None" (view
-  // only, never run inference) just means the pre-upload was unused - cheap
-  // compared to the latency saved on every run that DOES follow.
-  //
-  // Mirrors handleRunEpaiInference's own plan-limit check: a selection that
-  // Run would refuse outright must not upload anything first - sending scan
-  // data for a run the plan won't allow wastes bandwidth and, on a medical
-  // imaging site, transmits patient data pointlessly. Skipping here just
-  // means nothing pre-uploads; Run's existing check still explains why and
-  // blocks the batch exactly as before.
-  useEffect(() => {
-    // Guests never pre-upload. Every setSelectedItems writer already sits
-    // behind ensureAccount, but that is an invariant a refactor can break -
-    // the server now refuses unauthenticated uploads, so failing closed here
-    // just avoids a doomed request.
-    if (!isAuthenticated) return;
-    const slots = maxConcurrentScans(plan as PlanId);
-    const running = recentUploads.filter((u) => u.status === "Processing").length;
-    if (selectedItems.length + running > slots) return;
-    selectedItems.forEach(preStartUpload);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated, selectedItems, plan, recentUploads]);
 
   // Uploads the file described by `p`, finalizes, then starts inference.
   // Resumable: the file lives in IndexedDB and the chunk cursor is persisted, so
@@ -1321,6 +1444,8 @@ const UploadPage: React.FC = () => {
       bdmapId: bid,
       totalChunks,
     } = p;
+    // Signed out: leave the resumable record for the next sign-in.
+    if (!authUserIdRef.current) return;
     const controller = new AbortController();
     uploadAbortRef.current.set(sid, controller);
     setPhase(sid, "uploading");
@@ -1515,6 +1640,12 @@ const UploadPage: React.FC = () => {
       if (uploadAbortRef.current.get(sid) === controller) {
         uploadAbortRef.current.delete(sid);
       }
+      // Aborted by a sign-out rather than by Cancel (which already did this):
+      // the foreground progress state must not outlive the upload.
+      if (foregroundUploadSidRef.current === sid) {
+        foregroundUploadSidRef.current = null;
+        setIsUploading(false);
+      }
     }
   };
 
@@ -1524,6 +1655,7 @@ const UploadPage: React.FC = () => {
   // mid-upload marks the run Failed, consistent with the Active/Recent cards. Wired
   // into uploadAbortRef so the Active card's Cancel button aborts it cleanly.
   const runDicomUpload = async (sid: string, files: File[], model: string) => {
+    if (!authUserIdRef.current) return; // never uploads signed out
     const controller = new AbortController();
     uploadAbortRef.current.set(sid, controller);
     foregroundUploadSidRef.current = sid;
@@ -1593,8 +1725,244 @@ const UploadPage: React.FC = () => {
       if (uploadAbortRef.current.get(sid) === controller) {
         uploadAbortRef.current.delete(sid);
       }
+      if (foregroundUploadSidRef.current === sid) {
+        foregroundUploadSidRef.current = null;
+        setIsUploading(false);
+      }
     }
   };
+
+  /* ── Account boundary ── */
+  // Runs whenever the signed-in account changes, including the first time
+  // auth settles on page load. Two halves:
+  //
+  // 1. The account that was signed in is gone (signed out, or switched): stop
+  //    everything it had going - abort every upload and dispatch in flight,
+  //    stop the pollers, forget the pre-uploads so a later Run can't reuse
+  //    one of its session ids, and move the epoch on so queued uploads skip.
+  //    Their resumable records stay in IndexedDB for that account's return.
+  // 2. Someone is signed in: resume every in-flight run this browser knows
+  //    about that belongs to them - there can be several in parallel. Uploads
+  //    that were still mid-transfer live in IndexedDB and must be *resumed*
+  //    (not polled - the server has no job for them yet); the rest are
+  //    already inferencing server-side, so we reconnect their pollers.
+  //    Signed out, nothing resumes: a guest never uploads, dispatches or polls
+  //    anything, even for leftovers from an earlier session in this browser.
+  useEffect(() => {
+    const prev = authUserIdRef.current;
+    authUserIdRef.current = authUserId;
+    if (prev !== null && prev !== authUserId) {
+      authEpochRef.current += 1;
+      uploadAbortRef.current.forEach((controller) => controller.abort());
+      forgetPreUploads();
+      // Their chips said "ready" for uploads that were just dropped, and the
+      // next account's pre-upload effect starts them again from a clean slate.
+      setItemUploadStatus({});
+      setItemUploadProgress({});
+      stopAllPolling();
+      // The "Inference complete" card is for the scan its account just ran.
+      setSessionId("");
+      setInferenceCompleted(false);
+    }
+    if (authUserId === null) return;
+
+    let cancelled = false;
+    // Takes a session up again once another run of it has ended: the state
+    // that run left behind decides what, if anything, is still to do.
+    const takeUpAfter = async (u: RecentUpload): Promise<void> => {
+      if (cancelled) return;
+      const latest = loadRecentUploads();
+      setRecentUploads(latest);
+      setPhase(u.sessionId);
+      if (latest.find((r) => r.sessionId === u.sessionId)?.status !== "Processing") return;
+      const left = (await loadPendingUploads()).find((r) => r.sessionId === u.sessionId);
+      if (cancelled) return;
+      return resume(u, left);
+    };
+
+    const resume = async (u: RecentUpload, p: PendingUpload | undefined): Promise<void> => {
+      const hold = sessionHolds.get(u.sessionId);
+      if (hold) {
+        // Still uploading or dispatching from before the page was left and
+        // reopened. Starting it again would send the file twice (or poll a
+        // job that doesn't exist yet), so wait for it, take up the state it
+        // ended in, and carry on from there.
+        setPhase(u.sessionId, "uploading");
+        await hold.settled;
+        return takeUpAfter(u);
+      }
+      const release = p ? holdSession(u.sessionId) : undefined;
+      if (p?.uploadedFilename) {
+        // Fully uploaded, but the tab closed before its job was created. The
+        // file is already on the server - just replay the inference call. Not
+        // queued behind the resuming uploads: it costs one POST and getting it
+        // into the GPU queue now is the whole point.
+        const uploaded = p.uploadedFilename;
+        void (async () => {
+          await dispatchInference(p.sessionId, p.model, uploaded, false);
+        })().finally(release);
+      } else if (p) {
+        setPhase(u.sessionId, "waiting");
+        uploadRemainingRef.current.set(p.sessionId, p.file.size);
+        // The record was just read from IndexedDB, so a reload mid-resume loses
+        // nothing: set when this upload's turn starts, like the foreground Run.
+        void enqueueUpload(() => { uploadResumableRef.current = true; return runUpload(p, false); }, undefined, p.sessionId).then(release); // resume the upload
+      } else {
+        startInferencePolling(u.sessionId, u.model); // resume polling
+      }
+    };
+
+    // Runs the auth provider takes up after this effect ran (adoptLegacyRuns:
+    // saved before entries carried an owner, so not this account's yet when it
+    // looked) get the same treatment as the ones it found: one still going is
+    // resumed from its pending record if it has one, and otherwise followed.
+    // Polling alone would fail one whose upload finished but whose job was never
+    // created.
+    const resumeAdopted = async (entries: RecentUpload[]) => {
+      const pending = await loadPendingUploads();
+      if (cancelled) return;
+      for (const u of entries) void resume(u, pending.find((p) => p.sessionId === u.sessionId));
+    };
+    resumeAdoptedRef.current = resumeAdopted;
+
+    (async () => {
+      // Only this account's own: a run nobody owns is a signed-out visitor's,
+      // and no account takes it up.
+      const processing = loadRecentUploads().filter(
+        (u) => u.status === "Processing" && u.ownerId === authUserId,
+      );
+      const pending = await loadPendingUploads();
+      if (cancelled) return;
+      const pendingById = new Map(pending.map((p) => [p.sessionId, p]));
+
+      for (const u of processing) void resume(u, pendingById.get(u.sessionId));
+
+      // Clean up IndexedDB entries whose card no longer exists (deleted or
+      // trimmed off the list) so the store can't leak.
+      const known = new Set(loadRecentUploads().map((u) => u.sessionId));
+      pending
+        .filter((p) => !known.has(p.sessionId))
+        .forEach((p) => deletePendingUpload(p.sessionId));
+
+      if (processing.length > 0) {
+        // Keep a session id bound for the action bar, but don't surface a
+        // "Reconnected · N runs" message — the processing summary bar shows this.
+        setSessionId(processing[0].sessionId);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (resumeAdoptedRef.current === resumeAdopted) resumeAdoptedRef.current = null;
+      stopAllPolling();
+    };
+    // Keyed on the account alone: the helpers it calls are recreated every
+    // render but only ever read refs and stable setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUserId]);
+
+  // Recent uploads live in this browser's localStorage, so a signed-in person
+  // on another browser or device would start with an empty list. The server
+  // keeps each account's own runs too (GET /api/me/runs): the ones this browser
+  // lacks are added, and what it already has is left as it is. Signed out, the
+  // list stays local. A run the server is still working on is followed like
+  // any other in-flight one.
+  useEffect(() => {
+    if (!authUserId) return;
+    const controller = new AbortController();
+    (async () => {
+      try {
+        // One request with the auth provider's own adoption (adoptLegacyRuns).
+        const runs = await fetchListedRuns(authUserId);
+        if (runs === null || controller.signal.aborted) return;
+        // Read now, not before the request: the list may have changed meanwhile.
+        // (Runs saved before entries carried an owner are taken up by the auth
+        // provider, which tells this page; see adoptLegacyRuns.)
+        const { list, added } = mergeServerRuns(loadRecentUploads(), runs, authUserId);
+        if (added.length === 0) return;
+        persistRecentUploads(list);
+        setRecentUploads(list);
+        added
+          .filter((u) => u.status === "Processing")
+          .forEach((u) => startInferencePolling(u.sessionId, u.model));
+      } catch {
+        // Best effort: the local list is all there is until the next visit.
+      }
+    })();
+    return () => controller.abort();
+    // Keyed on the account alone, like the effect above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUserId]);
+
+  useEffect(() => {
+    if (!user) return;
+    // Runs left unpolled by a 401 follow on again now that someone is signed in
+    // (unless they have ended meanwhile).
+    const held = Array.from(signedOutPollsRef.current);
+    signedOutPollsRef.current.clear();
+    // Signed in again: the lines asking for that are done with.
+    clearRunMessage(
+      "Your session expired. Sign in to see this scan's progress.",
+    );
+    const stored = loadRecentUploads();
+    held.forEach(([sid, { model }]) => {
+      const run = stored.find((r) => r.sessionId === sid);
+      if (run?.status !== "Processing" || run.ownerId !== user.id) return;
+      setPhase(sid);
+      startInferencePolling(sid, model);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  // The auth provider stamps runs saved before entries carried an owner with
+  // the account the server says they are (adoptLegacyRuns). One still running
+  // is taken up like any other of the account's (resumed if its upload or
+  // dispatch was cut short, followed otherwise), and the cards refresh either way.
+  useEffect(() => {
+    const onAdopted = (event: Event) => {
+      const { userId, adopted } = (event as CustomEvent<RunsAdopted>).detail;
+      if (userId !== authUserIdRef.current) return;
+      setRecentUploads(loadRecentUploads());
+      const going = adopted.filter((u) => u.status === "Processing");
+      if (going.length > 0) void resumeAdoptedRef.current?.(going);
+    };
+    window.addEventListener(RUNS_ADOPTED_EVENT, onAdopted);
+    return () => window.removeEventListener(RUNS_ADOPTED_EVENT, onAdopted);
+    // Reads refs and stable setters only, like the effects around it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Declared after the account-boundary effect on purpose: after a switch of
+  // account, that effect forgets the old account's pre-uploads first and this
+  // one then starts fresh ones under the new account.
+  //
+  // Start uploading every selected NIfTI file the instant it's selected -
+  // before a model is even picked. preStartUpload is idempotent per item id,
+  // so this can safely re-run on every render where any dependency changed;
+  // it only does real work the first time a given item appears. A file
+  // picked while model is still "None" uploads anyway: if the user then
+  // picks a real model, dispatchInference already has the bytes waiting and
+  // Run is instant. The rare case where they truly stay on "None" (view
+  // only, never run inference) just means the pre-upload was unused - cheap
+  // compared to the latency saved on every run that DOES follow.
+  //
+  // Mirrors handleRunEpaiInference's own plan-limit check: a selection that
+  // Run would refuse outright must not upload anything first - sending scan
+  // data for a run the plan won't allow wastes bandwidth and, on a medical
+  // imaging site, transmits patient data pointlessly. Skipping here just
+  // means nothing pre-uploads; Run's existing check still explains why and
+  // blocks the batch exactly as before.
+  useEffect(() => {
+    // Guests never pre-upload. Every setSelectedItems writer already sits
+    // behind ensureAccount, but that is an invariant a refactor can break -
+    // the server now refuses unauthenticated uploads, so failing closed here
+    // just avoids a doomed request.
+    if (!authUserId) return;
+    const slots = maxConcurrentScans(plan as PlanId);
+    const running = ownRecentUploads.filter((u) => u.status === "Processing").length;
+    if (selectedItems.length + running > slots) return;
+    selectedItems.forEach(preStartUpload);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUserId, selectedItems, plan, ownRecentUploads]);
 
   /* ── Run inference ── */
   // Queue one scan's upload/inference. Shared by single and batch runs. The
@@ -1611,6 +1979,9 @@ const UploadPage: React.FC = () => {
     // straight to waiting on it instead of re-uploading from scratch.
     const pre = item.kind === "nifti" ? itemUploadRef.current.get(item.id) : undefined;
     const sid = pre?.sid ?? crypto.randomUUID();
+    // Held until this run's upload and dispatch are over, so a remount of the
+    // page meanwhile leaves it alone (see sessionHolds).
+    const release = holdSession(sid);
     const ts = Date.now();
     // Keep the raw filename for reference, but name the scan meaningfully by
     // default (model + date); the user can rename it later.
@@ -1634,6 +2005,7 @@ const UploadPage: React.FC = () => {
         isReconstruction: model === "OpenVAE",
         batchId: batch?.batchId,
         batchLabel: batch?.batchLabel,
+        ownerId: authUserIdRef.current ?? undefined,
       }),
     );
 
@@ -1650,15 +2022,36 @@ const UploadPage: React.FC = () => {
         return rest;
       });
       setPhase(sid, "uploading"); // harmless if the background upload already finished
-      (async () => {
+      const epoch = authEpochRef.current;
+      void (async () => {
         const uploadedName = await pre.uploadDone;
+        if (epoch !== authEpochRef.current) {
+          // Signed out (or switched account) while this waited. Nothing more
+          // goes on the wire now; park it where the account's next sign-in
+          // picks it up (see the account-boundary effect) instead of
+          // stranding a Processing card with nothing behind it.
+          if (item.kind === "nifti") {
+            await savePendingUpload({
+              sessionId: sid,
+              file: uploadedName ? new Blob() : item.file,
+              filename: item.file.name,
+              model,
+              bdmapId: "",
+              totalChunks: Math.ceil(item.file.size / CHUNK_SIZE),
+              nextChunk: 0,
+              chunkSize: CHUNK_SIZE,
+              ...(uploadedName ? { uploadedFilename: uploadedName } : {}),
+            });
+          }
+          return;
+        }
         if (!uploadedName) {
           setPhase(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Failed"));
           return;
         }
         await dispatchInference(sid, model, uploadedName, false);
-      })();
+      })().finally(release);
       return;
     }
 
@@ -1673,7 +2066,7 @@ const UploadPage: React.FC = () => {
     if (item.kind === "dicom") {
       const bytes = item.files.reduce((sum, f) => sum + f.size, 0);
       uploadRemainingRef.current.set(sid, bytes);
-      enqueueUpload(() => runDicomUpload(sid, item.files, model));
+      void enqueueUpload(() => runDicomUpload(sid, item.files, model), undefined, sid).then(release);
       return;
     }
 
@@ -1690,12 +2083,16 @@ const UploadPage: React.FC = () => {
     };
     const resumable = await savePendingUpload(pending);
     uploadRemainingRef.current.set(sid, file.size);
-    enqueueUpload(() => {
-      // Set when this file actually starts, not when it was queued - otherwise
-      // the last file in a batch would decide the unload warning for all of them.
-      uploadResumableRef.current = resumable;
-      return runUpload(pending, true);
-    });
+    void enqueueUpload(
+      () => {
+        // Set when this file actually starts, not when it was queued - otherwise
+        // the last file in a batch would decide the unload warning for all of them.
+        uploadResumableRef.current = resumable;
+        return runUpload(pending, true);
+      },
+      undefined,
+      sid,
+    ).then(release);
   };
 
   const handleRunEpaiInference = async () => {
@@ -1726,7 +2123,7 @@ const UploadPage: React.FC = () => {
     // says so before anything uploads instead of accepting the first and
     // rejecting the rest one 402 at a time.
     const slots = maxConcurrentScans(plan as PlanId);
-    const running = recentUploads.filter((u) => u.status === "Processing").length;
+    const running = ownRecentUploads.filter((u) => u.status === "Processing").length;
     if (items.length + running > slots) {
       setUpgradeBlock({
         reason: "concurrent_scans", limit: slots, used: running, plan: plan as PlanId,
@@ -1879,7 +2276,7 @@ const UploadPage: React.FC = () => {
   // originally rendered) so the dropzone can show in-flight runs itself once
   // Run has been clicked, instead of a separate card appearing lower on the
   // page - the same box that took the upload keeps showing its status.
-  const groups = groupUploads(recentUploads);
+  const groups = groupUploads(ownRecentUploads);
   const batchNames = batchButtonNames(groups);
   const inFlight = groups.filter(isGroupInFlight);
   const closeNote = closeInfo.active
@@ -1921,6 +2318,17 @@ const UploadPage: React.FC = () => {
       return true;
     }),
   );
+  const olderScans = older.reduce((n, g) => n + (g.kind === "batch" ? g.uploads.length : 1), 0);
+
+  // An in-flight scan this tab isn't driving because nobody is signed in (a
+  // guest never resumes anything). Says so instead of claiming it's running.
+  // Not while auth is still settling, or every reload would flash it. Another
+  // account's scans are not listed at all (see ownRecentUploads).
+  const pausedLabel = (): string | null => {
+    if (authLoading) return null;
+    if (!authUserId) return "Paused, sign in to resume";
+    return null;
+  };
 
   // ── A single in-flight scan (not part of a batch) ──
   // A render helper, not a component declared in render: the ETA ticker
@@ -1929,11 +2337,14 @@ const UploadPage: React.FC = () => {
   const processingCard = (u: RecentUpload) => {
     const phase = sessionPhases[u.sessionId];
     const queuePos = queuePositions[u.sessionId];
+    const paused = pausedLabel();
     const phaseLabel =
-      phase === "waiting" ? "Waiting to upload…" :
+      paused ??
+      (phase === "waiting" ? "Waiting to upload…" :
       phase === "uploading" ? "Uploading…" :
+      phase === "signin" ? "Sign in to see progress" :
       phase === "queued" ? (queuePos ? `#${queuePos} in queue` : "Queued for GPU") :
-      "Running…";
+      "Running…");
     return (
       <div key={u.sessionId} className="upload-proc-card">
         <div className="upload-row">
@@ -1941,7 +2352,7 @@ const UploadPage: React.FC = () => {
             <div className="upload-row__icon upload-row__icon--live">{/* A static pulsing dot per scan instead of a spinning wheel:
                  multiple in-flight scans shouldn't each spin. The single
                  spinner lives in the batch ProcessingSummaryBar. */}
-              <span className="animate-pulse upload-row__dot" />
+              {!paused && <span className="animate-pulse upload-row__dot" />}
             </div>
             <div className="upload-row__text">
               <div className="upload-row__title">{u.label}</div>
@@ -1954,8 +2365,8 @@ const UploadPage: React.FC = () => {
             </div>
           </div>
           <div className="upload-row__actions">
-            <span className={`upload-row__status${phase === "queued" ? " upload-row__status--quiet" : ""}`}>{phaseLabel}</span>
-            <button type="button" className="active-cancel-btn" aria-label={`Cancel ${scanAccessibleName(u, recentUploads)}`} onClick={() => { listRefocusRef.current = "@picker"; cancelRun(u); }}>Cancel</button>
+            <span className={`upload-row__status${phase === "queued" || paused ? " upload-row__status--quiet" : ""}`}>{phaseLabel}</span>
+            <button type="button" className="active-cancel-btn" aria-label={`Cancel ${scanAccessibleName(u, ownRecentUploads)}`} onClick={() => { listRefocusRef.current = "@picker"; cancelRun(u); }}>Cancel</button>
           </div>
         </div>
         {/* No real percent-complete exists for inference (nnU-Net doesn't
@@ -1964,7 +2375,7 @@ const UploadPage: React.FC = () => {
             left based on how this model's runs typically take. Only shown
             once actually running: during "queued" there's no dispatch-time
             signal to build an estimate from. */}
-        {phase === "running" && (
+        {phase === "running" && !paused && (
           <div className="upload-row__eta">
             {estimateRemaining(
               u.model || "",
@@ -1985,9 +2396,12 @@ const UploadPage: React.FC = () => {
         const running = g.uploads.filter(u => u.status === "Processing");
         const done = g.uploads.filter(u => u.status === "Completed").length;
         const phases = running.map(u => sessionPhases[u.sessionId]);
+        const paused = running.length > 0 ? pausedLabel() : null;
         const statusLabel =
+          paused ??
+          (phases.some(p => p === "signin") ? "Sign in to see progress" :
           phases.some(p => p === undefined || p === "running") ? "Running…" :
-          phases.some(p => p === "queued") ? "Queued for GPU" : "Uploading…";
+          phases.some(p => p === "queued") ? "Queued for GPU" : "Uploading…");
         return (
           <ProcessingSummaryBar key={g.batchId} title={g.label} buttonName={batchNames.get(g.batchId)} running={running.length}
             done={done} statusLabel={statusLabel}
@@ -2514,7 +2928,7 @@ const UploadPage: React.FC = () => {
         </div>
 
         {/* ── Sign-in prompt (signed-out only) ── */}
-        {!isAuthenticated && (
+        {!authLoading && !isAuthenticated && (
           <div className="upload-account-banner">
             <span>
               <button type="button" className="upload-account-link" onClick={() => promptAuth()}>
@@ -2647,7 +3061,7 @@ const UploadPage: React.FC = () => {
                     <button
                       type="button"
                       title={u.sourceName || "Click to rename"}
-                      aria-label={`Rename ${scanAccessibleName(u, recentUploads)}`}
+                      aria-label={`Rename ${scanAccessibleName(u, ownRecentUploads)}`}
                       data-rename-trigger={u.sessionId}
                       onClick={(e) => { e.stopPropagation(); startRename(u); }}
                       className="upload-rename-trigger upload-row__title"
@@ -2662,9 +3076,9 @@ const UploadPage: React.FC = () => {
               </div>
               <div className="upload-row__actions">
                 <span className="upload-row__status" style={{ color: recentStatusColor(u.status) }}>{u.status}</span>
-                {canView(u) && <button type="button" className="upload-small-btn" aria-label={`View ${scanAccessibleName(u, recentUploads)}`} onClick={(e) => { e.stopPropagation(); openSession(u); }}>View</button>}
-                {u.status === "Completed" && <button type="button" className="upload-small-btn" aria-label={`Download ${scanAccessibleName(u, recentUploads)}`} onClick={(e) => { e.stopPropagation(); downloadResult(u.sessionId); }}>Download</button>}
-                {removeButton(scanAccessibleName(u, recentUploads), u.sessionId, (e) => { e.stopPropagation(); setRecentUploads(removeRecentUpload(u.sessionId)); })}
+                {canView(u) && <button type="button" className="upload-small-btn" aria-label={`View ${scanAccessibleName(u, ownRecentUploads)}`} onClick={(e) => { e.stopPropagation(); openSession(u); }}>View</button>}
+                {u.status === "Completed" && <button type="button" className="upload-small-btn" aria-label={`Download ${scanAccessibleName(u, ownRecentUploads)}`} onClick={(e) => { e.stopPropagation(); downloadResult(u.sessionId); }}>Download</button>}
+                {removeButton(scanAccessibleName(u, ownRecentUploads), u.sessionId, (e) => { e.stopPropagation(); setRecentUploads(removeRecentUpload(u.sessionId)); })}
               </div>
             </div>
           );
@@ -2870,7 +3284,7 @@ const UploadPage: React.FC = () => {
                 <button type="button" className="upload-history-link"
                   onClick={() => navigate("/account/history")}
                   style={{ marginTop: finished.length > 0 ? undefined : "32px" }}>
-                  {older.length} {older.length === 1 ? "scan" : "scans"} in History →
+                  {olderScans} {olderScans === 1 ? "scan" : "scans"} in History →
                 </button>
               )}
             </>
@@ -2882,7 +3296,7 @@ const UploadPage: React.FC = () => {
         {/* Batch "View details" popup */}
         {(() => {
           if (!detailsBatchId) return null;
-          const uploads = recentUploads.filter(u => u.batchId === detailsBatchId);
+          const uploads = ownRecentUploads.filter(u => u.batchId === detailsBatchId);
           if (uploads.length === 0) return null;
           const label = uploads[0].batchLabel || `${uploads.length} scans`;
           return (
