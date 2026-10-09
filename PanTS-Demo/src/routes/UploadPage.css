@@ -753,10 +753,23 @@
   position: relative;
   width: 100%;
   height: 320px;
+  /* The pipeline row follows it: the same breathing room the dropzone has
+     above the steps, not the 4px that row's own margin leaves. */
+  margin-bottom: 28px;
   background: #0a0b0d;
   border: 1px solid rgba(0, 0, 0, 0.12);
   border-radius: 12px;
   overflow: hidden;
+}
+/* The NIfTI preview draws three Niivue tiles, laid out in one row on wide
+   boxes, so it is sized to that row and the tiles fill it instead of floating
+   in dead black above and below. The DICOM preview is one square slice and
+   keeps the fixed height. */
+.ct-preview--multiplanar {
+  height: auto;
+  aspect-ratio: 3 / 1;
+  min-height: 160px;
+  max-height: 280px;
 }
 .ct-preview-canvas {
   width: 100%;
@@ -779,7 +792,10 @@
   align-items: center;
   justify-content: center;
   height: 120px;
-  color: #8f8f8f;
+  aspect-ratio: auto;
+  min-height: 0;
+  /* On the dark preview box, so a light grey (about 9:1 on #0a0b0d). */
+  color: #b0b0b0;
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   text-align: center;
@@ -1045,4 +1061,14 @@
 }
 .model-submenu-item.selected .model-submenu-label {
   color: #002d72;
+}
+
+@media (max-width: 640px) {
+  /* Roughly square at this width, so Niivue's 2 x 2 grid keeps its tiles
+     instead of dropping to a thin row. */
+  .ct-preview--multiplanar {
+    aspect-ratio: 1 / 1;
+    min-height: 0;
+    max-height: none;
+  }
 }

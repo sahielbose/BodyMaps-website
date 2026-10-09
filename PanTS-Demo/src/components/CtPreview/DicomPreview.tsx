@@ -20,15 +20,23 @@ export default function DicomPreview({ files }: { files: File[] }) {
 	// would otherwise close over a stale value).
 	const indexRef = useRef(0);
 	const totalRef = useRef(0);
-	const [error, setError] = useState(false);
+	// Tracks which series failed rather than a bare flag, so picking another one
+	// clears the message in the same render and the viewport div exists again before
+	// the effect looks for it (otherwise the load bails on a null ref and spins).
+	const [failedFiles, setFailedFiles] = useState<File[] | null>(null);
+	const error = failedFiles === files;
 	const [ready, setReady] = useState(false);
 	const [slice, setSlice] = useState({ index: 0, total: 0 });
 
 	useEffect(() => {
 		let cancelled = false;
 		let engine: CsRenderingEngine | null = null;
-		setError(false);
+		// Frees the parsed files behind the stack; the loader caches every byte of them otherwise.
+		let releaseSeries: (() => void) | undefined;
+		const controller = new AbortController();
 		setReady(false);
+		// A series that failed earlier gets a fresh attempt when it is picked again.
+		setFailedFiles(null);
 
 		const goTo = (idx: number, total: number) => {
 			const vp = viewportRef.current;
@@ -40,8 +48,14 @@ export default function DicomPreview({ files }: { files: File[] }) {
 		};
 
 		const onWheel = (e: WheelEvent) => {
+			// A sideways swipe has no vertical step; leave it to the page.
+			if (e.deltaY === 0) return;
+			const total = totalRef.current;
+			const next = Math.max(0, Math.min(total - 1, indexRef.current + (e.deltaY > 0 ? 1 : -1)));
+			// At the first or last slice there is nothing left to page, so let the page scroll on.
+			if (next === indexRef.current) return;
 			e.preventDefault();
-			goTo(indexRef.current + (e.deltaY > 0 ? 1 : -1), totalRef.current);
+			goTo(next, total);
 		};
 
 		const load = async () => {
@@ -56,8 +70,12 @@ export default function DicomPreview({ files }: { files: File[] }) {
 				// Registers the DICOM loaders, groups the picked files by series, and
 				// returns the imageIds of the largest series (the real CT stack — folders
 				// often mix in scouts / dose reports).
-				const { imageIds } = await loadLocalDicomSeries(files);
-				if (cancelled || !elementRef.current) return;
+				const { imageIds, release } = await loadLocalDicomSeries(files, controller.signal);
+				releaseSeries = release;
+				if (cancelled || !elementRef.current) {
+					release();
+					return;
+				}
 
 				const viewportId = "dicom-preview-vp";
 				engine = new RenderingEngine(`dicom-preview-${Date.now()}`);
@@ -73,7 +91,10 @@ export default function DicomPreview({ files }: { files: File[] }) {
 				const start = Math.floor(imageIds.length / 2);
 				await vp.setStack(imageIds, start);
 				vp.render();
-				if (cancelled) return;
+				if (cancelled) {
+					release();
+					return;
+				}
 
 				indexRef.current = start;
 				totalRef.current = imageIds.length;
@@ -84,19 +105,22 @@ export default function DicomPreview({ files }: { files: File[] }) {
 				element.addEventListener("wheel", onWheel, { passive: false });
 			} catch (e) {
 				console.error("DICOM preview failed to load", e);
-				if (!cancelled) setError(true);
+				releaseSeries?.();
+				if (!cancelled) setFailedFiles(files);
 			}
 		};
 		load();
 
 		return () => {
 			cancelled = true;
+			controller.abort();
 			elementRef.current?.removeEventListener("wheel", onWheel);
 			try {
 				engine?.destroy();
 			} catch {
 				/* engine already torn down */
 			}
+			releaseSeries?.();
 			engineRef.current = null;
 			viewportRef.current = null;
 			totalRef.current = 0;
@@ -114,16 +138,16 @@ export default function DicomPreview({ files }: { files: File[] }) {
 
 	if (error) {
 		return (
-			<div className="ct-preview ct-preview--msg">
-				Couldn't preview this DICOM series — it will still upload for inference.
+			<div className="ct-preview ct-preview--msg" role="alert">
+				Couldn't preview this DICOM series. You can still run a model on it.
 			</div>
 		);
 	}
 
 	return (
 		<div className="ct-preview">
-			<div ref={elementRef} className="ct-preview-canvas" onContextMenu={e => e.preventDefault()} />
-			{!ready && <div className="ct-preview-loading">Loading preview…</div>}
+			<div ref={elementRef} className="ct-preview-canvas" role="img" aria-label="DICOM preview" onContextMenu={e => e.preventDefault()} />
+			{!ready && <div className="ct-preview-loading" role="status">Loading preview…</div>}
 			{ready && slice.total > 0 && (
 				<div className="dicom-preview-controls">
 					<input
@@ -133,6 +157,8 @@ export default function DicomPreview({ files }: { files: File[] }) {
 						value={slice.index}
 						onChange={e => goToSlice(Number(e.target.value))}
 						className="dicom-preview-slider"
+						aria-label="Slice"
+						aria-valuetext={`Slice ${slice.index + 1} of ${slice.total}`}
 					/>
 					<span className="dicom-preview-count">
 						{slice.index + 1} / {slice.total}

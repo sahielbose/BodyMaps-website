@@ -2559,7 +2559,18 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			// full viewer — 3D volume pane and annotation tools — same as a local DICOM.
 			if (isLocalNifti) {
 				if (!axial_ref.current || !sagittal_ref.current || !coronal_ref.current) return;
-				const rawUrl = await loadLocalNiftiAsRawBlobUrl();
+				let rawUrl: string | null;
+				try {
+					rawUrl = await loadLocalNiftiAsRawBlobUrl();
+				} catch (e) {
+					// A truncated or corrupt .nii.gz rejects while it is decompressed; say so
+					// instead of leaving the loading overlay up for good.
+					if (cancelled) return;
+					console.error(e);
+					setDicomError("This file couldn't be read. It may be damaged or not a NIfTI scan.");
+					setLoading(false);
+					return;
+				}
 				// StrictMode double-invokes this effect in dev: if this run was already
 				// cleaned up, bail BEFORE renderVisualization — otherwise this (stale) run
 				// would destroy the live run's rendering engine mid-load ("this.destroy()
