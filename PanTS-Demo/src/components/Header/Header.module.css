@@ -8,11 +8,18 @@
   font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
 
-/* ── Nav bar ── */
+/* ── Nav bar ──
+   Three columns, the outer two equal: the tabs sit on the page's true centre
+   line (the one the overview wordmark and page titles use) whatever the
+   logo and the account control measure, and they stay put when Sign in or
+   the account name arrives. The outer columns are minmax(0, 1fr) so a long
+   email in the account control gives way (ellipsis) instead of widening
+   them past the page edge at tablet width. */
 .nav {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
+  column-gap: 24px;
   padding: 16px 32px;
   flex-shrink: 0;
   background: #ffffff;
@@ -21,63 +28,86 @@
 
 /* ── Logo ── */
 .logoPill {
+  justify-self: start;
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
   text-decoration: none;
 }
 .logoImg {
   width: 38px;
   height: 38px;
   display: block;
+  flex-shrink: 0;
 }
+/* On a screen too narrow for everything the name gives way (ellipsis)
+   rather than running under the Sign in button. The line height covers the
+   font's full ascent and descent, so the clip never trims the y. */
 .logoTitle {
-  font-size: 18px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1.125rem;
   font-weight: 700;
   color: #111111;
   letter-spacing: -0.02em;
-  line-height: 1.1;
+  line-height: 1.3;
 }
 
-/* ── Tab bar (desktop) ── */
+/* One focus ring for the nav's links, matching the overview's buttons:
+   2px JHU blue, clear of the text. */
+.logoPill:focus-visible,
+.tabPill:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+/* ── Tab bar (desktop) ──
+   Plain text links with an underline on the active tab. No pills: the nav
+   should read as navigation, not as buttons. Every tab keeps one weight so
+   the active label is no wider than the rest; the centred column would
+   otherwise re-centre and nudge the tabs 1px between pages. */
 .tabBar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 28px;
   flex-shrink: 0;
 }
 .tabPill {
   display: inline-flex;
   align-items: center;
-  padding: 8px 22px;
-  border-radius: 22px;
-  font-size: 12px;
-  font-weight: 600;
+  padding: 6px 0;
+  font-size: 0.875rem;
+  font-weight: 500;
   cursor: pointer;
-  border: 1px solid transparent;
-  color: #6a6a6a;
-  transition: color 0.2s ease, background 0.2s ease;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  color: var(--muted);
+  transition: color 0.15s ease;
+  font-family: var(--font-sans);
   background: transparent;
-  letter-spacing: 0.08em;
   text-decoration: none;
   line-height: inherit;
+  border-bottom: 2px solid transparent;
 }
 .tabPill:hover {
-  color: #111111;
+  color: var(--ink);
 }
 .tabPillActive {
-  background: #002D72;
-  color: #ffffff;
-  border-color: #002D72;
+  color: var(--ink);
+  border-bottom-color: #002d72;
   cursor: default;
 }
 .tabPillActive:hover {
-  color: #ffffff;
+  color: var(--ink);
 }
 
 /* ── Right-side actions (auth button + hamburger) ── */
 .navActions {
+  justify-self: end;
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   justify-content: flex-end;
   align-items: center;
@@ -125,10 +155,23 @@
 
 /* ── Responsive — mobile only ── */
 @media (max-width: 767px) {
-  .nav { padding: 14px 20px; }
+  .nav {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 20px;
+  }
   .tabBar { display: none; }
   .hamburger { display: flex; }
   .navActions { width: auto; }
+
+  /* The drawer and backdrop below live in the header's stacking context, so
+     their z-index only counts inside it. Lift the whole header while the
+     drawer is mounted so nothing on the page (the scroll-to-top button at
+     --z-dropdown) paints over them. Still below the sign-in popup. */
+  .headerRoot.drawerOpen {
+    z-index: calc(var(--z-modal) - 1);
+  }
 
   /* Backdrop */
   .backdrop {
@@ -141,9 +184,11 @@
     z-index: calc(var(--z-modal) - 2);
     border: none;
     cursor: default;
+    animation: backdropIn 0.24s ease both;
   }
 
-  /* Drawer */
+  /* Drawer. Slides in from the right edge and back out (transform and
+     opacity only); index.tsx keeps it mounted while it leaves. */
   .mobileMenu {
     display: flex;
     flex-direction: column;
@@ -156,7 +201,49 @@
     z-index: calc(var(--z-modal) - 1);
     box-shadow: -12px 0 40px rgba(0, 0, 0, 0.14);
     overflow-y: auto;
+    animation: drawerIn 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
+  .backdrop.closing {
+    animation: backdropOut 0.18s ease both;
+  }
+  .mobileMenu.closing {
+    animation: drawerOut 0.18s ease-in both;
+  }
+}
+
+/* The narrowest phones (a folded phone's 280px cover screen): tighten the
+   bar so the logo and Sign in keep clear of each other. */
+@media (max-width: 359px) {
+  .nav {
+    gap: 8px;
+    padding: 14px 16px;
+  }
+  .logoPill { gap: 8px; }
+  .logoImg {
+    width: 32px;
+    height: 32px;
+  }
+  .hamburger {
+    width: 36px;
+    padding: 8px;
+  }
+}
+
+@keyframes backdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes backdropOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes drawerIn {
+  from { transform: translate3d(100%, 0, 0); opacity: 0.6; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes drawerOut {
+  from { transform: none; opacity: 1; }
+  to { transform: translate3d(100%, 0, 0); opacity: 0.6; }
 }
 
 /* ── Drawer internals ── */
@@ -165,12 +252,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 20px 20px 16px;
+  /* The 28px left inset matches the nav labels below (12px nav + 16px tab). */
+  padding: 20px 20px 16px 28px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.07);
   flex-shrink: 0;
 }
 .drawerTitle {
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 600;
   color: #111111;
   letter-spacing: -0.01em;
@@ -207,7 +295,7 @@
   align-items: center;
   padding: 12px 16px;
   border-radius: 10px;
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 600;
   color: #6a6a6a;
   background: transparent;
@@ -223,6 +311,10 @@
 .mobileTab:hover {
   color: #111111;
   background: rgba(0, 0, 0, 0.04);
+}
+.mobileTab:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
 .mobileTabActive {
   color: #002D72;

@@ -4,7 +4,9 @@
 .authm-backdrop {
 	position: fixed;
 	inset: 0;
-	z-index: 300;
+	/* Above the mobile nav drawer (--z-modal - 1): tapping "Sign in" from the
+	   drawer must surface the modal, not bury it under the drawer overlay. */
+	z-index: var(--z-modal);
 	background: rgba(17, 17, 17, 0.45);
 	display: flex;
 	align-items: center;

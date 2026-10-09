@@ -3,42 +3,58 @@
    match the landing page's active tab / primary button. */
 
 .signInBtn {
-	padding: 8px 20px;
-	border-radius: 22px;
-	font-family: "IBM Plex Sans", system-ui, sans-serif;
-	font-size: 12px;
-	font-weight: 600;
-	letter-spacing: 0.06em;
+	/* The same 40px as the account trigger, so the bar doesn't change height
+	   when the sign-in state resolves. */
+	box-sizing: border-box;
+	min-height: 40px;
+	padding: 8px 16px;
+	border-radius: 4px;
+	font-family: var(--font-sans);
+	font-size: 0.875rem;
+	font-weight: 500;
 	cursor: pointer;
 	background: #002d72;
 	color: #ffffff;
 	border: 1px solid #002d72;
-	transition: background 0.2s ease, transform 0.2s ease;
+	transition: background 0.15s ease;
 	white-space: nowrap;
 }
 .signInBtn:hover {
 	background: #00399a;
 	border-color: #00399a;
-	transform: translateY(-1px);
+}
+/* Stand-in while the sign-in state loads: the button's box, unseen. */
+.placeholder {
+	display: inline-block;
+	visibility: hidden;
+}
+/* Room for the logo beside it on the narrowest phones (280px). */
+@media (max-width: 359px) {
+	.signInBtn {
+		padding: 8px 12px;
+	}
 }
 
 /* ── Signed-in trigger ── */
 .accountRoot {
 	position: relative;
+	min-width: 0;
 	font-family: "IBM Plex Sans", system-ui, sans-serif;
 }
 
 .accountTrigger {
+	box-sizing: border-box;
+	min-height: 40px;
 	display: flex;
 	align-items: center;
 	gap: 8px;
 	padding: 6px 12px 6px 6px;
-	border-radius: 22px;
+	border-radius: 4px;
 	background: transparent;
 	border: 1px solid rgba(0, 0, 0, 0.1);
 	cursor: pointer;
 	transition: border-color 0.15s, background 0.15s;
-	max-width: 220px;
+	max-width: min(220px, 100%);
 }
 .accountTrigger:hover {
 	border-color: rgba(0, 0, 0, 0.2);
@@ -73,18 +89,41 @@
 	flex-shrink: 0;
 }
 
+/* On a phone the header trigger shrinks to the avatar so the BodyMaps name
+   keeps its room; the full email stays in the dropdown header and in the
+   drawer's copy of the control. */
+@media (max-width: 767px) {
+	.accountRoot:not(.inDrawer) .accountEmail,
+	.accountRoot:not(.inDrawer) .chevron {
+		display: none;
+	}
+	.accountRoot:not(.inDrawer) .accountTrigger {
+		padding: 6px;
+	}
+}
+
 /* ── Dropdown ── */
 .menu {
 	position: absolute;
 	top: calc(100% + 8px);
 	right: 0;
 	min-width: 220px;
+	/* A long address must wrap inside the menu, not widen it past the left edge
+	   of a phone (the menu is anchored to the trigger's right edge). */
+	max-width: calc(100vw - 32px);
 	background: #ffffff;
 	border: 1px solid rgba(0, 0, 0, 0.08);
-	border-radius: 12px;
+	border-radius: 8px;
 	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
 	padding: 6px;
 	z-index: 100;
+}
+
+/* In the mobile drawer the control sits at the bottom of the screen, so the
+   dropdown opens upwards; below it, it would land off screen. */
+.menuUp {
+	top: auto;
+	bottom: calc(100% + 8px);
 }
 
 .menuHeader {
@@ -96,14 +135,16 @@
 	font-size: 13px;
 	font-weight: 600;
 	color: #111111;
+	overflow-wrap: anywhere;
 }
 .menuEmail {
 	font-family: "IBM Plex Mono", ui-monospace, monospace;
 	font-size: 11px;
-	color: #8f8f8f;
+	color: #6a6a6a;
 	margin-top: 2px;
 	overflow: hidden;
 	text-overflow: ellipsis;
+	overflow-wrap: anywhere;
 }
 
 .menuItem {
@@ -114,7 +155,7 @@
 	padding: 9px 12px;
 	border: none;
 	background: transparent;
-	border-radius: 8px;
+	border-radius: 5px;
 	font-family: "IBM Plex Sans", system-ui, sans-serif;
 	font-size: 13px;
 	color: #111111;
