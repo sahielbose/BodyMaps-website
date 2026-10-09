@@ -43,6 +43,7 @@ const LoginRedirect = lazyRoute(() => import("./routes/LoginRedirect"));
 const ResetPassword = lazyRoute(() => import("./routes/ResetPassword"));
 const VerifyEmail = lazyRoute(() => import("./routes/VerifyEmail"));
 const LegalPage = lazyRoute(() => import("./routes/LegalPage"));
+const ContactPage = lazyRoute(() => import("./routes/ContactPage"));
 const SharePatientCard = lazyRoute(() => import("./routes/SharePatientCard"));
 const NotFoundPage = lazyRoute(() => import("./routes/NotFoundPage"));
 
@@ -264,6 +265,7 @@ function App() {
                     element={<Navigate to="/upload" replace />}
                   />
                   <Route path="/team" element={<TeamPage />} />
+                  <Route path="/contact" element={<ContactPage />} />
                   <Route path="/compare" element={<ComparePage />} />
                   <Route
                     path="/compare-viewer"

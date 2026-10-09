@@ -73,6 +73,8 @@ export function titleForPath(pathname: string): string {
 			return shaped(1, "Privacy Notice");
 		case "team":
 			return shaped(1, "Team");
+		case "contact":
+			return shaped(1, "Contact");
 		case "compare":
 			return shaped(1, "Compare cases");
 		case "compare-viewer":

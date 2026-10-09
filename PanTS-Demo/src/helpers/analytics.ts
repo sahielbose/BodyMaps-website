@@ -74,7 +74,7 @@ const STATIC_ROUTES = new Set([
 	"/reset-password",
 	"/account", "/account/plan", "/account/history", "/account/privacy",
 	"/account/analytics", "/account/people",
-	"/terms", "/privacy", "/team", "/compare", "/compare-viewer",
+	"/terms", "/privacy", "/team", "/contact", "/compare", "/compare-viewer",
 ]);
 
 const PARAM_ROUTES: Record<string, string> = {

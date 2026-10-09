@@ -60,7 +60,7 @@ ACTION_NAMES = frozenset({
 ROUTE_PATTERNS = frozenset({
     "/", "/dashboard", "/case/:caseId", "/session/:sessionId",
     "/reconstruction/:reconstructionId", "/dicom", "/local-nifti",
-    "/upload", "/compare", "/compare-viewer", "/team", "/signup",
+    "/upload", "/compare", "/compare-viewer", "/team", "/contact", "/signup",
     "/reset-password",
     "/account", "/account/plan", "/account/history", "/account/privacy",
     "/account/analytics", "/account/people",

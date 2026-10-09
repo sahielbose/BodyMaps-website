@@ -59,7 +59,7 @@ describe("page surface before the app mounts", () => {
 			"/learn/quiz/p", "/dicom", "/local-nifti", "/compare", "/compare-viewer"]) {
 			expect(isDarkRoute(path), path).toBe(true);
 		}
-		for (const path of ["/", "/dashboard", "/upload", "/team", "/terms", "/privacy", "/account",
+		for (const path of ["/", "/dashboard", "/upload", "/team", "/contact", "/terms", "/privacy", "/account",
 			"/account/plan", "/share/abc", "/reset-password", "/verify-email", "/nope"]) {
 			expect(isDarkRoute(path), path).toBe(false);
 		}

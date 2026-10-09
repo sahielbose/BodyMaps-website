@@ -1,0 +1,444 @@
+/* ===== ContactPage.module.css =====
+   The site's contact page: white like the overview and team pages, ink text,
+   JHU blue for actions only, and the same field look as the sign-in popup.
+   Two columns from 56em (what to send on the left, the form on the right),
+   one column below. Sizes that carry reading text are in rem so they follow
+   the reader's default text size. */
+
+.page {
+  --blue: #002d72;
+  --blue-hover: #0a3d8f;
+  --text-2: #4a5263;
+  --hairline: rgba(15, 23, 42, 0.1);
+  --field-bg: #fafafa;
+  --field-border: rgba(0, 0, 0, 0.14);
+  --danger: #b91c1c;
+
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 64px 24px 96px;
+}
+
+/* One column on a phone: the heading, the PHI rule, then straight to the
+   form, with the routing tips and the email address after it. From 56em the
+   tips sit beside the form; the last row takes the form's extra height, so
+   the left blocks keep their own spacing instead of spreading out. */
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "head"
+    "notice"
+    "card"
+    "include"
+    "email";
+  gap: 28px;
+}
+.head { grid-area: head; }
+.include { grid-area: include; }
+.notice { grid-area: notice; }
+.altEmail { grid-area: email; }
+.card { grid-area: card; }
+
+@media (min-width: 56em) {
+  .grid {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    grid-template-rows: auto auto auto auto 1fr;
+    grid-template-areas:
+      "head card"
+      "include card"
+      "notice card"
+      "email card"
+      ". card";
+    column-gap: 72px;
+    row-gap: 0;
+    align-items: start;
+  }
+  /* .grid in front so these beat each block's own margin: 0 further down. */
+  .grid > .head {
+    margin-bottom: 36px;
+  }
+  .grid > .include {
+    margin-bottom: 28px;
+  }
+  .grid > .notice {
+    margin-bottom: 20px;
+  }
+}
+
+/* ---------- Left column ---------- */
+
+.eyebrow {
+  margin: 0 0 14px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--blue);
+}
+
+/* Same voice as the team page title: light, with the last word in semibold. */
+.title {
+  margin: 0 0 18px;
+  font-size: 2.5rem;
+  line-height: 1.15;
+  font-weight: 400;
+  color: #1f2533;
+  text-wrap: balance;
+}
+.titleBold {
+  font-weight: 600;
+}
+
+.lead {
+  margin: 0;
+  max-width: 34rem;
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+
+.subhead {
+  margin: 0 0 12px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.list li {
+  position: relative;
+  padding-left: 20px;
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+/* A small blue square, the list's only colour. */
+.list li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0.62em;
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--blue);
+}
+
+/* A quiet tinted box, not a warning: it is a standing rule, not an error. */
+.notice {
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid #dbe3ef;
+  border-radius: 6px;
+  background: #f4f7fb;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: #2d3748;
+}
+.notice strong {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.altEmail {
+  margin: 0;
+  font-size: 0.9375rem;
+  color: var(--text-2);
+}
+
+.inlineLink {
+  color: var(--blue);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.inlineLink:hover {
+  color: var(--blue-hover);
+}
+.inlineLink:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ---------- Form card ---------- */
+
+.card {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 32px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.04);
+}
+
+.form {
+  display: grid;
+  gap: 20px;
+}
+
+.formNote {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+}
+@media (min-width: 36em) {
+  .row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.label {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--ink);
+}
+.req {
+  color: var(--blue);
+}
+.optional {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: var(--control-h, 44px);
+  padding: 10px 12px;
+  border: 1px solid var(--field-border);
+  border-radius: 4px;
+  background-color: var(--field-bg);
+  font: inherit;
+  font-size: 0.9375rem;
+  color: #111111;
+  transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+}
+.input::placeholder {
+  color: #8a909c;
+}
+.input:hover {
+  border-color: rgba(0, 0, 0, 0.24);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--blue);
+  background-color: #ffffff;
+  box-shadow: 0 0 0 3px rgba(0, 45, 114, 0.12);
+}
+/* aria-invalid drives the look, so what a screen reader hears is what a
+   sighted reader sees. */
+.input[aria-invalid="true"] {
+  border-color: var(--danger);
+  background-color: #ffffff;
+}
+.input[aria-invalid="true"]:focus {
+  box-shadow: 0 0 0 3px rgba(185, 28, 28, 0.12);
+}
+
+.select {
+  appearance: none;
+  padding-right: 36px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235A6175' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  cursor: pointer;
+}
+
+.textarea {
+  min-height: 9rem;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.error {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--danger);
+}
+
+/* Formspree's spam trap. Off screen rather than display:none, which some
+   bots skip. */
+.trap {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.sendError {
+  padding: 12px 14px;
+  border: 1px solid #f1c4c4;
+  border-radius: 6px;
+  background: #fdf3f3;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: #5b1a1a;
+}
+.sendError:focus {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.sendError strong {
+  font-weight: 600;
+}
+
+.submitRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  padding-top: 4px;
+}
+
+.primary,
+.secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.875rem;
+  padding: 0 24px;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+.primary {
+  border: 1px solid var(--blue);
+  background: var(--blue);
+  color: #ffffff;
+}
+.primary:hover:not(:disabled) {
+  border-color: var(--blue-hover);
+  background: var(--blue-hover);
+}
+.primary:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+.secondary {
+  border: 1px solid var(--blue);
+  background: #ffffff;
+  color: var(--blue);
+}
+.secondary:hover {
+  background: #f4f7fb;
+}
+.primary:focus-visible,
+.secondary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+.fineprint {
+  flex: 1 1 14rem;
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* ---------- Sent ---------- */
+
+.thanks {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  padding: 24px 0;
+}
+.thanksTitle {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #1f2533;
+}
+.thanksTitle:focus {
+  outline: none;
+}
+.thanksBody {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.thanksBody strong {
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Small screens ---------- */
+
+@media (max-width: 640px) {
+  .main {
+    padding: 40px 16px 64px;
+  }
+  .title {
+    font-size: 2rem;
+  }
+  .card {
+    padding: 20px;
+  }
+  /* iOS Safari zooms the page when a field under 16px takes focus. */
+  .input {
+    font-size: 16px;
+  }
+  .primary {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input,
+  .primary,
+  .secondary {
+    transition: none;
+  }
+}

@@ -3,7 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../contexts/authContext";
 import LegalPage from "../routes/LegalPage";
-import { CONTACT_URL } from "../helpers/copy";
+import { CONTACT_PATH } from "../helpers/copy";
 
 const renderLegal = (kind: "terms" | "privacy") =>
   // The legal pages carry the site header, which reads the auth context.
@@ -44,9 +44,13 @@ describe("legal pages", () => {
     expect(text).not.toMatch(/placeholder|not yet in force|research use only/i);
     expect(text).toMatch(/masks you create are yours to use, including commercially/);
     expect(text).toMatch(/does not operate this site/);
-    const link = screen.getByRole("link", { name: "thebodymaps.com" });
-    expect(link).toHaveAttribute("href", CONTACT_URL);
-    expect(link).toHaveAttribute("target", "_blank");
+    // The contact form is this site's own page now, so it opens in place.
+    const links = screen.getAllByRole("link", { name: "contact form" });
+    expect(links.length).toBeGreaterThanOrEqual(2);
+    for (const link of links) {
+      expect(link).toHaveAttribute("href", CONTACT_PATH);
+      expect(link).not.toHaveAttribute("target");
+    }
   });
 
   it("privacy: provisional status line, every section, truthful analytics wording", () => {

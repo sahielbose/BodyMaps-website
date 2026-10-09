@@ -14,7 +14,7 @@ import { useBackdropDismiss, useDialogFocus } from "../hooks/useDialogFocus";
 describe("titleForPath", () => {
 	it("names every kind of page differently", () => {
 		const titles = [
-			"/", "/dashboard", "/case/12", "/upload", "/team", "/terms", "/privacy", "/compare",
+			"/", "/dashboard", "/case/12", "/upload", "/team", "/contact", "/terms", "/privacy", "/compare",
 			"/compare-viewer", "/account", "/account/plan", "/reset-password", "/verify-email",
 			"/share/abc", "/live/r1", "/learn/quiz/p", "/nope",
 		].map(titleForPath);

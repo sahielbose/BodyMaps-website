@@ -2,7 +2,7 @@ import React from "react";
 import { Link } from "react-router-dom";
 import Header from "../components/Header";
 import SiteFooter from "../components/SiteFooter";
-import { CONTACT_URL } from "../helpers/copy";
+import { CONTACT_PATH } from "../helpers/copy";
 import "./LegalPage.css";
 
 // Terms of Service and Privacy Notice.
@@ -13,7 +13,7 @@ import "./LegalPage.css";
 // (scheduled deletion, export, verification) that is not running in production.
 
 // Section text is plain except for links written [label](target): "contact"
-// is the contact form, a path such as /terms is a page of this site.
+// is the site's contact page, a path such as /terms is any other page.
 type Section = { heading: string; body: string };
 
 const LINK_TOKEN = /\[([^\]]+)\]\(([^)]+)\)/g;
@@ -53,9 +53,9 @@ const withLinks = (text: string): React.ReactNode[] => {
 		nodes.push(...keepCompounds(text.slice(from, m.index), from));
 		nodes.push(
 			m[2] === "contact" ? (
-				<a key={m.index} href={CONTACT_URL} target="_blank" rel="noopener noreferrer">
+				<Link key={m.index} to={CONTACT_PATH}>
 					{m[1]}
-				</a>
+				</Link>
 			) : (
 				<Link key={m.index} to={m[2]}>
 					{m[1]}
@@ -136,11 +136,11 @@ const PRIVACY: Section[] = [
 	},
 	{
 		heading: "Sharing",
-		body: "We do not sell account data, uploads, or outputs. Anyone who has a share link or live room link can open its content. Google Fonts may load on some pages, and some viewer paths fetch public dataset assets from Hugging Face. Google or GitHub processes your sign-in when you choose them. Password-reset email is sent through an email provider. BodyMaps, Inc. receives and routes inquiries and requests sent through its [contact form](contact). No third-party analytics or advertising trackers run on this site.",
+		body: "We do not sell account data, uploads, or outputs. Anyone who has a share link or live room link can open its content. Google Fonts may load on some pages, and some viewer paths fetch public dataset assets from Hugging Face. Google or GitHub processes your sign-in when you choose them. Password-reset email is sent through an email provider. BodyMaps, Inc. receives and routes inquiries and requests sent through the [contact form](contact), which delivers them through Formspree. No third-party analytics or advertising trackers run on this site.",
 	},
 	{
 		heading: "Your rights",
-		body: "In Settings you can download a copy of your account details, change your display name and optional role, and use the scan-history and account-deletion controls described above. To request access to, correction of, or deletion of your personal data, to withdraw consent where it applies, to request a portable copy, or to appeal a decision, use the [contact form at thebodymaps.com](contact); do not include protected health information or scans. We will verify you by sending a link or code to the email registered to your account and will respond within 45 days, with one extension where the law allows and with notice to you. BodyMaps, Inc. receives and routes these requests; BodyMaps decides and responds.",
+		body: "In Settings you can download a copy of your account details, change your display name and optional role, and use the scan-history and account-deletion controls described above. To request access to, correction of, or deletion of your personal data, to withdraw consent where it applies, to request a portable copy, or to appeal a decision, use the [contact form](contact); do not include protected health information or scans. We will verify you by sending a link or code to the email registered to your account and will respond within 45 days, with one extension where the law allows and with notice to you. BodyMaps, Inc. receives and routes these requests; BodyMaps decides and responds.",
 	},
 ];
 
@@ -173,11 +173,8 @@ const LegalPage: React.FC<{ kind: "terms" | "privacy" }> = ({ kind }) => {
 				))}
 
 				<p className="legal-footer">
-					Questions or feedback? Use the contact form at{" "}
-					<a href={CONTACT_URL} target="_blank" rel="noopener noreferrer">
-						thebodymaps.com
-					</a>
-					, a separate BodyMaps, Inc. site. Do not include protected health information.
+					Questions or feedback? Use the <Link to={CONTACT_PATH}>contact form</Link>. Do not include
+					protected health information.
 				</p>
 			</main>
 
