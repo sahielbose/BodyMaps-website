@@ -11,6 +11,7 @@ import vtkImageMarchingCubes from "@kitware/vtk.js/Filters/General/ImageMarching
 import type { MaskingArea } from "../components/segmentation/MaskingSelect";
 import { createOperationGeneration } from "./viewer/operationGeneration";
 import { rollbackVolumeUpgrade } from "./viewer/volumeUpgrade";
+import { SeatedEllipticalROITool, SeatedRectangleROITool } from "./viewer/measurementTextBox";
 import { addLabelmapActors } from "./viewer/labelmapActors";
 import { addVolumeLabelmap } from "./viewer/addVolumeLabelmap";
 import { applyOrganVisibility } from "./viewer/organVisibility";
@@ -93,8 +94,14 @@ const MEASUREMENT_ANNOTATION_STYLE = {
     textBoxLinkLineColor: MEASURE_COLOR,
     // Pin the font/shadow too: if a prior (partial) style ever persisted in module state,
     // the merge base could be missing these and the value labels wouldn't render.
-    textBoxFontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif",
+    // The viewer's own UI font (the SVG attribute cannot read the --vp-font token).
+    textBoxFontFamily: '"IBM Plex Sans", system-ui, sans-serif',
     textBoxFontSize: "14px",
+    // Cyan text alone vanishes over the organ colours and other measurements'
+    // lines, so it sits on a dark plate like the slice counter does.
+    textBoxBackground: "rgba(8, 9, 11, 0.86)",
+    textBoxBorderRadius: 4,
+    textBoxMargin: 4,
     shadow: true,
 };
 
@@ -509,6 +516,16 @@ export function subscribeToVolumeProgress(
 // tool registration. Mirrors the guard in compareViewer.ts.
 let _cornerstoneInited = false;
 
+// NIfTI volumes carry no DICOM Modality, and the ROI tools print their unit from
+// it (CT gives "HU", anything else gives nothing), so the mean/min/max of an ROI
+// read as bare numbers. Dataset and local NIfTI scans are CT by construction, so
+// tag them (getCurrentVolumeModality then reports CT for them); a volume that
+// already has a Modality (local DICOM) keeps its own.
+export function _tagNiftiVolumeAsCt(volume: { metadata?: unknown }): void {
+    const metadata = volume.metadata as { Modality?: string } | undefined;
+    if (metadata && metadata.Modality === undefined) metadata.Modality = "CT";
+}
+
 export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivElement, ref3: HTMLDivElement, convertedColorLUT: ColorLUT, ctUrl: string, segUrl: string | undefined, _setLoading: React.Dispatch<React.SetStateAction<boolean>>, opts?: { ctImageIds?: string[]; resourceKey?: string; signal?: AbortSignal }) {
     if (!_cornerstoneInited) {
         coreInit();
@@ -561,9 +578,9 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
     cornerstoneTools.addTool(CrosshairsTool);
     cornerstoneTools.addTool(LengthTool);
     cornerstoneTools.addTool(ProbeTool);
-    cornerstoneTools.addTool(RectangleROITool);
+    cornerstoneTools.addTool(SeatedRectangleROITool);
     cornerstoneTools.addTool(AngleTool);
-    cornerstoneTools.addTool(EllipticalROITool);
+    cornerstoneTools.addTool(SeatedEllipticalROITool);
     cornerstoneTools.addTool(PlanarFreehandROITool);
     cornerstoneTools.addTool(BidirectionalTool);
     cornerstoneTools.addTool(ArrowAnnotateTool);
@@ -711,6 +728,7 @@ export async function renderVisualization(ref1: HTMLDivElement, ref2: HTMLDivEle
     renderingEngine.setViewports(viewportInputArray);
 
     const volume = await volumeLoader.createAndCacheVolume(ctVolumeId, { imageIds });
+    if (!opts?.ctImageIds) _tagNiftiVolumeAsCt(volume);
     _throwIfViewerLoadStale(context, opts?.signal);
     await volume.load();
     _throwIfViewerLoadStale(context, opts?.signal);
@@ -942,6 +960,36 @@ export function setActiveMeasurementTool(toolName: PrimaryMouseToolName | null) 
   toolGroup.setToolActive(toolName, {
     bindings: [{ mouseButton: csToolsEnums.MouseBindings.Primary }],
   });
+}
+
+// Discards a measurement left half drawn in any MPR pane (a Distance with only
+// its first point placed, a Freehand outline not yet closed). Returns whether
+// there was one.
+export function cancelMeasurementInProgress(): boolean {
+  const engine = getRenderingEngine(renderingEngineId);
+  if (!engine) return false;
+  let cancelled = false;
+  for (const viewportId of Object.values(CINE_VIEWPORT_BY_PANE)) {
+    const element = engine.getViewport(viewportId)?.element;
+    if (!element) continue;
+    // Cornerstone's cancel keeps a half-drawn Distance where the pointer left
+    // it and reports it completed. That completion stays quiet (no "measured"
+    // log, snapshot or analytics); the removal after it is heard, since a live
+    // room saw the line being drawn.
+    let uid: string | undefined;
+    _remoteMeasurementEventDepth += 1;
+    try {
+      uid = cornerstoneTools.cancelActiveManipulations(element);
+    } finally {
+      _remoteMeasurementEventDepth -= 1;
+    }
+    if (!uid) continue;
+    cancelled = true;
+    // Freehand's own cancel already removed its open outline.
+    if (annotation.state.getAnnotation(uid)) annotation.state.removeAnnotation(uid);
+  }
+  if (cancelled) engine.render();
+  return cancelled;
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,9 +1437,8 @@ function formatNum(n: number, digits = 1): string {
 
 // Each tool caches different stats keys; scan for the ones we know how to show.
 function formatAnnotationValue(a: any): string {
-  // ArrowAnnotate stores its note as free text, not cached stats.
-  const text = a?.data?.text;
-  if (typeof text === "string" && text.trim()) return text.trim();
+  // An arrow has nothing to compute: its note is the annotation's label, which the row already shows.
+  if (a?.metadata?.toolName === ARROW_TOOL) return "";
   const statsByTarget = a?.data?.cachedStats ?? {};
   for (const stats of Object.values(statsByTarget) as any[]) {
     if (!stats || typeof stats !== "object") continue;
@@ -1408,7 +1455,13 @@ function formatAnnotationValue(a: any): string {
     if (typeof stats.value === "number") return `${formatNum(stats.value, 0)} HU`;
     if (typeof stats.mean === "number") return `mean ${formatNum(stats.mean, 0)} HU`;
   }
-  return "…";
+  // A ROI box that runs past the edge of the scan keeps only its Modality: the tool
+  // skips the area and mean when a corner lies outside the volume.
+  if ((Object.values(statsByTarget) as any[]).some((stats) => typeof stats?.Modality === "string")) {
+    return "Outside the scan";
+  }
+  // A ROI whose stats have not been calculated yet (they follow the draw).
+  return "Not computed";
 }
 
 function annotationCenter(a: any): [number, number, number] | null {
@@ -1446,10 +1499,24 @@ export function getMeasurementSummaries(): MeasurementSummary[] {
   }
 }
 
+// Test seam: lets a test stand in for the rendering engine the viewer would set up.
+export function _setRenderingEngineForTest(engine: RenderingEngine | null): void {
+  currentRenderingEngine = engine;
+}
+
 export function renameMeasurement(uid: string, label: string) {
   const a = annotation.state.getAnnotation(uid) as any;
   if (!a?.data) return;
   a.data.label = label;
+  // A rename moves no handle, so nothing else announces it. The same "modified"
+  // event a drag-edit raises reaches the live room's measurement.upsert listener,
+  // so a peer, a later joiner and the room export all get the name.
+  try {
+    const element = currentRenderingEngine?.getViewport(viewportId1)?.element;
+    annotation.state.triggerAnnotationModified(a, element as never);
+  } catch {
+    /* the event is best effort; the label is already set here */
+  }
   currentRenderingEngine?.render();
 }
 
@@ -1472,6 +1539,9 @@ export type SharedMeasurement = {
 
 let _remoteMeasurementEventDepth = 0;
 
+// Listeners that asked for a live room peer's changes too (see subscribeToMeasurementChanges).
+const _remoteAwareListeners = new Set<(kind: MeasurementChangeKind, summary: MeasurementSummary) => void>();
+
 function finitePointList(value: unknown): number[][] {
   if (!Array.isArray(value)) return [];
   return value
@@ -1479,6 +1549,21 @@ function finitePointList(value: unknown): number[][] {
     .map((point) => (point as number[]).map(Number))
     .filter((point) => point.every(Number.isFinite));
 }
+
+// A vector Cornerstone can use as a plane normal or view-up: three finite numbers, copied.
+function finiteVec3(value: unknown): Point3 | undefined {
+  if (!(Array.isArray(value) || ArrayBuffer.isView(value))) return undefined;
+  const list = value as ArrayLike<unknown>;
+  if (list.length !== 3) return undefined;
+  const vec = [Number(list[0]), Number(list[1]), Number(list[2])];
+  return vec.every(Number.isFinite) ? (vec as Point3) : undefined;
+}
+
+/** The plane a quiz's reference diameter is drawn in: Cornerstone's axial camera. */
+export const AXIAL_REFERENCE_METADATA: Record<string, unknown> = Object.freeze({
+  viewPlaneNormal: [0, 0, -1],
+  viewUp: [0, -1, 0],
+});
 
 /** Serialize only portable world-coordinate fields; cached statistics stay local. */
 export function serializeMeasurement(uid: string): SharedMeasurement | null {
@@ -1505,13 +1590,25 @@ export function serializeMeasurement(uid: string): SharedMeasurement | null {
 export function applyRemoteMeasurement(shared: SharedMeasurement): void {
   const engine = currentRenderingEngine;
   if (!engine || !MEASUREMENT_TOOL_NAMES.includes(shared.tool as MeasurementToolName)) return;
-  const viewport = engine.getViewport(viewportId1);
+  const viewport = engine.getViewport(viewportId1) as any;
   if (!viewport?.element) return;
+  // Cornerstone's slice filter needs a plane normal or an image id. Without either, every
+  // annotation render and pointer event throws, and the overlays stop redrawing for good.
+  const metadata = shared.metadata ?? {};
+  const referencedImageId =
+    typeof metadata.referencedImageId === "string" && metadata.referencedImageId ? metadata.referencedImageId : undefined;
+  let viewPlaneNormal = finiteVec3(metadata.viewPlaneNormal);
+  let viewUp = finiteVec3(metadata.viewUp);
+  if (!viewPlaneNormal && !referencedImageId) {
+    const camera = viewport.getCamera?.() ?? {};
+    viewPlaneNormal = finiteVec3(camera.viewPlaneNormal);
+    viewUp ??= finiteVec3(camera.viewUp);
+  }
+  if (!viewPlaneNormal && !referencedImageId) return;
   const existing = annotation.state.getAnnotation(shared.id);
   _remoteMeasurementEventDepth += 1;
   try {
     if (existing) annotation.state.removeAnnotation(shared.id);
-    const metadata = shared.metadata ?? {};
     annotation.state.addAnnotation(
       {
         annotationUID: shared.id,
@@ -1519,10 +1616,11 @@ export function applyRemoteMeasurement(shared: SharedMeasurement): void {
         invalidated: true,
         metadata: {
           toolName: shared.tool,
-          referencedImageId: metadata.referencedImageId,
-          viewPlaneNormal: metadata.viewPlaneNormal,
-          viewUp: metadata.viewUp,
-          FrameOfReferenceUID: shared.frame_of_reference || metadata.FrameOfReferenceUID,
+          referencedImageId,
+          viewPlaneNormal,
+          viewUp,
+          FrameOfReferenceUID:
+            shared.frame_of_reference || metadata.FrameOfReferenceUID || viewport.getFrameOfReferenceUID?.(),
         },
         data: {
           handles: { points: shared.points },
@@ -1537,6 +1635,9 @@ export function applyRemoteMeasurement(shared: SharedMeasurement): void {
     _remoteMeasurementEventDepth -= 1;
   }
   engine.render();
+  // The add raises no event this list hears, and a rename's removal half came first.
+  const applied = annotation.state.getAnnotation(shared.id);
+  if (applied) for (const listener of [..._remoteAwareListeners]) listener("modified", toSummary(applied));
 }
 
 export function removeRemoteMeasurement(uid: string): void {
@@ -1943,12 +2044,17 @@ export function resetMprOrientation() {
 export type MeasurementChangeKind = "completed" | "modified" | "removed";
 
 // Fires for measurement annotations only (crosshair events are filtered out).
+// A live room peer's add / rename / delete is applied inside the remote-event guard so
+// that it is not echoed back to the room; the room's own listener keeps that default.
+// A list that mirrors the images passes includeRemote to hear those too.
 export function subscribeToMeasurementChanges(
-  cb: (kind: MeasurementChangeKind, summary: MeasurementSummary) => void
+  cb: (kind: MeasurementChangeKind, summary: MeasurementSummary) => void,
+  opts?: { includeRemote?: boolean }
 ): () => void {
   const names = MEASUREMENT_TOOL_NAMES as readonly string[];
+  const includeRemote = Boolean(opts?.includeRemote);
   const make = (kind: MeasurementChangeKind) => (evt: Event) => {
-    if (_remoteMeasurementEventDepth > 0) return;
+    if (!includeRemote && _remoteMeasurementEventDepth > 0) return;
     const a = (evt as CustomEvent).detail?.annotation;
     if (!a?.annotationUID || !names.includes(a?.metadata?.toolName)) return;
     cb(kind, toSummary(a));
@@ -1959,7 +2065,7 @@ export function subscribeToMeasurementChanges(
     [cornerstoneTools.Enums.Events.ANNOTATION_REMOVED, make("removed") as EventListener],
   ];
   const historyRedo = ((evt: Event) => {
-    if (_remoteMeasurementEventDepth > 0) return;
+    if (!includeRemote && _remoteMeasurementEventDepth > 0) return;
     const annotationUid = (evt as CustomEvent).detail?.id as unknown;
     const restored = typeof annotationUid === "string" ? annotation.state.getAnnotation(annotationUid) : null;
     const toolName = restored?.metadata?.toolName as unknown;
@@ -1968,7 +2074,9 @@ export function subscribeToMeasurementChanges(
   }) as EventListener;
   pairs.push(["CORNERSTONE_TOOLS_HISTORY_REDO", historyRedo]);
   for (const [name, handler] of pairs) eventTarget.addEventListener(name, handler);
+  if (includeRemote) _remoteAwareListeners.add(cb);
   return () => {
+    _remoteAwareListeners.delete(cb);
     for (const [name, handler] of pairs) eventTarget.removeEventListener(name, handler);
   };
 }
@@ -2494,8 +2602,10 @@ function _parseNiftiUint8Mask(buf: ArrayBuffer): { dims: [number, number, number
 // are re-exported here because the viewer and its test mocks import them from here.
 export { VOLUME_3D_PRESETS, VOLUME_3D_PRESETS_MR };
 
-// Modality of the volume the viewer is showing (DICOM metadata; NIfTI dataset
-// cases have no Modality and return undefined — they're CT by construction).
+// Modality of the volume the viewer is showing: the DICOM header's for local DICOM,
+// and "CT" for dataset and local NIfTI scans, which carry none and are tagged CT on
+// load (see _tagNiftiVolumeAsCt). Undefined before a volume loads, or for a DICOM
+// series whose header names no Modality.
 export function getCurrentVolumeModality(): string | undefined {
   if (!_currentCtVolumeId) return undefined;
   return (cache.getVolume(_currentCtVolumeId) as any)?.metadata?.Modality;
@@ -3037,6 +3147,23 @@ export function zoomToFit() {
       }
     })
   repaintPaneAnnotations([viewportId1, viewportId2, viewportId3]);
+}
+
+/** Whether any measurement has a statistics text box. Boxes on automatic
+ *  placement are re-seated beside their shape (placeTextBox) on the next
+ *  annotation render, so a resize only needs to trigger one; a box the user
+ *  dragged keeps the spot they chose, which moves with the image on a refit.
+ *  Returns whether any annotation needs that repaint. */
+export function hasMeasurementTextBoxes(): boolean {
+  try {
+    const names = MEASUREMENT_TOOL_NAMES as readonly string[];
+    return ((annotation.state.getAllAnnotations() ?? []) as any[]).some(
+      (a) => !!a?.data?.handles?.textBox && names.includes(a?.metadata?.toolName),
+    );
+  } catch {
+    /* annotation state not initialized */
+    return false;
+  }
 }
 
 /** Redraws the annotation (SVG) layer of the given panes: crosshairs, ROI

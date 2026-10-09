@@ -32,7 +32,6 @@ import {
     IconScanEye,
     IconShare,
     IconSquareDashed,
-    IconTrash,
     IconUsersGroup,
     IconX,
     IconZoomIn
@@ -94,6 +93,7 @@ import {
     applyRemoteMaskRanges,
     applyRemoteMeasurement,
     applySharedMprView,
+    AXIAL_REFERENCE_METADATA,
     applyVolume3DPreset,
     ARROW_TOOL,
     BIDIRECTIONAL_TOOL,
@@ -214,6 +214,8 @@ import {
     type SessionResult,
 } from "../helpers/readingSession";
 import { toolDisplayName, type ReportMeasurement } from "../helpers/sessionReport";
+import { measurementToolDetail, measurementToolName } from "../helpers/measurementTools";
+import { ClearMeasurementsFlyoutItem } from "../components/MeasurementPanel/ClearMeasurementsConfirm";
 import {getPanTSId } from "../helpers/utils";
 import { classInSentence, filenameToName } from "../helpers/utils.name";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
@@ -406,17 +408,18 @@ function getPanePxPerMm(paneEl: HTMLDivElement | null): number {
 // button per tool (matches the split-button pattern OHIF uses). `key` is the keyboard
 // shortcut (also shown in the flyout). Typed by PrimaryMouseToolName (not the narrower
 // MeasurementToolName) so the magnify entry — a plain `string`, deliberately not part of
-// the measurement-tool union — fits in the same array.
-const MEASURE_TOOLS: { name: PrimaryMouseToolName; label: string; Icon: typeof IconRuler2; key: string }[] = [
-	{ name: LENGTH_TOOL, label: "Distance (mm)", Icon: IconRuler2, key: "L" },
-	{ name: BIDIRECTIONAL_TOOL, label: "Bidirectional · long × short axis", Icon: IconArrowsCross, key: "B" },
-	{ name: ANGLE_TOOL, label: "Angle (°)", Icon: IconAngle, key: "A" },
-	{ name: PROBE_TOOL, label: "HU at point", Icon: IconClick, key: "P" },
-	{ name: ROI_TOOL, label: "Rect ROI · HU & area", Icon: IconSquareDashed, key: "R" },
-	{ name: ELLIPSE_TOOL, label: "Ellipse ROI · HU & area", Icon: IconCircle, key: "E" },
-	{ name: FREEHAND_ROI_TOOL, label: "Freehand ROI · HU & area", Icon: IconLasso, key: "F" },
-	{ name: ARROW_TOOL, label: "Arrow · label a finding", Icon: IconArrowUpRight, key: "T" },
-	{ name: MAGNIFY_TOOL, label: "Magnify loupe", Icon: IconZoomIn, key: "G" },
+// the measurement-tool union — fits in the same array. The names come from
+// helpers/measurementTools, the one table the panel and the report read too.
+const MEASURE_TOOLS: { name: PrimaryMouseToolName; Icon: typeof IconRuler2; key: string }[] = [
+	{ name: LENGTH_TOOL, Icon: IconRuler2, key: "L" },
+	{ name: BIDIRECTIONAL_TOOL, Icon: IconArrowsCross, key: "B" },
+	{ name: ANGLE_TOOL, Icon: IconAngle, key: "A" },
+	{ name: PROBE_TOOL, Icon: IconClick, key: "P" },
+	{ name: ROI_TOOL, Icon: IconSquareDashed, key: "R" },
+	{ name: ELLIPSE_TOOL, Icon: IconCircle, key: "E" },
+	{ name: FREEHAND_ROI_TOOL, Icon: IconLasso, key: "F" },
+	{ name: ARROW_TOOL, Icon: IconArrowUpRight, key: "T" },
+	{ name: MAGNIFY_TOOL, Icon: IconZoomIn, key: "G" },
 ];
 
 // One-time "click here to close" nudge shown next to the closing anchor
@@ -1500,6 +1503,24 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		};
 	}, [viewerReady, refreshMaskHistory]);
 
+	// Whether there is any measurement to clear, so the Measure menu's Clear measurements
+	// row goes dim instead of offering a confirmation that would clear nothing. It reads
+	// the same list the Measurements dock does and follows a live room peer's changes too.
+	const [hasMeasurements, setHasMeasurements] = useState(false);
+	useEffect(() => {
+		const refresh = () => {
+			let any = false;
+			try {
+				any = getMeasurementSummaries().length > 0;
+			} catch {
+				/* annotation state not ready yet */
+			}
+			setHasMeasurements(any);
+		};
+		refresh();
+		return subscribeToMeasurementChanges(refresh, { includeRemote: true });
+	}, [viewerReady]);
+
 	// Single entry point for both the toolbar's Undo button and the ⌘Z/Ctrl+Z
 	// shortcut. Scissors/lasso place polygon points one click at a time
 	// (usePolygonDraw's local `points` state) BEFORE anything is committed
@@ -2045,9 +2066,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				track("viewer_measure");
 			}
 			if (kind === "completed" && sessionRef.current) {
-				sessionRef.current.log("measure", `${toolDisplayName(m.tool)} measured: ${m.value}`);
+				// A tool with no value to show (an arrow note) is logged without one.
+				sessionRef.current.log("measure", m.value ? `${toolDisplayName(m.tool)} measured: ${m.value}` : `${toolDisplayName(m.tool)} added`);
 				requestAnimationFrame(() => {
-					void takeSnapshot(`${toolDisplayName(m.tool)} — ${m.value}`);
+					void takeSnapshot(m.value ? `${toolDisplayName(m.tool)} — ${m.value}` : toolDisplayName(m.tool));
 				});
 			} else if (kind === "removed" && sessionRef.current) {
 				sessionRef.current.log("measure", `Removed a ${toolDisplayName(m.tool)} measurement`);
@@ -2137,7 +2159,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					text: `${revealCue.reference_diameter_mm ?? 0} mm reference`,
 				label: "Reference diameter",
 				frame_of_reference: "",
-				metadata: {},
+				metadata: AXIAL_REFERENCE_METADATA,
 			});
 		}
 	}, [
@@ -2196,7 +2218,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				text: `${revealCue.reference_diameter_mm ?? 0} mm reference`,
 				label: "Reference diameter",
 				frame_of_reference: "",
-				metadata: {},
+				metadata: AXIAL_REFERENCE_METADATA,
 			});
 		}
 	}, [
@@ -4248,11 +4270,14 @@ const aiAvailableOrgans = useMemo(() => {
 															ref={measureFlyout.menuRef}
 															style={{ position: "fixed", top: measureFlyout.pos.top, left: measureFlyout.pos.left }}
 														>
-															{MEASURE_TOOLS.map(({ name, label, Icon, key: hotkey }) => (
+															{MEASURE_TOOLS.map(({ name, Icon, key: hotkey }) => (
 																<button
 																	key={name}
 																	className={`vp-flyout__item ${activeMeasureTool === name ? "is-active" : ""}`}
 															role="menuitem"
+																	// Name and detail are adjacent spans, which read as one run-on word.
+																	aria-label={`${measurementToolName(name)}, ${measurementToolDetail(name)}`}
+																	aria-keyshortcuts={hotkey}
 															disabled={collaborationDisabled}
 																	onClick={() => {
 																		setEditMode(null);
@@ -4261,22 +4286,19 @@ const aiAvailableOrgans = useMemo(() => {
 																	}}
 																>
 																	<Icon size={18} />
-																	<span>{label}</span>
+																	<span>{measurementToolName(name)}</span>
+																	<span className="vp-flyout__detail">{measurementToolDetail(name)}</span>
 																	<span className="vp-flyout__kbd">{hotkey}</span>
 																</button>
 															))}
-															<button
-																className="vp-flyout__item"
-														role="menuitem"
-														disabled={collaborationDisabled}
-																onClick={() => {
+															<ClearMeasurementsFlyoutItem
+																disabled={collaborationDisabled || !hasMeasurements}
+																onClear={() => {
 																	clearMeasurements();
+																	setHasMeasurements(false);
 																	measureFlyout.close();
 																}}
-															>
-																<IconTrash size={18} />
-																<span>Clear measurements</span>
-															</button>
+															/>
 														</div>,
 														document.body
 													)}
@@ -5348,6 +5370,7 @@ const aiAvailableOrgans = useMemo(() => {
 				<MeasurementPanel
 					onClose={() => setShowMeasurePanel(false)}
 					onJump={(mm) => setCrosshairMm(mm)}
+					readOnly={collaborationDisabled && Boolean(liveRoom)}
 				/>
 			)}
 			</div>

@@ -1002,6 +1002,84 @@
   color: inherit;
 }
 
+/* The faint half of a tool's name in the Measure menu ("Distance  Length in mm"). */
+.vp-flyout__detail {
+  color: var(--vp-text-faint);
+  font-size: 11.5px;
+}
+
+.vp-flyout__item.is-active .vp-flyout__detail {
+  color: inherit;
+  opacity: 0.65;
+}
+
+/* Sets a destructive row apart from the pick-a-tool rows above it. */
+.vp-flyout__divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--vp-border);
+}
+
+.vp-flyout__item--danger {
+  color: #fda4af;
+}
+
+.vp-flyout__item--danger:hover {
+  background: rgba(244, 63, 94, 0.14);
+}
+
+.vp-flyout__item--danger:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.vp-flyout__item--danger:disabled:hover {
+  background: transparent;
+}
+
+/* "Clear all measurements?" asked in place of the danger row: the question, then Keep and Clear. */
+.vp-flyout__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  color: #ffffff;
+  font-family: var(--vp-font);
+  font-size: 13px;
+}
+
+.vp-flyout__confirm-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.vp-flyout__confirm-btn {
+  flex: 1 1 0;
+  min-height: 32px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--vp-border);
+  border-radius: 8px;
+  color: var(--vp-text);
+  font-family: var(--vp-font);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vp-flyout__confirm-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.vp-flyout__confirm-btn--danger {
+  border-color: rgba(244, 63, 94, 0.55);
+  background: rgba(244, 63, 94, 0.14);
+  color: #fecdd3;
+}
+
+.vp-flyout__confirm-btn--danger:hover {
+  background: rgba(244, 63, 94, 0.28);
+}
+
 /* "Config panel" flyouts (Layout ▾, Window ▾) — reuse the sidebar's segmented-control
    look (.vp-panel__title section labels + .vp-seg/.vp-seg__btn) inside the dropdown;
    just a wider min-width than the default .vp-flyout so the segmented rows have room. */
@@ -1866,6 +1944,24 @@
   background: rgba(255, 255, 255, 0.12);
 }
 
+/* Keep and Clear all, shown in place of the Clear all chip while it asks. */
+.vp-panel-head__confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vp-panel-head__chip--danger {
+  border-color: rgba(244, 63, 94, 0.55);
+  background: rgba(244, 63, 94, 0.14);
+  color: #fecdd3;
+}
+
+.vp-panel-head__chip--danger:hover {
+  color: #fecdd3;
+  background: rgba(244, 63, 94, 0.28);
+}
+
 /* An icon button, not a text glyph. padding: 0 because the site-wide button
    padding (src/index.css) would otherwise swallow the icon. */
 .vp-panel-head__close {
@@ -1941,6 +2037,10 @@
   text-wrap: pretty;
 }
 
+/* Keeps a list of keys from splitting across two lines. */
+.vp-panel__nowrap {
+  white-space: nowrap;
+}
 
 /* Out-of-range summary banner above the table. */
 .vp-stats__summary {

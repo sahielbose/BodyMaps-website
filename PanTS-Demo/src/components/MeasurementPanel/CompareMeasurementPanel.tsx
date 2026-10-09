@@ -1,11 +1,14 @@
-import { IconCrosshair, IconTrash } from "@tabler/icons-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
 	type CaseKey,
 	type CompareHandle,
 	type MeasurementSummary,
 } from "../../helpers/compareViewer";
-import { toolDisplayName } from "../../helpers/sessionReport";
+import { useKeepFocusInPanel } from "../../hooks/useKeepFocusInPanel";
+import PanelHeader from "../PanelHeader";
+import { ClearAllChips } from "./ClearMeasurementsConfirm";
+import MeasurementItem from "./MeasurementItem";
+import { duplicatePositions, measurementRowName } from "./measurementRowName";
 import "./MeasurementPanel.css";
 
 type Props = {
@@ -20,15 +23,22 @@ type Props = {
 // measurement belongs to, since jumping needs to move the right case's crosshair.
 function CompareMeasurementPanel({ handle, idA, idB, onClose }: Props) {
 	const [items, setItems] = useState<MeasurementSummary[]>(() => handle?.getMeasurementSummaries() ?? []);
+	const rootRef = useRef<HTMLDivElement>(null);
+	const noteFocus = useKeepFocusInPanel(rootRef, items);
 
 	useEffect(() => {
-		if (!handle) return;
+		// No handle means the pair is loading or failed: the old pair's rows would have dead buttons.
+		if (!handle) {
+			setItems([]);
+			return;
+		}
 		setItems(handle.getMeasurementSummaries());
 		const unsubscribe = handle.subscribeToMeasurementChanges(() => {
+			noteFocus();
 			setItems(handle.getMeasurementSummaries());
 		});
 		return unsubscribe;
-	}, [handle]);
+	}, [handle, noteFocus]);
 
 	const commitLabel = (uid: string, label: string) => {
 		handle?.renameMeasurement(uid, label.trim());
@@ -36,76 +46,42 @@ function CompareMeasurementPanel({ handle, idA, idB, onClose }: Props) {
 	};
 
 	const caseLabel = (caseKey: CaseKey) => (caseKey === "a" ? idA : idB);
+	const positions = duplicatePositions(
+		items.map((m) => measurementRowName(m.tool, m.label, m.value, `Case ${caseLabel(m.caseKey)}`))
+	);
 
 	return (
-		<div className="vp-measure" role="region" aria-label="Measurements">
-			<div className="vp-measure__head">
-				<span className="vp-panel__title">Measurements</span>
-				<div className="vp-measure__actions">
-					{items.length > 0 && (
-						<button
-							className="vp-measure__clear"
-							onClick={() => {
-								handle?.clearMeasurements();
-								setItems([]);
-							}}
-						>
-							Clear all
-						</button>
-					)}
-					<button className="vp-measure__close" onClick={onClose} aria-label="Close measurements">
-						×
-					</button>
-				</div>
-			</div>
+		<div ref={rootRef} className="vp-measure" role="region" aria-label="Measurements">
+			<PanelHeader title="Measurements" closeLabel="Close measurements" onClose={onClose}>
+				{items.length > 0 && (
+					<ClearAllChips
+						onClear={() => {
+							handle?.clearMeasurements();
+							setItems([]);
+						}}
+					/>
+				)}
+			</PanelHeader>
 			{items.length === 0 ? (
-				<div className="vp-measure__empty">
+				<div className="vp-panel__empty">
 					No measurements yet.
-					<br />
-					<span>Pick a tool from the Measure menu and draw on either case.</span>
+					<span className="vp-panel__hint">Pick a tool from the Measure menu and draw on either case.</span>
 				</div>
 			) : (
 				<div className="vp-measure__list">
-					{items.map((m) => (
-						<div className="vp-measure__item" key={m.uid}>
-							<div className="vp-measure__main">
-								<input
-									className="vp-measure__label"
-									defaultValue={m.label}
-									placeholder={toolDisplayName(m.tool)}
-									aria-label="Measurement label"
-									onBlur={(e) => {
-										if (e.target.value.trim() !== m.label) commitLabel(m.uid, e.target.value);
-									}}
-									onKeyDown={(e) => {
-										if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-									}}
-								/>
-								<span className="vp-measure__value">{m.value}</span>
-							</div>
-							<div className="vp-measure__meta">
-								Case {caseLabel(m.caseKey)} · {toolDisplayName(m.tool)}
-							</div>
-							<div className="vp-measure__btns">
-								<button
-									className="vp-measure__btn"
-									title="Jump to this measurement"
-									aria-label="Jump to this measurement"
-									disabled={!m.center}
-									onClick={() => handle?.jumpToMeasurement(m.uid, m.caseKey)}
-								>
-									<IconCrosshair size={15} />
-								</button>
-								<button
-									className="vp-measure__btn vp-measure__btn--danger"
-									title="Delete this measurement"
-									aria-label="Delete this measurement"
-									onClick={() => handle?.removeMeasurement(m.uid)}
-								>
-									<IconTrash size={15} />
-								</button>
-							</div>
-						</div>
+					{items.map((m, i) => (
+						<MeasurementItem
+							key={m.uid}
+							tool={m.tool}
+							label={m.label}
+							value={m.value}
+							metaPrefix={`Case ${caseLabel(m.caseKey)}`}
+							position={positions[i]}
+							canJump={!!m.center}
+							onRename={(label) => commitLabel(m.uid, label)}
+							onJump={() => handle?.jumpToMeasurement(m.uid, m.caseKey)}
+							onDelete={() => handle?.removeMeasurement(m.uid)}
+						/>
 					))}
 				</div>
 			)}
