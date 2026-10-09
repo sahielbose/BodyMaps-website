@@ -3053,3 +3053,71 @@
     transform: rotate(360deg);
   }
 }
+/* While the report walkthrough is open the 3D scene is a passive backdrop:
+   the viewer's own chrome must not stay visible or clickable underneath the
+   overlay (the report brings its own header). */
+.VisualizationPage.report-open .vp-3dbar,
+.VisualizationPage.report-open .vp-floating-gear {
+  display: none;
+}
+
+/* The organs dock is in the stage's flow, so left open it would narrow the
+   stage (putting every report pose off-centre) and leave its checkboxes
+   clickable through the pointer-events:none report. Hidden, not closed, so
+   the reader's choice is still there when the report closes. */
+.VisualizationPage.report-open .vp-organs {
+  display: none;
+}
+
+/* The toolbar goes the same way, except for the recording pill inside it: the
+   report does not stop a reading session, so the mic stays live and the REC
+   pill and its Stop button must stay on screen. The bar drops its own box
+   (display: contents) so the pill can sit in a fixed slot over the report (see
+   ReadingSession.css); every tool in the bar is hidden. */
+.VisualizationPage.report-open .vp-topbar {
+  display: contents;
+}
+
+.VisualizationPage.report-open .vp-topbar > :not(.vp-rec) {
+  display: none;
+}
+
+/* Height of the strip under the report's header that holds the pill while a
+   session records. The report adds it to its own --rs-bar-h, so the story
+   card, the stage and the panels start below the pill instead of under it. */
+.VisualizationPage.report-rec {
+  --rs-rec-h: 46px;
+}
+
+/* The report slides the 3D pane sideways and scales it, which uncovers whatever
+   is behind it. The page (#08090b) and the stage (#000) were two different
+   blacks, so the pane's edge showed as hard seams at the left, right and
+   bottom. One colour all the way down, the pane background the 3D scene and
+   the volume render also use, leaves nothing to see. The pane and its canvas
+   keep the viewer's #08090b otherwise (a fill of their own, set for the
+   fullscreen 3D overlay), which showed as a lighter strip beside the sliding
+   pane. */
+.VisualizationPage.report-open,
+.VisualizationPage.report-open .vp-body,
+.VisualizationPage.report-open .vp-stage,
+.VisualizationPage.report-open .visualization-container,
+.VisualizationPage.report-open .vp-pane--render,
+.VisualizationPage.report-open .vp-pane--render .canvas {
+  background: var(--vp-pane-bg, #000);
+}
+
+/* The report has no seams to draw and no pane labels to show: the panes take
+   the backdrop colour, and the 3D pane drops its accent ring, its "3D" label
+   and its accent tick, which the sliding, scaled pose would otherwise expose. */
+.VisualizationPage.report-open .vp-pane-wrap {
+  background: transparent;
+}
+
+.VisualizationPage.report-open .vp-pane--render {
+  box-shadow: none;
+}
+
+.VisualizationPage.report-open .vp-pane--render::before,
+.VisualizationPage.report-open .vp-pane--render::after {
+  display: none;
+}

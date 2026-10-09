@@ -1,37 +1,83 @@
-/* Reading-session chrome: the floating REC pill, the post-session summary
+/* Reading-session chrome: the REC pill in the toolbar, the post-session summary
    dialog and the draft-report preview. Same dark design language as the rest
    of the viewer (tokens defined on .VisualizationPage). */
 
 /* ---- REC pill ---- */
 .vp-rec {
-  position: fixed;
-  top: 14px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 60;
+  /* A flex item at the right end of the toolbar's last row (VisualizationPage
+     puts it inside .vp-topbar), so it wraps with the toolbar and never covers a
+     tool, a pane label or the top of an image, at any width or with the AI
+     sidebar open. Its height is fixed at the 36px of the toolbar buttons (32px
+     on phones), whatever the line height of the text inside, so starting or
+     stopping a recording never makes the bar taller. */
+  margin-left: auto;
+  flex: 0 1 auto;
+  /* Never wider than the bar, whatever the pill holds. */
+  max-width: 100%;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px 8px 14px;
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 6px 0 14px;
   border-radius: 999px;
   background: rgba(20, 12, 14, 0.88);
   backdrop-filter: blur(14px) saturate(140%);
   -webkit-backdrop-filter: blur(14px) saturate(140%);
   border: 1px solid rgba(244, 63, 94, 0.45);
-  box-shadow: 0 14px 40px -12px rgba(0, 0, 0, 0.8);
   font-family: var(--vp-font, system-ui, sans-serif);
   color: var(--vp-text, rgba(255, 255, 255, 0.92));
 }
+/* While the report walkthrough is open the toolbar is hidden, but the session
+   keeps recording, so the pill stays: pinned in the strip the report reserves
+   under its header (VisualizationPage adds --rs-rec-h to the report's
+   --rs-bar-h), so it covers no header control and no card. Its top is the
+   header height (76px, or 104px once the header wraps to two rows below 980px,
+   the report's --rs-head-h) plus 4px. The report root is a stacking context at
+   z 9998, so 10003 puts the pill above the whole report, mode prompt included:
+   a live microphone keeps its indicator and Stop even behind that prompt. */
+.VisualizationPage.report-open .vp-rec {
+  position: fixed;
+  top: 80px;
+  /* The report header's own side inset (.rs-topbar), so the pill starts on the
+     same edge as the brand above it; 12px below 980px, where the header wraps. */
+  left: 28px;
+  margin-left: 0;
+  z-index: 10003;
+  max-width: calc(100vw - 56px);
+}
+@media (max-width: 979px) {
+  .VisualizationPage.report-open .vp-rec {
+    top: 108px;
+    left: 12px;
+    max-width: calc(100vw - 24px);
+  }
+}
 .vp-rec__dot {
+  position: relative;
   width: 9px;
   height: 9px;
   border-radius: 50%;
   background: #f43f5e;
   animation: vp-rec-pulse 1.4s ease-in-out infinite;
 }
+/* The ripple is a ring that scales and fades (transform and opacity only).
+   It used to be an animated box-shadow, repainted every frame of a session. */
+.vp-rec__dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(244, 63, 94, 0.5);
+  animation: vp-rec-ripple 1.4s ease-out infinite;
+}
 @keyframes vp-rec-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.5); }
-  50% { opacity: 0.55; box-shadow: 0 0 0 5px rgba(244, 63, 94, 0); }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@keyframes vp-rec-ripple {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(2.1); }
 }
 .vp-rec__title {
   font-family: var(--vp-mono, monospace);
@@ -60,8 +106,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
   padding: 0; /* global button padding would swallow the icon */
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.08);
@@ -70,6 +117,8 @@
   cursor: pointer;
 }
 .vp-rec__btn:hover { background: rgba(255, 255, 255, 0.16); }
+.vp-rec__btn[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+.vp-rec__btn[aria-disabled="true"]:hover { background: rgba(255, 255, 255, 0.08); }
 /* The key image count beside the camera. Up to 900px it is the only sign a
    capture landed (the text counts are hidden there), so it shows at those
    widths and re-plays a short pop with each new capture. */
@@ -88,7 +137,10 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 14px;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 14px;
+  line-height: 1;
   border-radius: 999px;
   border: 1px solid rgba(244, 63, 94, 0.55);
   background: rgba(244, 63, 94, 0.14);
@@ -358,6 +410,80 @@
 .vp-session__discard:focus-visible {
   outline: 2px solid rgba(255, 255, 255, 0.85);
   outline-offset: 2px;
+}
+
+/* Up to 1600px a pill with its text counts no longer fits beside the tools on
+   the toolbar's row, so the counts drop and the key image count moves onto the
+   camera button (the same compact pill the tablet gets below). */
+@media (max-width: 1600px) {
+  .vp-rec__counts {
+    display: none;
+  }
+  .vp-rec__btn {
+    width: auto;
+    min-width: 28px;
+    padding: 0 9px;
+    gap: 5px;
+    border-radius: 999px;
+  }
+  .vp-rec__shots {
+    display: inline;
+  }
+}
+
+/* Tablets and phones: the pill keeps only what a reader acts on (clock, mic,
+   key image, Stop), so the counts and title go at every width up to 900px.
+   The key image count stays on the camera button so a capture still shows. */
+@media (max-width: 900px) {
+  .vp-rec {
+    gap: 8px;
+    padding: 0 6px 0 12px;
+  }
+  .vp-rec__title,
+  .vp-rec__counts {
+    display: none;
+  }
+  .vp-rec__btn {
+    width: auto;
+    min-width: 28px;
+    padding: 0 9px;
+    gap: 5px;
+    border-radius: 999px;
+  }
+  .vp-rec__shots {
+    display: inline;
+  }
+}
+
+/* Tablets: the toolbar wraps its tool row onto a second line, and a pill left
+   in DOM order would open a third one (54px taller than the bar without a
+   recording). Ordering the tool row after it puts the pill at the right end of
+   the first row, beside the case and dropdowns, which have the room. Not on
+   phones, where the tool row is display: contents and its buttons flow in
+   line with the pill. */
+@media (min-width: 641px) and (max-width: 900px) {
+  .vp-topbar > .vp-tb-tools {
+    order: 1;
+  }
+}
+
+/* Phones: a tighter pill for the wrapped toolbar, as tall as its 32px buttons. */
+@media (max-width: 640px) {
+  .vp-rec {
+    gap: 6px;
+    height: 32px;
+    padding: 0 4px 0 10px;
+  }
+  .vp-rec__btn,
+  .vp-rec__stop {
+    height: 26px;
+  }
+  .vp-rec__btn {
+    min-width: 26px;
+  }
+  .vp-rec__stop {
+    padding: 0 10px;
+  }
 }
 
 /* Phones: the summary and report controls stack at one width. */

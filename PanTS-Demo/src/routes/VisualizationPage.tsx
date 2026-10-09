@@ -2930,8 +2930,13 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 	// View-mode changes belong in the reading timeline (skip the initial mount).
 	const loggedViewMode = useRef<ViewMode | null>(null);
+	// The report walkthrough switches the layout itself (to 3D on open, back on exit);
+	// those are not the reader's own view changes, so they stay out of the timeline.
+	const reportViewSwitchRef = useRef(false);
 	useEffect(() => {
-		if (loggedViewMode.current !== null && loggedViewMode.current !== viewMode) {
+		if (reportViewSwitchRef.current) {
+			reportViewSwitchRef.current = false;
+		} else if (loggedViewMode.current !== null && loggedViewMode.current !== viewMode) {
 			sessionRef.current?.log(
 				"view",
 				`Switched to ${viewMode === "mpr" ? "MPR" : viewMode === "3d" ? "3D" : viewMode} view`
@@ -3728,11 +3733,53 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		}
 	}, []);
 
+	// Leaves the report walkthrough: the scan returns to the normal layout.
+	// The layout, 3D mode, crosshair and pane zoom and pan the reader had when the report
+	// opened are put back, since the walkthrough moves all of them.
+	const preReportViewRef = useRef<{
+		viewMode: ViewMode;
+		threeDMode: "mesh" | "volume";
+		crosshair: [number, number, number] | null;
+		cameras: Record<string, unknown>;
+		zoom: number;
+	} | null>(null);
 	// The layout refit puts every pane back at the volume centre, so a crosshair restore
 	// that goes with a layout change waits here until the refit has finished.
 	const pendingCrosshairRestoreRef = useRef<[number, number, number] | null>(null);
+	// The pane cameras and zoom slider value that go back with it: the refit resets every
+	// pane to fit, so the reader's zoom and pan are put back once it has settled.
+	const pendingCameraRestoreRef = useRef<{ cameras: Record<string, unknown>; zoom: number } | null>(null);
+	// setZoom is absolute and writes one scale to every pane, which would flatten the per-pane
+	// cameras put back after the report. The zoom level the effect last applied is kept, so a
+	// restore that is about to change it can ask the effect to skip that one run.
+	const appliedZoomRef = useRef(1);
+	const skipZoomEffectRef = useRef(false);
 	// The crosshair a layout refit started from, put back once the refit has settled.
 	const layoutCrosshairKeepRef = useRef<[number, number, number] | null>(null);
+	const closeReportScreen = () => {
+		setShowReportScreen(false);
+		handleClearIsolation();
+		const saved = preReportViewRef.current;
+		preReportViewRef.current = null;
+		const nextViewMode = saved?.viewMode ?? "mpr";
+		const layoutChanges = nextViewMode !== viewMode;
+		if (layoutChanges) reportViewSwitchRef.current = true;
+		setViewMode(nextViewMode);
+		if (saved) {
+			setThreeDMode(saved.threeDMode);
+			if (layoutChanges) {
+				pendingCameraRestoreRef.current = { cameras: saved.cameras, zoom: saved.zoom };
+			}
+			if (saved.crosshair) {
+				if (layoutChanges) {
+					pendingCrosshairRestoreRef.current = saved.crosshair;
+				} else {
+					moveCornerstoneCrosshairToMm(saved.crosshair);
+					setCrosshairMm(saved.crosshair);
+				}
+			}
+		}
+	};
 
 	const handleHideOrgans = useCallback((organNames: string[]) => {
 		setCheckState(prev => {
@@ -3809,6 +3856,21 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				raf3 = requestAnimationFrame(apply);
 				return;
 			}
+			// Leaving the report: the refit above put every pane at fit, so the zoom and pan
+			// the reader had go back before the crosshair does.
+			const cameraRestore = pendingCameraRestoreRef.current;
+			pendingCameraRestoreRef.current = null;
+			if (cameraRestore && renderingEngine) {
+				viewportIds.forEach((id) => {
+					const saved = cameraRestore.cameras[id];
+					const vp = renderingEngine.getViewport(id) as { setCamera?: (camera: unknown) => void } | undefined;
+					if (saved) vp?.setCamera?.(saved);
+				});
+				// The slider follows the saved value, but its effect must not flatten the panes.
+				if (cameraRestore.zoom !== appliedZoomRef.current) skipZoomEffectRef.current = true;
+				setZoomLevel(cameraRestore.zoom);
+				renderingEngine.render();
+			}
 			layoutRefitPendingRef.current = false;
 			const restore = pendingCrosshairRestoreRef.current ?? layoutCrosshairKeepRef.current;
 			pendingCrosshairRestoreRef.current = null;
@@ -3837,6 +3899,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	useEffect(() => {
 		if (!renderingEngine || !viewportIds.length) return;
 		if (zoomLevel !== 1) annotateRefitRef.current = false;
+		appliedZoomRef.current = zoomLevel;
+		if (skipZoomEffectRef.current) {
+			skipZoomEffectRef.current = false;
+			return;
+		}
 		setZoom(zoomLevel);
 	}, [zoomLevel, renderingEngine, viewportIds]);
 
@@ -4755,7 +4822,7 @@ const aiAvailableOrgans = useMemo(() => {
 	return (
 		<div
 			ref={vpRootRef}
-			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${showAnnotationToolbar ? " annotation-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}${quizPractice ? " is-quiz-practice" : ""}`}
+			className={`VisualizationPage${showAISidebar ? " ai-panel-open" : ""}${showAnnotationToolbar ? " annotation-open" : ""}${liveRoom ? " is-live-room" : ""}${soloChallenge ? " is-solo-challenge" : ""}${quizPractice ? " is-quiz-practice" : ""}${showReportScreen ? " report-open" : ""}${showReportScreen && readingSession ? " report-rec" : ""}`}
 			onPointerDownCapture={(event) => {
 				if (!liveRoom?.followingId) return;
 				const target = event.target as HTMLElement;
@@ -5473,6 +5540,24 @@ const aiAvailableOrgans = useMemo(() => {
 													className="vp-tool"
 													onClick={() => {
 														track("report_open");
+														// The report walkthrough uses the live 3D mesh scene as its
+														// backdrop, so any annotate chrome, organ isolation, or
+														// volume-render mode left active would bleed through it.
+														closeAnnotationToolbarIfOpen();
+														setShowAISidebar(false);
+														setShowStats(false);
+														setShowMetadata(false);
+														setShowMeasurePanel(false);
+														handleClearIsolation();
+														const cameras: Record<string, unknown> = {};
+														viewportIds.forEach((id) => {
+															const vp = renderingEngine?.getViewport(id) as { getCamera?: () => object } | undefined;
+															const camera = vp?.getCamera?.();
+															if (camera) cameras[id] = { ...camera };
+														});
+														preReportViewRef.current = { viewMode, threeDMode, crosshair: getCrosshairMm(), cameras, zoom: zoomLevel };
+														setThreeDMode("mesh");
+														if (viewMode !== "3d") reportViewSwitchRef.current = true;
 														setViewMode("3d");
 														setShowReportScreen(true);
 													}}
@@ -5566,6 +5651,29 @@ const aiAvailableOrgans = useMemo(() => {
 												</button>
 											)}
 										</div>
+				{/* The recording pill is a flex item of the toolbar (pushed to the right end of
+				    its last row), so it can never sit on a tool or on the images below. */}
+				{readingSession && (
+					<SessionHUD
+						session={readingSession}
+						snapshotUnavailable={showReportScreen}
+						onSnapshot={() => {
+							// The report owns the layout (3D, slice panes hidden), so there is nothing
+							// to capture: say why, above the report, instead of staying silent.
+							if (showReportScreen) {
+								showToolNotice("Key images are taken from the slice views. Close the report to capture one.");
+								return;
+							}
+							void takeSnapshot();
+						}}
+						onStop={() => {
+							// Stopping opens the session summary, which sits under the report, so
+							// close the report first and the summary comes up in front of the viewer.
+							if (showReportScreen) closeReportScreen();
+							void stopReadingSession();
+						}}
+					/>
+				)}
 				</div>
 
 			{/* Body row: left dock (Organs) · stage · right docks (stats/measurements/
@@ -6522,14 +6630,6 @@ const aiAvailableOrgans = useMemo(() => {
 				</div>
 			)}
 
-			{readingSession && (
-				<SessionHUD
-					session={readingSession}
-					onSnapshot={() => { void takeSnapshot(); }}
-					onStop={() => { void stopReadingSession(); }}
-				/>
-			)}
-
 			{sessionResult && (
 				<SessionSummary
 					result={sessionResult}
@@ -6549,15 +6649,12 @@ const aiAvailableOrgans = useMemo(() => {
 				showReportScreen && (
 					<ReportScreen
 						id={caseId}
-						onClose={() => {
-							setShowReportScreen(false);
-							handleClearIsolation();
-							setViewMode("mpr");
-						}}
+						onClose={closeReportScreen}
 						onOrganHighlight={handleOrganHighlight}
 						onClearHighlight={handleClearIsolation}
 						onHideOrgans={handleHideOrgans}
 						onViewChange={(view) => setViewMode(view as ViewMode)}
+						recording={readingSession !== null}
 					/>
 				)
 			}
