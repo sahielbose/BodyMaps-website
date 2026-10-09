@@ -160,6 +160,9 @@
   font-weight: 500;
   color: #111111;
   cursor: pointer;
+  /* One line each; on a narrow screen the row wraps instead (see the
+     max-width: 640px block). */
+  white-space: nowrap;
   transition: background-color 0.15s, border-color 0.15s;
 }
 .dropzone-btn:hover {
@@ -259,6 +262,12 @@
 .file-chip-remove:hover {
   background: rgba(239,68,68,.15);
   color: #ef4444;
+}
+/* Each fact (kind, size or slice count, upload state) stays whole when the
+   line is short (see the phone block below), never split between a number and
+   its unit, and its leading dot goes with it. */
+.file-chip-sub-part {
+  white-space: nowrap;
 }
 
 /* ── File chip upload-status variants ── */
@@ -1676,6 +1685,11 @@
   outline-offset: 3px;
 }
 
+/* ── Narrow viewports ──
+   Functional only, no redesign: the pipeline stacks so its dropdowns stay
+   usable, menus are capped to the viewport, and the lesion submenu renders
+   inline below its item (a hover flyout never opens on touch and would fly
+   off-screen anyway; see the 800px block below). */
 /* Just above the phone layout (641 to 760px) three dropdowns, two arrows and
    Run don't fit on one line: "None (view scan)" wrapped and the Model step
    stood taller than its neighbours. The steps keep their row (the numbered
@@ -1743,12 +1757,103 @@
   .upload-row__meta .proc-close-note__sep {
     display: none;
   }
+  /* The 24px side gutter the Dataset and Settings panels keep, so the panel
+     edge stays put when switching tabs; a lighter card inset leaves the drop
+     zone room for its two buttons, and below ~330px of content they stack,
+     full width and equal, rather than wrapping their labels. */
+  .upload-main {
+    padding: 24px 24px 48px;
+  }
+  .upload-card {
+    padding: 20px 16px 20px;
+  }
+  /* The batch bar's wheel, text and two buttons need about 265px in one row
+     and the card leaves about 255, which squeezed the title and status to a
+     sliver. The text takes the width the wheel leaves (46 plus the 18px gap)
+     and the buttons share a row of their own beneath it. */
+  .proc-bar {
+    flex-wrap: wrap;
+  }
+  .proc-info {
+    flex: 1 1 calc(100% - 64px);
+  }
+  .proc-details-btn,
+  .proc-cancel {
+    flex: 1 1 auto;
+  }
   /* Roughly square at this width, so Niivue's 2 x 2 grid keeps its tiles
      instead of dropping to a thin row. */
   .ct-preview--multiplanar {
     aspect-ratio: 1 / 1;
     min-height: 0;
     max-height: none;
+  }
+  .dropzone {
+    padding: 16px;
+  }
+  .dropzone-btn-row {
+    width: 100%;
+  }
+  .dropzone-btn {
+    flex: 1 1 140px;
+  }
+  /* A selected file: icon and name share the first line, the meta line keeps
+     each fact whole (size, then state), and Preview and remove sit beneath in
+     their markup order, so the text has room, neither button is a small target
+     and focus follows what is drawn. */
+  .file-chip-row {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+  /* The name and the meta line join the chip row directly, so the name takes
+     the width the icon leaves (icon 32 plus the 12px gap) and the meta line
+     gets a row of its own across the whole chip. Beside the icon it had about
+     190px, so "upload failed" wrapped to a second line that began with a lone
+     dot. */
+  .file-chip-text {
+    display: contents;
+  }
+  .file-chip-name {
+    flex: 1 1 calc(100% - 44px);
+  }
+  /* The dots stay: each part carries its own leading " · ", and the column gap
+     stands in for the space before it that the flex items would otherwise lose
+     ("NIfTI · 6.5 MB · upload failed", not one run of words). The negative top
+     margin takes back most of the row gap, so the line still reads as the
+     name's second line. */
+  .file-chip-sub {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 1ch;
+    flex: 1 1 100%;
+    margin-top: -5px;
+  }
+  .file-chip-preview {
+    flex: 1 1 0;
+    min-height: 36px;
+  }
+  /* 32px to press, the same 22px circle to look at. */
+  .file-chip-remove {
+    position: relative;
+    isolation: isolate;
+    width: 32px;
+    height: 32px;
+    background: transparent;
+  }
+  .file-chip-remove::before {
+    content: "";
+    position: absolute;
+    inset: 5px;
+    z-index: -1;
+    border-radius: 50%;
+    background: rgba(0,0,0,.06);
+    transition: background-color 0.15s;
+  }
+  .file-chip-remove:hover {
+    background: transparent;
+  }
+  .file-chip-remove:hover::before {
+    background: rgba(239,68,68,.15);
   }
   .model-cards {
     grid-template-columns: minmax(0, 1fr);
@@ -1804,5 +1909,38 @@
     content: "";
     position: absolute;
     inset: -6px 0;
+  }
+  .pipeline-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .pipeline-step {
+    min-width: 100%;
+  }
+  .pipeline-arrow {
+    display: none;
+  }
+  .run-btn {
+    margin-left: 0;
+    width: 100%;
+  }
+  .model-dropdown-menu {
+    min-width: 0;
+    max-width: calc(100vw - 32px);
+  }
+  /* 16px on the pipeline controls and the page's text fields: iOS zooms the
+     page in on a focused control set smaller than that. The 42px row height
+     is a minimum, so nothing grows. */
+  .model-dropdown-btn,
+  .run-btn,
+  .model-dropdown-access__row input,
+  .upload-rename-input {
+    font-size: 16px;
+  }
+  /* Same 34px touch target as the scan-row buttons above. */
+  .proc-details-btn,
+  .active-cancel-btn {
+    min-height: 34px;
   }
 }

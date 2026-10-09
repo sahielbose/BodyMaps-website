@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -348,5 +350,19 @@ describe("signed out", () => {
     await user.click(screen.getByRole("button", { name: /None \(view scan\)/ }));
 
     expect(screen.queryByText("Donate")).not.toBeInTheDocument();
+  });
+});
+
+describe("upgrade dialog on a short screen", () => {
+  // A phone held sideways leaves about 335px for a card that is about 430px
+  // tall. With align-items: center on a fixed backdrop that cannot scroll,
+  // the close button and the actions were cut off at both ends.
+  it("lets the backdrop scroll and centres the card with auto margins", () => {
+    const css = readFileSync(resolve(process.cwd(), "src/components/UpgradeDialog.css"), "utf8");
+    const block = (sel: string) => css.slice(css.indexOf(`${sel} {`), css.indexOf("}", css.indexOf(`${sel} {`)));
+    expect(block(".upg-backdrop")).toMatch(/overflow-y:\s*auto/);
+    expect(block(".upg-backdrop")).not.toMatch(/align-items:\s*center;/);
+    expect(block(".upg-card")).toContain("margin: auto");
+    expect(block(".upg-card")).toMatch(/flex-shrink:\s*0/);
   });
 });

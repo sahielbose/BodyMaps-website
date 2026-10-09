@@ -111,9 +111,15 @@ export const isGroupInFlight = (g: UploadGroup): boolean =>
 export const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // A group counts as "viewed" once every scan in it has been opened - a batch
-// with one scan still unlooked-at is still something to come back to.
-const isGroupViewed = (g: UploadGroup): boolean =>
-	g.kind === "single" ? Boolean(g.upload.viewed) : g.uploads.every((u) => Boolean(u.viewed));
+// with one scan still unlooked-at is still something to come back to. Only a
+// Completed scan can be opened, so a batch is judged by those: a failed or
+// cancelled one never gets a View button and must not hold the rest here. A
+// batch with nothing to open is left to the age cutoff.
+const isGroupViewed = (g: UploadGroup): boolean => {
+	if (g.kind === "single") return Boolean(g.upload.viewed);
+	const viewable = g.uploads.filter((u) => u.status === "Completed");
+	return viewable.length > 0 && viewable.every((u) => Boolean(u.viewed));
+};
 
 /** Split finished groups into what the Upload page shows and what History gets.
  *  A group belongs to History once it's been viewed (its job here is done -
@@ -403,3 +409,13 @@ export const recentStatusColor = (status: RecentUploadStatus): string =>
 		: status === "Cancelled"
 			? "#b45309"
 			: "#6a6a6a";
+
+// The status word for a batch that has stopped running. "Inference complete"
+// only when every scan finished; otherwise it says what happened instead of
+// calling a cancelled or failed batch completed.
+export const batchFinishedLabel = (uploads: RecentUpload[]): string => {
+	const done = uploads.filter((u) => u.status === "Completed").length;
+	if (done === uploads.length) return "Inference complete";
+	if (done > 0) return "Finished with issues";
+	return uploads.some((u) => u.status === "Failed") ? "Failed" : "Cancelled";
+};

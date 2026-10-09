@@ -141,6 +141,7 @@ import {
   markRecentUploadViewed,
   renameRecentUpload,
   formatRelativeTime,
+  batchFinishedLabel,
   scanSourceName,
   scanAccessibleName,
   groupUploads,
@@ -157,7 +158,7 @@ import {
   type RecentUpload,
 } from "../helpers/recentUploads";
 import Header from "../components/Header";
-import ProcessingSummaryBar from "../components/ProcessingSummaryBar";
+import ProcessingSummaryBar, { batchAnnouncement } from "../components/ProcessingSummaryBar";
 import BatchDetailsModal from "../components/BatchDetailsModal";
 import { track } from "../helpers/analytics";
 import UpgradeDialog, { type UpgradeBlock } from "../components/UpgradeDialog";
@@ -168,7 +169,7 @@ import {
   maxConcurrentScans,
   type PlanId,
 } from "../helpers/accountProfile";
-import { looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
+import { countDicomSlices, looksLikeDicom, setLocalDicomFiles } from "../helpers/dicomLocal";
 import { setLocalNiftiFile } from "../helpers/localNifti";
 import {
   chunkSizeOf,
@@ -180,6 +181,7 @@ import {
   type PendingUpload,
 } from "../helpers/pendingUploads";
 import { postWithRetry, resolveResumeStart } from "../helpers/chunkUpload";
+import { startEpaiOnReconstruction } from "../helpers/epaiOnReconstruction";
 import { fetchListedRuns, RUNS_ADOPTED_EVENT, type RunsAdopted } from "../helpers/adoptLegacyRuns";
 import { forgetQueuedDiscard, queuedDiscards, queueDiscardAfterSignIn } from "../helpers/discardAfterSignIn";
 import SiteFooter from "../components/SiteFooter";
@@ -218,6 +220,28 @@ const uploadReplyError = (res: Response, data: { error?: string }, fallback: str
     ? new UploadConflictError(data.error || fallback)
     : new Error(data.error || fallback);
 
+// The upload endpoints take at most this many chunks per file (the server
+// refuses more). With CHUNK_SIZE it caps a NIfTI at about 4.8 GiB.
+const MAX_UPLOAD_CHUNKS = 10_000;
+
+// A NIfTI the server can never take: nothing to send, or more chunks than it
+// allows. Checked when the file is picked, so the person hears about the file
+// at once instead of after an upload that no retry can fix.
+const unusableNiftiReason = (file: File, chunkSize: number): string | null => {
+  if (file.size === 0)
+    return `${file.name} is empty (0 bytes). Download or export it again and select it once more.`;
+  if (file.size > MAX_UPLOAD_CHUNKS * chunkSize)
+    return `${file.name} is too large to upload. The limit is about 4.8 GiB.`;
+  return null;
+};
+
+// The server's replies to a file it can never take (see MAX_UPLOAD_CHUNKS),
+// which only reach the page when a file got past the pick-time check.
+const UNUSABLE_FILE_MESSAGE =
+  "The server can't take this file because it is empty or too large (the limit is about 4.8 GiB). Check the file and select it again.";
+const isUnusableFileReply = (err: unknown): boolean =>
+  err instanceof Error && /\binvalid total_chunks\b|outside upload bounds/i.test(err.message);
+
 // What the status line says went wrong with an upload: one or more whole
 // sentences, so callers can add what to do next without nesting punctuation.
 // fetch rejects with a TypeError when the request never got an answer.
@@ -230,6 +254,9 @@ const uploadFailureReason = (err: unknown): string => {
   if (/^Upload ownership is unknown/i.test(text)) return "The server no longer has this upload.";
   if (err instanceof UploadConflictError || /total_chunks changed/i.test(text))
     return "The upload was interrupted and needs to start over.";
+  // The server refuses a file with no bytes (no chunks to send) or more than
+  // MAX_UPLOAD_CHUNKS chunks. Both are about the file, not the connection.
+  if (isUnusableFileReply(err)) return UNUSABLE_FILE_MESSAGE;
   // A parameter name (snake_case) means the server answered in API terms;
   // the raw text goes to the console, not the page.
   if (/\b[a-z0-9]+(?:_[a-z0-9]+)+\b/i.test(text)) {
@@ -557,6 +584,51 @@ const estimateRemaining = (
   return `${formatEta(remaining)} left`;
 };
 
+// The ETA needs when a run started going and how big its file was, and the
+// server reports neither. Both are seen only by the page that starts the run,
+// so they are kept per session here: a reload, or a return to /upload minutes
+// later, then picks the countdown up where it was instead of restarting it.
+// Best-effort, like the other localStorage readers: without it a resumed run
+// simply shows no estimate.
+const SCAN_TIMING_KEY = "scanRunTiming";
+const SCAN_TIMING_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+type ScanTiming = { startedAt?: number; sizeBytes?: number; savedAt: number };
+const readScanTimings = (): Record<string, ScanTiming> => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SCAN_TIMING_KEY) || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+const loadScanTiming = (sid: string): ScanTiming | undefined => {
+  const t = readScanTimings()[sid];
+  return t && typeof t === "object" ? t : undefined;
+};
+const saveScanTiming = (sid: string, patch: Partial<ScanTiming>) => {
+  try {
+    const now = Date.now();
+    const all = readScanTimings();
+    for (const [key, t] of Object.entries(all)) {
+      if (!t || typeof t.savedAt !== "number" || now - t.savedAt > SCAN_TIMING_MAX_AGE_MS) delete all[key];
+    }
+    all[sid] = { ...all[sid], ...patch, savedAt: now };
+    localStorage.setItem(SCAN_TIMING_KEY, JSON.stringify(all));
+  } catch {
+    /* private mode or a full quota: the estimate just won't survive a reload */
+  }
+};
+const forgetScanTiming = (sid: string) => {
+  try {
+    const all = readScanTimings();
+    if (!(sid in all)) return;
+    delete all[sid];
+    localStorage.setItem(SCAN_TIMING_KEY, JSON.stringify(all));
+  } catch {
+    /* nothing stored, or storage unavailable */
+  }
+};
+
 // A selection is either a single NIfTI file or a picked DICOM folder (the series'
 // raw .dcm slices). Both are previewable individually and runnable through inference.
 type SelectedItem =
@@ -601,13 +673,34 @@ const readDirectoryFiles = async (
   return files;
 };
 
+// Files under dropped entries, folders walked to any depth. The entries come
+// from DataTransferItem.webkitGetAsEntry, which only works during the drop.
+const readDroppedEntries = async (entries: FileSystemEntry[]): Promise<File[]> => {
+  const files: File[] = [];
+  const visit = async (entry: FileSystemEntry): Promise<void> => {
+    if (entry.isFile) {
+      files.push(await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, reject)));
+      return;
+    }
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    // readEntries hands back a few hundred at a time and [] once it is done.
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+      if (batch.length === 0) return;
+      for (const child of batch) await visit(child);
+    }
+  };
+  for (const entry of entries) await visit(entry);
+  return files;
+};
+
 const UploadPage: React.FC = () => {
   const navigate = useNavigate();
   // Running inference requires an account, so any upload action while signed
   // out opens the auth popup instead of proceeding. It opens on sign-in: most
   // people hitting this already have an account, and the popup switches to
   // sign-up in one click for the ones who don't.
-  const { isAuthenticated, loading: authLoading, promptAuth, user, refreshUsage, redeemAdminCoupon } = useAuth();
+  const { isAuthenticated, loading: authLoading, promptAuth, user, usage, refreshUsage, redeemAdminCoupon } = useAuth();
   // Upload work belongs to the account that started it. authUserIdRef is what
   // the async upload code checks (it outlives the render that started it), and
   // authEpochRef moves on every sign-in, sign-out or account switch so work
@@ -740,6 +833,8 @@ const UploadPage: React.FC = () => {
   // A pick that was refused before anything was added (wrong file type, no DICOM
   // slices, Run with nothing selected). Shown inline as an error, not in a browser dialog.
   const [pickError, setPickError] = useState<string>("");
+  // Bumped by each pick, so a slow slice count never notes an older folder.
+  const folderNoteSeq = useRef(0);
   const [sessionId, setSessionId] = useState<string>("");
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [inferenceCompleted, setInferenceCompleted] = useState<boolean>(false);
@@ -853,6 +948,58 @@ const UploadPage: React.FC = () => {
   }, [renamingId]);
   // Which batch's "View details" popup is open (null = none).
   const [detailsBatchId, setDetailsBatchId] = useState<string | null>(null);
+  // What the popup's Download buttons last did, shown inside the popup.
+  const [detailsNote, setDetailsNote] = useState("");
+  // Bumped whenever the popup opens or closes. A Download keeps reporting
+  // after the popup is closed, and its late lines must not land in the next
+  // popup, so each report remembers which opening it belongs to. Once that
+  // popup is gone the lines go to the page's notice instead, so a failure
+  // is not lost.
+  const detailsOpeningRef = useRef(0);
+  useEffect(() => {
+    detailsOpeningRef.current += 1;
+    setDetailsNote("");
+  }, [detailsBatchId]);
+  const sayInDetails = (): ((text: string) => void) => {
+    const opening = detailsOpeningRef.current;
+    return (text) => {
+      if (detailsOpeningRef.current === opening) setDetailsNote(text);
+      else setMessage(text);
+    };
+  };
+  // What a Completed uploads Download last did, shown under that section's
+  // hint: the page's own notice is up by the dropzone, far out of sight from
+  // a row pressed further down. busyDownloads holds the rows (a scan's
+  // session id, or a batch id) with a Download still going, so a second
+  // press does not start a second zip.
+  const [listNote, setListNote] = useState("");
+  const [busyDownloads, setBusyDownloads] = useState<string[]>([]);
+  const busyDownloadsRef = useRef<string[]>([]);
+  // The note clears when another row's Download starts, when the section's
+  // rows change, and a few seconds after a download that went through; what
+  // went wrong stays until one of the first two.
+  const listNoteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const clearListNote = () => {
+    clearTimeout(listNoteTimerRef.current);
+    setListNote("");
+  };
+  useEffect(() => () => clearTimeout(listNoteTimerRef.current), []);
+  const downloadFromList = async (key: string, run: (say: (text: string) => void) => Promise<unknown>) => {
+    if (busyDownloadsRef.current.includes(key)) return;
+    busyDownloadsRef.current = [...busyDownloadsRef.current, key];
+    setBusyDownloads(busyDownloadsRef.current);
+    clearListNote();
+    let last = "";
+    try {
+      await run((text) => { last = text; setListNote(text); });
+      if (/^(Download started|Downloaded \d+ scans?\.)/.test(last)) {
+        listNoteTimerRef.current = setTimeout(() => setListNote(""), 8000);
+      }
+    } finally {
+      busyDownloadsRef.current = busyDownloadsRef.current.filter((k) => k !== key);
+      setBusyDownloads(busyDownloadsRef.current);
+    }
+  };
   // Focus lands here when the popup closes and its opener is gone.
   const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   // Sub-state of each Active card: "waiting" | "uploading" | "elsewhere" (another
@@ -869,27 +1016,55 @@ const UploadPage: React.FC = () => {
   );
   // When each session's phase first became "running" - the ETA estimate needs
   // this instead of u.timestamp (scan creation) because queue wait time isn't
-  // inference time and shouldn't count against the estimate. A plain ref, not
-  // state: it's read once a second by the ticking clock below rather than
-  // needing its own re-render.
+  // inference time and shouldn't count against the estimate. The poll
+  // callback checks this ref; render reads the etaInputs copy below.
   const runningStartedAtRef = useRef<Map<string, number>>(new Map());
   // File size per in-flight session, for the ETA formula's size scaling and
   // for asking the server for a real historical estimate (see
-  // fetchDurationEstimate) - a plain ref since it's write-once at run start
-  // and only ever read by the ETA display, no re-render needed on its own.
+  // fetchDurationEstimate). Write-once at run start; render reads the
+  // etaInputs copy below.
   const sessionFileSizeRef = useRef<Map<string, number>>(new Map());
+  // What the ETA line renders from: a copy of the two refs above, taken when
+  // a session starts running, so render never reads a ref. Written once per
+  // run and dropped by clearEtaTracking, so it costs one render each way.
+  const [etaInputs, setEtaInputs] = useState<
+    Record<string, { startedAt: number; sizeBytes?: number }>
+  >({});
   // Re-renders ProcessingCard once a second while anything is running, purely
   // so the "~N min left" text advances - nothing else here depends on it.
-  // Gated on there actually being a running scan: an unconditional 1s re-render
-  // of the whole page while idle is wasted work, and it kept the dropzone in a
-  // constant reflow (see the transition note in UploadPage.css).
+  // Gated on a scan actually being in the "running" phase (the only one that
+  // shows an estimate): an unconditional 1s re-render of the whole page while
+  // idle is wasted work, and it kept the dropzone in a constant reflow (see
+  // the transition note in UploadPage.css). A leftover "Processing" entry
+  // this tab isn't driving (signed out, or queued) doesn't count.
   const [, setEtaTick] = useState(0);
-  const anyRunning = recentUploads.some((u) => u.status === "Processing");
+  const anyRunning = Object.values(sessionPhases).includes("running");
   useEffect(() => {
     if (!anyRunning) return;
     const timer = setInterval(() => setEtaTick((t) => t + 1), 1000);
     return () => clearInterval(timer);
   }, [anyRunning]);
+
+  // The "Just now" / "3 mins ago" on a scan row (and in the batch details
+  // dialog) is worked out at render time, and with nothing running nothing
+  // renders, so it would stay as it was however long the tab sits open. A
+  // slow tick, plus one when the tab comes back to the front (timers are
+  // throttled while it is hidden), keeps it in step with the History list.
+  const [, setMinuteTick] = useState(0);
+  const hasRecentRows = ownRecentUploads.length > 0;
+  useEffect(() => {
+    if (!hasRecentRows) return;
+    const bump = () => setMinuteTick((t) => t + 1);
+    const timer = setInterval(bump, 60_000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") bump();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [hasRecentRows]);
 
   // Picks the model picker's real default once the account's plan is known:
   // ePAI for a plan that actually includes it, LesionSegmenter (the one real
@@ -904,8 +1079,15 @@ const UploadPage: React.FC = () => {
     if (modelTouchedRef.current || !isAuthenticated) return;
     modelTouchedRef.current = true;
     setSelectedModel(isModelLocked(plan, "ePAI") ? "LesionSegmenter" : "ePAI");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, plan]);
+  // A guest can pick any model card (the lock only shows once signed in), and
+  // that choice survives signing in. Once the account's plan is known, a model
+  // it locks gives way to the plan's default, so the picker never shows, and
+  // Run never uploads for, a model the server would refuse.
+  useEffect(() => {
+    if (!isAuthenticated || !isModelLocked(plan, selectedModel)) return;
+    setSelectedModel(isModelLocked(plan, "ePAI") ? "LesionSegmenter" : "ePAI");
+  }, [isAuthenticated, plan, selectedModel]);
   // Drives the "safe to close this tab" line. `active` = bytes still going up
   // (the tab is needed); `eta` = seconds until that stops, or null while
   // throughput is still being measured.
@@ -1087,6 +1269,62 @@ const UploadPage: React.FC = () => {
   const allowedExtensions = [".nii", ".nii.gz"];
 
   /* ── File handling ── */
+  // Shared by Select NIfTI, a drop of NIfTI files and a folder of them: adds
+  // the usable files and says why any other was left out. Returns that message.
+  const addNiftiFiles = (files: File[]) => {
+    folderNoteSeq.current++;
+    const usable: File[] = [];
+    const reasons: string[] = [];
+    for (const f of files) {
+      const reason = unusableNiftiReason(f, CHUNK_SIZE);
+      if (reason) reasons.push(reason);
+      else usable.push(f);
+    }
+    if (usable.length > 0) {
+      clearOldMessage();
+      track("upload_files_selected");
+      setSelectedItems((prev) => [
+        ...prev,
+        ...usable.map((f) => ({
+          id: crypto.randomUUID(),
+          kind: "nifti" as const,
+          file: f,
+        })),
+      ]);
+    }
+    const left =
+      reasons.length === 0
+        ? ""
+        : reasons.length === 1
+          ? reasons[0]
+          : `${reasons[0]} ${reasons.length - 1} other ${reasons.length === 2 ? "file was" : "files were"} also left out.`;
+    setPickError(left);
+    return left;
+  };
+
+  // A folder holds either NIfTI scans or DICOM slices. NIfTI files in it win:
+  // looksLikeDicom would otherwise take an extensionless README as a slice.
+  // Hidden files (macOS "._scan.nii.gz" sidecars) are not scans, so they never
+  // count as NIfTI. A DICOM series set aside for a NIfTI file is said so, not dropped.
+  const addFolderFiles = (files: File[]) => {
+    const nifti = files.filter(
+      (file) => !file.name.startsWith(".") && allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
+    );
+    if (nifti.length === 0) {
+      addDicomFiles(files);
+      return;
+    }
+    const shown = addNiftiFiles(nifti);
+    // Two or more real slices make a series; a README and a LICENSE do not. The
+    // count reads the files, so the note follows unless the message has moved on.
+    const seq = ++folderNoteSeq.current;
+    void countDicomSlices(files).then((slices) => {
+      if (slices < 2 || seq !== folderNoteSeq.current) return;
+      const note = `The ${slices} DICOM slices in that folder were left out because it also holds a NIfTI file. To view the slices, select a folder with only the slices.`;
+      setPickError((prev) => (prev === shown ? [shown, note].filter(Boolean).join(" ") : prev));
+    });
+  };
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!ensureAccount()) { e.target.value = ""; return; }
     if (!e.target.files) return;
@@ -1103,17 +1341,7 @@ const UploadPage: React.FC = () => {
       setPickError("Please select .nii or .nii.gz files only.");
       return;
     }
-    setPickError("");
-    clearOldMessage();
-    track("upload_files_selected");
-    setSelectedItems((prev) => [
-      ...prev,
-      ...filteredFiles.map((f) => ({
-        id: crypto.randomUUID(),
-        kind: "nifti" as const,
-        file: f,
-      })),
-    ]);
+    addNiftiFiles(filteredFiles);
   };
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -1126,20 +1354,26 @@ const UploadPage: React.FC = () => {
       allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext)),
     );
     if (filteredFiles.length === 0) {
+      // A DICOM drop: loose slices arrive as files, a folder as one directory
+      // entry that has to be walked (entries are only readable during the drop).
+      const entries = Array.from(e.dataTransfer.items ?? [])
+        .map((item) => item.webkitGetAsEntry?.() ?? null)
+        .filter((entry): entry is FileSystemEntry => entry !== null);
+      const dropped = Array.from(e.dataTransfer.files);
+      if (entries.some((entry) => entry.isDirectory)) {
+        readDroppedEntries(entries)
+          .then(addFolderFiles)
+          .catch(() => setPickError("Couldn't read that DICOM folder. Use Select DICOM, then choose the folder."));
+        return;
+      }
+      if (dropped.some(looksLikeDicom)) {
+        addDicomFiles(dropped);
+        return;
+      }
       setPickError("Drop .nii or .nii.gz files, or use Select DICOM for a DICOM folder.");
       return;
     }
-    setPickError("");
-    clearOldMessage();
-    track("upload_files_selected");
-    setSelectedItems((prev) => [
-      ...prev,
-      ...filteredFiles.map((f) => ({
-        id: crypto.randomUUID(),
-        kind: "nifti" as const,
-        file: f,
-      })),
-    ]);
+    addNiftiFiles(filteredFiles);
   }, [isAuthenticated, authLoading, promptAuth]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -1224,6 +1458,7 @@ const UploadPage: React.FC = () => {
   // gives us File objects. Folder support differs among browsers, but the upload
   // pipeline itself must not.
   const addDicomFiles = (files: File[]) => {
+    folderNoteSeq.current++;
     const candidates = files.filter(looksLikeDicom);
     if (!candidates.length) {
       setPickError(
@@ -1257,7 +1492,7 @@ const UploadPage: React.FC = () => {
         // with Window as their receiver. Calling the detached function throws
         // "Illegal invocation" in Chromium, making this button appear inert.
         const directory = await picker.call(window);
-        addDicomFiles(await readDirectoryFiles(directory));
+        addFolderFiles(await readDirectoryFiles(directory));
       } catch (err) {
         // Cancelling the native chooser is a normal no-op, not an upload error.
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -1288,7 +1523,7 @@ const UploadPage: React.FC = () => {
     }
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-picking the same folder later
-    addDicomFiles(files);
+    addFolderFiles(files);
   };
 
   /* ── Inference polling (one timer per session) ── */
@@ -1335,6 +1570,12 @@ const UploadPage: React.FC = () => {
   const clearEtaTracking = (sid: string) => {
     runningStartedAtRef.current.delete(sid);
     sessionFileSizeRef.current.delete(sid);
+    forgetScanTiming(sid);
+    setEtaInputs((prev) => {
+      if (!(sid in prev)) return prev;
+      const { [sid]: _dropped, ...rest } = prev;
+      return rest;
+    });
     setDurationEstimates((prev) => {
       if (!(sid in prev)) return prev;
       const { [sid]: _dropped, ...rest } = prev;
@@ -1419,6 +1660,9 @@ const UploadPage: React.FC = () => {
     pollGenerationRef.current.set(sid, generation);
     let notFoundCount = 0;
     let jobWasSeen = false;
+    // This poller watched the run wait in the queue, so the moment it turns
+    // to "running" is a start it saw, not one it came in the middle of.
+    let sawQueued = false;
     const poll = async () => {
       try {
         const res = await fetch(`${API_BASE}/api/inference-status/${sid}`, {
@@ -1503,9 +1747,23 @@ const UploadPage: React.FC = () => {
           clearEtaTracking(sid);
           setRecentUploads(updateRecentUploadStatus(sid, "Cancelled"));
         } else if (status === "queued" || status === "running") {
+          if (status === "queued") sawQueued = true;
           if (status === "running" && !runningStartedAtRef.current.has(sid)) {
-            runningStartedAtRef.current.set(sid, Date.now());
-            fetchDurationEstimate(sid, model, sessionFileSizeRef.current.get(sid));
+            // The server does not say when a run began. A run this page
+            // started, or watched leave the queue, began just now; one it
+            // joined while running began when the page that saw it said so
+            // (saved below), and with no such record there is no honest
+            // start to count from, so no estimate is drawn.
+            const saved = loadScanTiming(sid);
+            const sizeBytes = sessionFileSizeRef.current.get(sid) ?? saved?.sizeBytes;
+            const sawStart = sessionFileSizeRef.current.has(sid) || sawQueued;
+            const startedAt = sawStart ? Date.now() : saved?.startedAt;
+            runningStartedAtRef.current.set(sid, startedAt ?? Date.now());
+            if (startedAt !== undefined) {
+              if (sawStart) saveScanTiming(sid, { startedAt, sizeBytes });
+              setEtaInputs((prev) => ({ ...prev, [sid]: { startedAt, sizeBytes } }));
+            }
+            fetchDurationEstimate(sid, model, sizeBytes);
           }
           setPhase(sid, status);
           setQueuePosition(
@@ -1645,12 +1903,15 @@ const UploadPage: React.FC = () => {
         remaining += bytes;
       });
       const active = uploadRemainingRef.current.size > 0;
-      setCloseInfo({
-        active,
-        // Below ~1 KB/s the estimate is noise (or the connection stalled) -
-        // show "uploading" with no number rather than an absurd one.
-        eta: active && rate > 1024 ? Math.max(1, Math.round(remaining / rate)) : null,
-      });
+      // Below ~1 KB/s the estimate is noise (or the connection stalled) -
+      // show "uploading" with no number rather than an absurd one.
+      const eta = active && rate > 1024 ? Math.max(1, Math.round(remaining / rate)) : null;
+      // Hand back the same object when nothing changed so React skips the
+      // render: a fresh {active:false, eta:null} every second re-rendered
+      // this whole page once a second while it sat idle.
+      setCloseInfo((prev) =>
+        prev.active === active && prev.eta === eta ? prev : { active, eta },
+      );
     }, 1000);
     return () => clearInterval(timer);
   }, []);
@@ -1932,7 +2193,7 @@ const UploadPage: React.FC = () => {
       // Copy matters: the file chip is still selected and Run falls back to a
       // fresh resumable upload, so a retry really is one click away.
       const reason = uploadFailureReason(err);
-      const next = err instanceof TooLargeError ? "" : " Press Run to try again.";
+      const next = err instanceof TooLargeError || isUnusableFileReply(err) ? "" : " Press Run to try again.";
       onFailure?.(`${file.name} could not be uploaded. ${reason}${next}`);
       return null;
     } finally {
@@ -2238,6 +2499,7 @@ const UploadPage: React.FC = () => {
       // foreground one.
       if (err instanceof ForeignSessionError) setMessage(FOREIGN_SESSION_MESSAGE);
       else if (err instanceof TooLargeError) setMessage(`${filename} could not be uploaded. ${err.message}`);
+      else if (isUnusableFileReply(err)) setMessage(`${filename} could not be uploaded. ${UNUSABLE_FILE_MESSAGE}`);
       else
         setMessage(`${filename} could not be uploaded. ${uploadFailureReason(err)} Select the file again and press Run.`);
     } finally {
@@ -2624,6 +2886,22 @@ const UploadPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The daily scan allowance, when usage already says it is spent and the
+  // window has not reset. Null when there is room, or when usage is not loaded
+  // yet (the server's 402 at dispatch stays the fallback then).
+  // `requested` is how many files are about to run: a batch bigger than what
+  // is left would only have its first scans accepted, after every file had been
+  // sent, so it is blocked up front like a spent allowance is.
+  const dailyScansBlock = (requested = 1): UpgradeBlock | null => {
+    const scans = usage?.scans;
+    if (!scans || scans.limit == null || scans.used + requested <= scans.limit) return null;
+    if (!scans.resets_at || !(Date.parse(scans.resets_at) > Date.now())) return null;
+    return {
+      reason: "daily_scans", limit: scans.limit, used: scans.used, resetsAt: scans.resets_at,
+      requested, plan: plan as PlanId,
+    };
+  };
+
   // Declared after the account-boundary effect on purpose: after a switch of
   // account, that effect forgets the old account's pre-uploads first and this
   // one then starts fresh ones under the new account.
@@ -2657,9 +2935,11 @@ const UploadPage: React.FC = () => {
     const slots = maxConcurrentScans(plan as PlanId);
     const running = ownRecentUploads.filter((u) => u.status === "Processing").length;
     if (selectedItems.length + running > slots) return;
+    // Today's scans already spent: the server would 402 the run at dispatch.
+    if (dailyScansBlock(selectedItems.length)) return;
     selectedItems.forEach(preStartUpload);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authUserId, selectedModel, selectedItems, plan, ownRecentUploads]);
+  }, [authUserId, selectedModel, selectedItems, plan, ownRecentUploads, usage]);
 
   // Leaving the page drops its selection, so a pre-upload nobody pressed Run
   // for can never be used again: stop it and have the server delete what
@@ -2710,6 +2990,7 @@ const UploadPage: React.FC = () => {
         ? item.files.reduce((sum, f) => sum + f.size, 0)
         : item.file.size;
     sessionFileSizeRef.current.set(sid, fileSizeBytes);
+    saveScanTiming(sid, { sizeBytes: fileSizeBytes });
 
     track("upload_start_inference");
     setRecentUploads(
@@ -2876,6 +3157,14 @@ const UploadPage: React.FC = () => {
       return;
     }
 
+    // Before anything uploads: the server would refuse a locked model with a
+    // 402 only after the whole CT had been sent.
+    if (modelLocked(selectedModel)) {
+      const opt = MODEL_OPTIONS.find((m) => m.id === selectedModel);
+      setUpgradeBlock({ reason: "model_locked", feature: opt?.label ?? selectedModel, plan: plan as PlanId });
+      return;
+    }
+
     // Caught here rather than per-file, so a plan that runs one scan at a time
     // says so before anything uploads instead of accepting the first and
     // rejecting the rest one 402 at a time.
@@ -2883,10 +3172,14 @@ const UploadPage: React.FC = () => {
     const running = ownRecentUploads.filter((u) => u.status === "Processing").length;
     if (items.length + running > slots) {
       setUpgradeBlock({
-        reason: "concurrent_scans", limit: slots, used: running, plan: plan as PlanId,
+        reason: "concurrent_scans", limit: slots, used: running, requested: items.length, plan: plan as PlanId,
       });
       return;
     }
+
+    // Same for a daily allowance already spent: say so before the CT is sent.
+    const spent = dailyScansBlock(items.length);
+    if (spent) { setUpgradeBlock(spent); return; }
 
     const model = selectedModel;
     setInferenceCompleted(false);
@@ -2916,9 +3209,16 @@ const UploadPage: React.FC = () => {
   };
 
   // Download one completed scan's result zip. Parameterised so it works from a
-  // completed card and from inside the batch-details modal.
-  const downloadResult = async (sid: string) => {
-    setMessage("Preparing download...");
+  // completed card and from inside the batch-details modal. Returns whether
+  // the download actually started, so downloadBatch can report honestly.
+  // `say` is where the progress and error lines go: the page's notice by
+  // default, the popup's own line when called from inside it.
+  const downloadResult = async (
+    sid: string,
+    say: (text: string) => void = setMessage,
+    onSignedOut?: () => void,
+  ): Promise<boolean> => {
+    say("Preparing download...");
     try {
       const statusRes = await fetch(`${API_BASE}/api/inference-status/${sid}`, {
         credentials: "include",
@@ -2930,10 +3230,10 @@ const UploadPage: React.FC = () => {
           statusData.error || statusData.status || "Status check failed",
         );
       if (statusData.status !== "completed") {
-        setMessage(
+        say(
           `Status: ${statusData.status || "unknown"}. Please wait until completed.`,
         );
-        return;
+        return false;
       }
       stopPolling(sid);
 
@@ -2957,31 +3257,63 @@ const UploadPage: React.FC = () => {
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(objectUrl);
-      setMessage(
+      say(
         "Download started: zip includes combined_labels.nii.gz and output.csv",
       );
+      return true;
     } catch (err) {
       console.error(err);
       if (err instanceof SignedOutError) {
-        setMessage("Your session expired. Sign in and download again.");
+        say("Your session expired. Sign in and download again.");
         promptAuth();
-        return;
+        onSignedOut?.();
+        return false;
       }
       if (err instanceof ResultNotReadyError) {
-        setMessage("The results aren't ready yet. Try again in a minute.");
-        return;
+        say("The results aren't ready yet. Try again in a minute.");
+        return false;
       }
-      setMessage(`Download failed. ${serverFailureReason(err, "The result isn't available.")}`);
+      say(`Download failed. ${serverFailureReason(err, "The result isn't available.")}`);
+      return false;
     }
   };
 
-  // Download a whole batch as one archive. In this mock there's no server-side
-  // bundling endpoint yet, so it surfaces intent; wire to a real batch-zip
-  // endpoint when the backend supports it.
-  const downloadBatch = (uploads: RecentUpload[]) => {
+  // Download a whole batch: one result zip per completed scan, sequentially
+  // through the same per-scan path the single Download button uses. Interim
+  // until a server-side batch-zip endpoint exists (there is none today).
+  const downloadBatch = async (uploads: RecentUpload[], say: (text: string) => void = setMessage) => {
     const completed = uploads.filter(u => u.status === "Completed");
-    if (completed.length === 0) { setMessage("No completed scans to download yet."); return; }
-    setMessage(`Downloading ${completed.length} scan${completed.length === 1 ? "" : "s"} as a batch…`);
+    if (completed.length === 0) { say("No scans in this batch finished, so there is nothing to download."); return; }
+    say(`Downloading ${completed.length} scan${completed.length === 1 ? "" : "s"}...`);
+    let ok = 0;
+    // A lapsed sign-in fails every scan the same way: ask once, then stop.
+    let signedOut = false;
+    // A scan whose own Download is already running is that button's to finish,
+    // so it is left out of this run rather than saved twice.
+    let attempted = 0;
+    for (const u of completed) {
+      if (busyDownloadsRef.current.includes(u.sessionId)) continue;
+      busyDownloadsRef.current = [...busyDownloadsRef.current, u.sessionId];
+      setBusyDownloads(busyDownloadsRef.current);
+      attempted++;
+      try {
+        if (await downloadResult(u.sessionId, say, () => { signedOut = true; })) ok++;
+      } finally {
+        busyDownloadsRef.current = busyDownloadsRef.current.filter((k) => k !== u.sessionId);
+        setBusyDownloads(busyDownloadsRef.current);
+      }
+      if (signedOut) break;
+    }
+    // downloadResult already said the sign-in lapsed and opened the prompt.
+    if (signedOut) return;
+    if (attempted === 0) return;
+    say(
+      ok === attempted
+        ? `Downloaded ${ok} scan${ok === 1 ? "" : "s"}.`
+        : attempted === 1
+          ? "The download failed. Use Download on the scan to try again."
+          : `Downloaded ${ok} of ${attempted} scans. The rest failed, use each scan's own Download button to retry.`,
+    );
   };
 
   const handleRunEpaiOnReconstruction = async () => {
@@ -2989,42 +3321,32 @@ const UploadPage: React.FC = () => {
       setMessage("No completed reconstruction session to run ePAI on.");
       return;
     }
-    const newSessionId = crypto.randomUUID();
     setInferenceCompleted(false);
     setMessage("Starting ePAI inference on reconstructed CT...");
 
-    const formData = new FormData();
-    formData.append("session_id", newSessionId);
-    formData.append("model_name", "ePAI");
-    formData.append("source_reconstruction_session_id", sessionId);
-
     try {
-      const res = await fetch(`${API_BASE}/api/run-epai-inference`, {
-        method: "POST",
-        body: formData,
+      const started = await startEpaiOnReconstruction({
+        sourceSessionId: sessionId,
+        newSessionId: crypto.randomUUID(),
+        // Whose run this is is read when it starts, not when the reply
+        // arrives after a sign-out or an account switch.
+        account: () => ({
+          ownerId: authUserIdRef.current ?? undefined,
+          epoch: authEpochRef.current,
+        }),
+        parseResponse: parseApiResponse,
       });
-      const data = await parseApiResponse(res);
-      if (!res.ok)
-        throw new Error(
-          data.error || "Failed to start ePAI inference on reconstruction",
-        );
-
-      const sid = data.session_id || newSessionId;
+      // The run exists server-side either way, so it is listed under the
+      // account that started it.
+      setRecentUploads(addRecentUpload(started.entry));
+      // A different account is looking at the page now: it neither adopts this
+      // run as its current scan nor polls a session it can't read.
+      if (started.superseded) return;
+      const sid = started.sessionId;
       setSessionId(sid);
       setSelectedModel("ePAI" as const);
-      setMessage(`ePAI inference started on reconstructed CT. Session: ${sid}`);
-      if (sid) {
-        setRecentUploads(
-          addRecentUpload({
-            sessionId: sid,
-            label: "ePAI on reconstruction",
-            model: "ePAI",
-            status: "Processing",
-            timestamp: Date.now(),
-          }),
-        );
-        startInferencePolling(sid, "ePAI");
-      }
+      setMessage("ePAI inference started on reconstructed CT.");
+      startInferencePolling(sid, "ePAI");
     } catch (err) {
       console.error(err);
       setMessage(
@@ -3073,10 +3395,12 @@ const UploadPage: React.FC = () => {
   // batch members included (the last one to finish wins) - so this only
   // counts as "a single scan just finished" when that session isn't part of
   // a batch, letting the batch branch above take it instead.
+  // The flags are loose and outlive the scan they were set for (a second run's
+  // dispatch sets sessionId without clearing inferenceCompleted), so the card
+  // also needs that scan itself to be Completed, not queued, running or cancelled.
+  const shownUpload = ownRecentUploads.find((u) => u.sessionId === sessionId);
   const singleCompletedVisible =
-    inferenceCompleted &&
-    !!sessionId &&
-    !recentUploads.find((u) => u.sessionId === sessionId)?.batchId;
+    inferenceCompleted && shownUpload?.status === "Completed" && !shownUpload.batchId;
 
   // Completed Uploads (below) lists everything finished-and-unviewed - EXCEPT
   // whatever the drop zone itself is currently showing as just-completed, so
@@ -3090,7 +3414,22 @@ const UploadPage: React.FC = () => {
       return true;
     }),
   );
+  // The History link counts scans, as the History page lists them: a batch is
+  // one group here but one row per scan there.
   const olderScans = older.reduce((n, g) => n + (g.kind === "batch" ? g.uploads.length : 1), 0);
+
+  // A download line belongs to the rows it was pressed on: drop it when the
+  // section's rows change or the section goes away.
+  const finishedKey = finished.map((g) => (g.kind === "single" ? g.upload.sessionId : g.batchId)).join("|");
+  useEffect(() => {
+    clearListNote();
+    // clearListNote only touches a ref and a setter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finishedKey]);
+
+  // Whether the drop zone is showing a run's progress or result; true whatever
+  // the selection is, so picking another file never hides it.
+  const hasStatusCards = inFlight.length > 0 || singleCompletedVisible || !!activeBatchCompleted;
 
   // An in-flight scan this tab isn't driving because nobody is signed in (a
   // guest never resumes anything). Says so instead of claiming it's running.
@@ -3148,12 +3487,12 @@ const UploadPage: React.FC = () => {
             left based on how this model's runs typically take. Only shown
             once actually running: during "queued" there's no dispatch-time
             signal to build an estimate from. */}
-        {phase === "running" && !paused && (
+        {phase === "running" && !paused && etaInputs[u.sessionId] && (
           <div className="upload-row__eta">
             {estimateRemaining(
               u.model || "",
-              runningStartedAtRef.current.get(u.sessionId) ?? Date.now(),
-              sessionFileSizeRef.current.get(u.sessionId),
+              etaInputs[u.sessionId].startedAt,
+              etaInputs[u.sessionId].sizeBytes,
               durationEstimates[u.sessionId],
             )}
           </div>
@@ -3168,6 +3507,10 @@ const UploadPage: React.FC = () => {
         if (g.kind === "single") return processingCard(g.upload);
         const running = g.uploads.filter(u => u.status === "Processing");
         const done = g.uploads.filter(u => u.status === "Completed").length;
+        // Failed/Cancelled scans stay in the total so the counter's
+        // denominator never shrinks mid-batch.
+        const failed = g.uploads.filter(u => u.status === "Failed").length;
+        const cancelled = g.uploads.filter(u => u.status === "Cancelled").length;
         const phases = running.map(u => sessionPhases[u.sessionId]);
         const paused = running.length > 0 ? pausedLabel() : null;
         const statusLabel =
@@ -3177,7 +3520,7 @@ const UploadPage: React.FC = () => {
           phases.some(p => p === "queued") ? "Queued for GPU" : "Uploading…");
         return (
           <ProcessingSummaryBar key={g.batchId} title={g.label} buttonName={batchNames.get(g.batchId)} running={running.length}
-            done={done} statusLabel={statusLabel}
+            done={done} failed={failed} cancelled={cancelled} statusLabel={statusLabel}
             closeNote={closeNote} closeReady={!closeInfo.active}
             onViewDetails={() => { track("upload_open_batch_details"); setDetailsBatchId(g.batchId); }}
             onCancelAll={() => {
@@ -3190,6 +3533,12 @@ const UploadPage: React.FC = () => {
         );
       })}
     </div>
+  );
+
+  // Which buttons to offer follows the scan that finished, not the model
+  // picked since: a reconstruction and a segmentation open at different routes.
+  const finishedIsReconstruction = Boolean(
+    ownRecentUploads.find((u) => u.sessionId === sessionId)?.isReconstruction,
   );
 
   // ── A single scan's finished state, shown in the SAME drop-zone slot that
@@ -3209,7 +3558,7 @@ const UploadPage: React.FC = () => {
         <span>Inference complete</span>
       </div>
       <div className="result-btns">
-        {selectedModel === "OpenVAE" ? (
+        {finishedIsReconstruction ? (
           <>
             <button
               className="result-btn"
@@ -3223,7 +3572,12 @@ const UploadPage: React.FC = () => {
             <button className="result-btn" onClick={handleRunEpaiOnReconstruction}>
               Run ePAI on result
             </button>
-            <button className="result-btn" onClick={() => downloadResult(sessionId)}>
+            <button
+              className="result-btn"
+              aria-busy={busyDownloads.includes(sessionId) || undefined}
+              style={busyDownloads.includes(sessionId) ? { opacity: 0.6, cursor: "progress" } : undefined}
+              onClick={() => downloadFromList(sessionId, () => downloadResult(sessionId))}
+            >
               Download
             </button>
           </>
@@ -3238,7 +3592,12 @@ const UploadPage: React.FC = () => {
             >
               View visualization
             </button>
-            <button className="result-btn" onClick={() => downloadResult(sessionId)}>
+            <button
+              className="result-btn"
+              aria-busy={busyDownloads.includes(sessionId) || undefined}
+              style={busyDownloads.includes(sessionId) ? { opacity: 0.6, cursor: "progress" } : undefined}
+              onClick={() => downloadFromList(sessionId, () => downloadResult(sessionId))}
+            >
               Download results
             </button>
           </>
@@ -3258,10 +3617,16 @@ const UploadPage: React.FC = () => {
         buttonName={batchNames.get(activeBatchCompleted.batchId)}
         running={0}
         done={activeBatchCompleted.uploads.filter((u) => u.status === "Completed").length}
+        // Failed and cancelled scans stay in the total (e.g. 3/5, not 3/3); the
+        // bar itself appends "· N failed" and "· N cancelled", so the label doesn't repeat them.
+        failed={activeBatchCompleted.uploads.filter((u) => u.status === "Failed").length}
+        cancelled={activeBatchCompleted.uploads.filter((u) => u.status === "Cancelled").length}
+        // Nothing finished: the bar's own "· N failed" or "· N cancelled" says
+        // which, so the label must not say it a second time.
         statusLabel={
-          activeBatchCompleted.uploads.every((u) => u.status === "Completed")
-            ? "Inference complete"
-            : `Completed - ${activeBatchCompleted.uploads.filter((u) => u.status === "Failed" || u.status === "Cancelled").length} failed`
+          activeBatchCompleted.uploads.some((u) => u.status === "Completed")
+            ? batchFinishedLabel(activeBatchCompleted.uploads)
+            : "No scans finished"
         }
         onViewDetails={() => {
           track("upload_open_batch_details");
@@ -3312,7 +3677,11 @@ const UploadPage: React.FC = () => {
           {/* ── Drop zone ── */}
           <div
             className={`dropzone${isDragOver ? " drag-over" : ""}${allUploadsDone ? " dropzone--all-done" : ""}`}
-            onClick={() => {
+            onClick={(e) => {
+              // The hidden pickers live inside this box, so a programmatic
+              // input.click() (Select DICOM) bubbles up here. Ignore it, or
+              // the NIfTI chooser opens over the DICOM one.
+              if ((e.target as HTMLElement).tagName === "INPUT") return;
               // While a run is in-flight, or just finished and still showing
               // its result here, this box is showing status, not the picker -
               // a stray click on the card's own padding shouldn't pop the
@@ -3365,19 +3734,44 @@ const UploadPage: React.FC = () => {
               style={{ display: "none" }}
               onChange={handleDicomInferenceSelect}
             />
-            {selectedItems.length === 0 && inFlight.length > 0 ? (
-              // A run is already going - this box stays the single place to
-              // watch it instead of reverting to the empty picker while a
-              // separate card appears elsewhere on the page.
-              inFlightCards
-            ) : selectedItems.length === 0 && singleCompletedVisible ? (
-              // The run that WAS showing progress in this box just finished -
-              // it keeps the same slot rather than the box going empty while a
-              // result panel pops up elsewhere.
-              singleCompletedCard
-            ) : selectedItems.length === 0 && activeBatchCompleted ? (
-              batchCompletedCard
-            ) : selectedItems.length === 0 ? (
+            {/* Always mounted, so the batch bar swapping for its finished card
+                still changes this text instead of mounting new text. aria-live,
+                not role=status, so the page's single-scan status card stays the
+                only status role. */}
+            <span className="sr-only" aria-live="polite" aria-atomic="true" data-testid="batch-announcement">
+              {activeBatchCompleted
+                ? batchAnnouncement({
+                    title: activeBatchCompleted.label,
+                    running: 0,
+                    done: activeBatchCompleted.uploads.filter((u) => u.status === "Completed").length,
+                    failed: activeBatchCompleted.uploads.filter((u) => u.status === "Failed").length,
+                    cancelled: activeBatchCompleted.uploads.filter((u) => u.status === "Cancelled").length,
+                  })
+                : ""}
+            </span>
+            {hasStatusCards && (
+              // A run that is going, or one that just finished and is still
+              // showing its result, stays in this box - also while another file
+              // is picked, so its progress, Cancel, View and Download never
+              // vanish behind the new chip (the Completed uploads list below
+              // leaves exactly these scans out, see `finished`).
+              <div
+                className="dropzone-status"
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "8px",
+                  width: "100%",
+                  marginBottom: selectedItems.length > 0 ? "12px" : undefined,
+                }}
+              >
+                {inFlightCards}
+                {singleCompletedCard}
+                {batchCompletedCard}
+              </div>
+            )}
+            {selectedItems.length === 0 ? (
+              hasStatusCards ? null : (
               <>
                 <svg
                   className="dropzone-icon"
@@ -3394,6 +3788,7 @@ const UploadPage: React.FC = () => {
                 </svg>
                 <div className="dropzone-text">Click or drag to upload</div>
               </>
+              )
             ) : (
               // ── Selected items: NIfTI files + DICOM series, each individually
               // previewable ── lives inside the dropzone itself now, so the file's
@@ -3408,10 +3803,10 @@ const UploadPage: React.FC = () => {
                 {selectedItems.map((item) => {
                   const name =
                     item.kind === "dicom" ? item.label : item.file.name;
-                  const subtext =
+                  const subParts =
                     item.kind === "dicom"
-                      ? `DICOM series · ${item.files.length} slice${item.files.length === 1 ? "" : "s"}`
-                      : `NIfTI · ${formatBytes(item.file.size)}`;
+                      ? ["DICOM series", `${item.files.length} slice${item.files.length === 1 ? "" : "s"}`]
+                      : ["NIfTI", formatBytes(item.file.size)];
                   const isOpen = previewItemId === item.id;
                   const uploadStatus =
                     item.kind === "nifti" ? itemUploadStatus[item.id] : undefined;
@@ -3439,10 +3834,22 @@ const UploadPage: React.FC = () => {
                         <span className="file-chip-text">
                           <span className="file-chip-name">{name}</span>
                           <span className="file-chip-sub">
-                            {subtext}
-                            {uploadStatus === "uploading" && ` · uploading ${uploadPct}%`}
-                            {uploadStatus === "done" && " · ready"}
-                            {uploadStatus === "failed" && " · upload failed"}
+                            {subParts.map((part, i) => (
+                              <span key={part} className="file-chip-sub-part">
+                                {i > 0 && <span className="file-chip-sub-sep"> · </span>}
+                                {part}
+                              </span>
+                            ))}
+                            {uploadStatus && (
+                              <span className="file-chip-sub-part">
+                                <span className="file-chip-sub-sep"> · </span>
+                                {uploadStatus === "uploading"
+                                  ? `uploading ${uploadPct}%`
+                                  : uploadStatus === "done"
+                                    ? "ready"
+                                    : "upload failed"}
+                              </span>
+                            )}
                           </span>
                         </span>
                         <button
@@ -3505,8 +3912,10 @@ const UploadPage: React.FC = () => {
             </div>
           </div>
 
-          {/* ── Pre-inference preview: inspect the selected scan before running a model ── */}
-          {previewItem && !isUploading && (
+          {/* ── Pre-inference preview: inspect the selected scan before running a model.
+              Not held back while a transfer is sending: Preview would flip to Hide
+              and show nothing for the minutes a large CT takes. ── */}
+          {previewItem && (
             <>
               <div className="ct-preview-label">
                 Preview ·{" "}
@@ -3516,7 +3925,7 @@ const UploadPage: React.FC = () => {
               </div>
               <Suspense
                 fallback={
-                  <div className="ct-preview ct-preview--msg">
+                  <div className="ct-preview ct-preview--msg" role="status">
                     Loading preview…
                   </div>
                 }
@@ -3863,7 +4272,7 @@ const UploadPage: React.FC = () => {
               <div className="upload-row__actions">
                 <span className="upload-row__status" style={{ color: recentStatusColor(u.status) }}>{u.status}</span>
                 {canView(u) && <button type="button" className="upload-small-btn" aria-label={`View ${scanAccessibleName(u, ownRecentUploads)}`} onClick={(e) => { e.stopPropagation(); openSession(u); }}>View</button>}
-                {u.status === "Completed" && <button type="button" className="upload-small-btn" aria-label={`Download ${scanAccessibleName(u, ownRecentUploads)}`} onClick={(e) => { e.stopPropagation(); downloadResult(u.sessionId); }}>Download</button>}
+                {u.status === "Completed" && <button type="button" className="upload-small-btn" aria-label={`Download ${scanAccessibleName(u, ownRecentUploads)}`} aria-busy={busyDownloads.includes(u.sessionId) || undefined} style={busyDownloads.includes(u.sessionId) ? { opacity: 0.6, cursor: "progress" } : undefined} onClick={(e) => { e.stopPropagation(); downloadFromList(u.sessionId, (say) => downloadResult(u.sessionId, say)); }}>Download</button>}
                 {removeButton(scanAccessibleName(u, ownRecentUploads), u.sessionId, (e) => { e.stopPropagation(); setRecentUploads(removeRecentUpload(u.sessionId)); })}
               </div>
             </div>
@@ -3876,7 +4285,8 @@ const UploadPage: React.FC = () => {
             // (when every scan used one) and how long ago it finished, as a single does.
             const model = uploads.every((u) => u.model === uploads[0].model) ? uploads[0].model : "";
             const done = uploads.filter(u => u.status === "Completed").length;
-            const failed = uploads.filter(u => u.status === "Failed" || u.status === "Cancelled").length;
+            const failed = uploads.filter(u => u.status === "Failed").length;
+            const cancelled = uploads.filter(u => u.status === "Cancelled").length;
             return (
               <div key={batchId} className="upload-row upload-row--card">
                 <div className="upload-row__main">
@@ -3892,6 +4302,7 @@ const UploadPage: React.FC = () => {
                           { key: "done", text: `${done} completed` },
                           model && { key: "model", text: model },
                           failed > 0 && { key: "failed", text: `${failed} failed`, className: "upload-row__failed" },
+                          cancelled > 0 && { key: "cancelled", text: `${cancelled} cancelled`, className: "upload-row__cancelled" },
                           { key: "age", text: formatRelativeTime(timestamp) },
                         ].filter((part): part is { key: string; text: string; className?: string } => Boolean(part)).map((part, i) => (
                           <Fragment key={part.key}>
@@ -3907,7 +4318,7 @@ const UploadPage: React.FC = () => {
                 </div>
                 <div className="upload-row__actions">
                   <button type="button" className="upload-small-btn" aria-label={`View details for ${batchNames.get(batchId) ?? label}`} onClick={() => { track("upload_open_batch_details"); setDetailsBatchId(batchId); }}>View details</button>
-                  <button type="button" className="upload-small-btn" aria-label={`Download ${batchNames.get(batchId) ?? label}`} onClick={() => downloadBatch(uploads)}>Download</button>
+                  <button type="button" className="upload-small-btn" aria-label={`Download ${batchNames.get(batchId) ?? label}`} disabled={done === 0} aria-busy={busyDownloads.includes(batchId) || undefined} style={busyDownloads.includes(batchId) ? { opacity: 0.6, cursor: "progress" } : undefined} onClick={() => downloadFromList(batchId, (say) => downloadBatch(uploads, say))}>Download</button>
                   {removeButton(batchNames.get(batchId) ?? label, batchId, () => removeBatch(uploads))}
                 </div>
               </div>
@@ -4055,6 +4466,10 @@ const UploadPage: React.FC = () => {
                   <p className="upload-section-hint upload-section-hint--tight">
                     Scans waiting for you to look at them. Once viewed, they move to History.
                   </p>
+                  {/* Where a row's Download reports: Preparing, started, or what went wrong. */}
+                  <div role="status">
+                    {listNote && <div className="status-msg" style={{ marginTop: 0, marginBottom: 12 }}>{listNote}</div>}
+                  </div>
                   <div className="upload-rows">
                     {finished.map(g =>
                       g.kind === "single"
@@ -4089,13 +4504,16 @@ const UploadPage: React.FC = () => {
               label={label}
               uploads={uploads}
               onClose={() => setDetailsBatchId(null)}
+              note={detailsNote}
               restoreFocusRef={pageHeadingRef}
               onView={(u) => {
                 if (!u.viewed) setRecentUploads(markRecentUploadViewed(u.sessionId));
                 navigate(`/${u.isReconstruction ? "reconstruction" : "session"}/${u.sessionId}`);
               }}
-              onDownloadScan={(u) => downloadResult(u.sessionId)}
-              onDownloadAll={() => downloadBatch(uploads)}
+              busyDownloads={busyDownloads}
+              batchId={detailsBatchId}
+              onDownloadScan={(u) => downloadFromList(u.sessionId, () => downloadResult(u.sessionId, sayInDetails()))}
+              onDownloadAll={() => downloadFromList(detailsBatchId, () => downloadBatch(uploads, sayInDetails()))}
             />
           );
         })()}

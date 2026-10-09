@@ -9,14 +9,28 @@
 	z-index: 1000;
 	background: rgba(0, 0, 0, 0.42);
 	backdrop-filter: blur(2px);
+	/* Scrolls when the card is taller than the window (a phone held sideways
+	   is about 375px tall; the Free to Pro card is about 430px). The card
+	   centres itself with auto margins, which, unlike align-items: center,
+	   never push its close button or actions out of reach. Same pattern as
+	   AuthModal.css. */
 	display: flex;
-	align-items: center;
-	justify-content: center;
+	overflow-y: auto;
+	overscroll-behavior: contain;
 	padding: 20px;
+	/* Same entrance as the sign-in popup and the batch details dialog. */
+	animation: upg-fade 0.15s ease;
+}
+
+@keyframes upg-fade {
+	from { opacity: 0; }
+	to { opacity: 1; }
 }
 
 .upg-card {
 	position: relative;
+	margin: auto;
+	flex-shrink: 0;
 	width: 100%;
 	max-width: 400px;
 	background: #ffffff;
@@ -29,15 +43,26 @@
 
 .upg-close {
 	position: absolute;
-	top: 12px;
-	right: 14px;
+	/* 40px hit area; the offsets keep the glyph where the small button had it. */
+	top: 7px;
+	right: 5px;
+	width: 40px;
+	height: 40px;
+	/* The global button padding (index.css, unlayered) would stretch the box past
+	   40px, so the glyph is centred in a true 40px square. */
+	padding: 0;
+	box-sizing: border-box;
+	display: flex;
+	align-items: center;
+	justify-content: center;
 	background: none;
 	border: none;
 	font-size: 22px;
 	line-height: 1;
-	color: #b0b0b0;
+	color: #6a6a6a;
 	cursor: pointer;
-	padding: 4px;
+	border-radius: 8px;
+	transition: color 0.15s;
 }
 .upg-close:hover {
 	color: #111111;
@@ -113,10 +138,12 @@
 	font-size: 14px;
 	font-weight: 600;
 	cursor: pointer;
-	transition: background 0.15s;
+	transition: background-color 0.15s;
 }
 .upg-primary:hover {
 	background: #00399a;
+	/* The global button:hover border (index.css) would outline the fill near-black. */
+	border-color: #00399a;
 }
 .upg-secondary {
 	width: 100%;
@@ -128,7 +155,17 @@
 	font-family: inherit;
 	font-size: 13.5px;
 	cursor: pointer;
+	transition: color 0.15s;
 }
 .upg-secondary:hover {
 	color: #111111;
+}
+
+/* The global button:focus ring follows the text colour, which made it white
+   around the blue button and pale grey around the close glyph. */
+.upg-close:focus-visible,
+.upg-primary:focus-visible,
+.upg-secondary:focus-visible {
+	outline: 2px solid var(--focus-ring, #002d72);
+	outline-offset: 2px;
 }

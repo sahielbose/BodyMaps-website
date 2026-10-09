@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -117,5 +117,83 @@ describe("completed inference actions", () => {
     await waitFor(() =>
       expect(screen.queryByText("Inference complete")).not.toBeInTheDocument(),
     );
+  });
+
+  // The finished bar unmounts as the popup mounts, so the popup's opener is
+  // gone when it closes: focus goes to the page heading, and what Download did
+  // is told inside the popup.
+  it("tells a failed Download inside the batch popup and keeps focus on the page when it closes", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <AuthProvider>
+        <MemoryRouter>
+          <UploadPage />
+        </MemoryRouter>
+      </AuthProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByText(/to run inference/)).not.toBeInTheDocument(),
+    );
+    const input = container.querySelector<HTMLInputElement>('input[accept=".nii,.gz"]')!;
+    await user.upload(input, [makeFile("a.nii.gz"), makeFile("b.nii.gz")]);
+    await waitFor(() => expect(screen.getAllByText(/ready/).length).toBe(2));
+    await user.click(screen.getByRole("button", { name: "Run" }));
+    await screen.findByText("Inference complete", {}, { timeout: 5000 });
+
+    await user.click(screen.getByRole("button", { name: /^View details for 2 scans started / }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Download all" }));
+    // The mocked result has no file body, so both downloads fail.
+    await waitFor(() => expect(within(dialog).getByRole("status")).toHaveTextContent(/Downloaded 0 of 2 scans/));
+    expect(container.querySelector(".status-msg")?.textContent ?? "").not.toMatch(/Downloaded|Preparing/);
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Upload a CT scan" })).toHaveFocus();
+  });
+
+  // A Download keeps reporting after the popup is closed; its late lines must
+  // not show up the next time a popup opens.
+  it("does not carry a note from a closed popup into the next one", async () => {
+    let releaseResult: () => void = () => {};
+    const held = new Promise<void>((resolve) => { releaseResult = resolve; });
+    const base = global.fetch;
+    global.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes("/api/get_result/")) {
+        await held;
+        throw new Error("late failure");
+      }
+      return base(url, init);
+    }) as unknown as typeof fetch;
+
+    const user = userEvent.setup();
+    const { container } = render(
+      <AuthProvider>
+        <MemoryRouter>
+          <UploadPage />
+        </MemoryRouter>
+      </AuthProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/to run inference/)).not.toBeInTheDocument(),
+    );
+    const input = container.querySelector<HTMLInputElement>('input[accept=".nii,.gz"]')!;
+    await user.upload(input, [makeFile("a.nii.gz"), makeFile("b.nii.gz")]);
+    await waitFor(() => expect(screen.getAllByText(/ready/).length).toBe(2));
+    await user.click(screen.getByRole("button", { name: "Run" }));
+    await screen.findByText("Inference complete", {}, { timeout: 5000 });
+
+    await user.click(screen.getByRole("button", { name: /^View details for 2 scans started / }));
+    let dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Download all" }));
+    await waitFor(() => expect(within(dialog).getByRole("status")).toHaveTextContent(/Preparing download/));
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+
+    // The download finishes (and fails) with the popup closed.
+    await act(async () => { releaseResult(); await held; });
+    await user.click(await screen.findByRole("button", { name: /^View details for 2 scans started / }));
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("status")).toBeEmptyDOMElement();
   });
 });
