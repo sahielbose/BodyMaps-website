@@ -1,14 +1,44 @@
 .searchInput {
+  /* Opaque paper and a ~3:1 edge: the old 4% fill and 8% border were ~1.1:1
+     on the grey library panel. */
   flex: 1;
+  box-sizing: border-box;
+  /* One shared 42px floor with .filterToggle and .searchBtn so the three
+     controls line up stacked and in a row. */
+  min-height: 42px;
   padding: 10px 16px;
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 8px;
+  background: var(--paper);
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 5px;
   color: #111111;
   font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 13px;
   outline: none;
   min-width: 0;
+}
+/* 16px on phones: iOS Safari zooms the page on focus below that. The line
+   height is pinned so 20 + 20 padding + 2 border stays at the 42px floor the
+   other two controls sit on, instead of growing with the larger text. */
+@media (max-width: 767px) {
+  .searchInput {
+    font-size: 16px;
+    line-height: 20px;
+  }
+}
+.searchInput::placeholder {
+  color: var(--muted);
+}
+.searchInput:focus-visible {
+  border-color: #002d72;
+  outline: 2px solid #002d72;
+  outline-offset: 1px;
+}
+/* aria-invalid drives the look; red-700 matches the message below. */
+.searchInput[aria-invalid="true"] {
+  border-color: #b91c1c;
+}
+.searchInput[aria-invalid="true"]:focus-visible {
+  outline-color: #b91c1c;
 }
 
 .filterToggle {
@@ -16,19 +46,30 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  box-sizing: border-box;
+  min-height: 42px;
   padding: 10px 16px;
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 8px;
-  color: #6a6a6a;
+  background: var(--paper);
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 5px;
+  color: var(--muted);
   font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 13px;
   outline: none;
   cursor: pointer;
   min-width: 0;
 }
+/* The global button:hover border (near-black) would beat the single-class
+   rule above, so the hover restates the resting edge. */
+.filterToggle:hover {
+  border-color: rgba(0, 0, 0, 0.45);
+}
 .filterToggleOpen {
-  background: rgba(0, 0, 0, 0.07);
+  background: #eceef2;
+}
+.filterToggle:focus-visible {
+  outline: 2px solid #002d72;
+  outline-offset: 2px;
 }
 
 .filterBadge {
@@ -46,16 +87,37 @@
 }
 
 .searchBtn {
+  box-sizing: border-box;
+  min-height: 42px;
   padding: 10px 32px;
   background: #002D72;
   border: none;
-  border-radius: 8px;
+  border-radius: 5px;
   color: #ffffff;
   font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  display: inline-grid;
+  place-items: center;
+}
+.searchBtn > span {
+  grid-area: 1 / 1;
+}
+.searchBtn:focus-visible {
+  outline: 2px solid #002d72;
+  outline-offset: 2px;
+}
+.labelHidden {
+  visibility: hidden;
+}
+
+/* red-700: red-600 fell just short of 4.5:1 on the grey library panel. */
+.searchError {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: #b91c1c;
 }
 
 .chevron {

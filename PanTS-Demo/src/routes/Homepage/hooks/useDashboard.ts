@@ -80,8 +80,16 @@ export function useDashboard() {
   // Cards the pending request will bring (featured strip, a full page, or the
   // short last page), so the skeleton grid is as tall as what replaces it.
   const [skeletonCount, setSkeletonCount] = useState(initialList ? PER_PAGE : CARD_COUNT);
-  const [searchId, setSearchId] = useState<number>(0);
+  // What was typed or pasted in the case ID field: a number, a PanTS_ label or a
+  // CancerVerse id. Empty (0 or "") means no ID, so Search applies the filters.
+  const [searchId, setSearchId] = useState<CaseId>(0);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  // Counts every rejected Search, so pressing it again with the same bad ID
+  // still moves focus back and is announced again (the message string alone
+  // would not change).
+  const [searchRejectCount, setSearchRejectCount] = useState(0);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [facetError, setFacetError] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [facetData, setFacetData] = useState<FacetData | null>(null);
   const [page, setPage] = useState(1);
@@ -123,29 +131,67 @@ export function useDashboard() {
   // Cases picked for side-by-side comparison (max 2). Adding a third drops the oldest.
   const [compareIds, setCompareIds] = useState<CaseId[]>([]);
   const [compareTyped, setCompareTyped] = useState("");
+  const [compareError, setCompareError] = useState<string | null>(null);
 
   const toggleCompare = (id: CaseId) => {
+    // The form unmounts at two ids and returns below that, so a half-typed id or
+    // its error would otherwise come back with it.
+    setCompareTyped("");
+    setCompareError(null);
     setCompareIds((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].slice(-2),
     );
   };
 
+  // False when the id was already in the tray, so the caller can say so.
   const addCompareId = (id: CaseId) => {
+    if (compareIds.includes(id)) return false;
     setCompareIds((prev) => (prev.includes(id) ? prev : [...prev, id].slice(-2)));
+    return true;
+  };
+
+  // Clear any stale validation error as soon as the user edits the tray input.
+  const handleSetCompareTyped = (s: string) => {
+    setCompareError(null);
+    setCompareTyped(s);
   };
 
   const submitTypedCompare = () => {
-    const raw = compareTyped.trim();
-    if (raw.toUpperCase().startsWith("CV")) {
-      addCompareId(raw);
+    // Uppercase so "cv_00000001" matches the canonical CancerVerse id form.
+    const raw = compareTyped.trim().toUpperCase();
+    if (!raw) return;
+    let id: CaseId;
+    if (/^CV_\d{8}$/.test(raw)) {
+      // CancerVerse ids keep their prefix so they route to the CV endpoints.
+      id = raw;
+    } else if (/^(?:PANTS_)?\d+$/.test(raw)) {
+      // A card label pastes as it reads: PanTS_00000017 is case 17.
+      const n = parseInt(raw.replace(/^PANTS_/, ""), 10);
+      if (n < 1 || n > 9901) {
+        setCompareError("Case IDs are 1 to 9901.");
+        return;
+      }
+      id = n;
     } else {
-      const n = parseInt(raw, 10);
-      if (Number.isFinite(n) && n > 0) addCompareId(n);
+      // Mixed input like "12V" or "CV" must not be read as a number or as a
+      // CancerVerse id it is not.
+      setCompareError("Enter a case number from 1 to 9901, or a CancerVerse ID like CV_00000001.");
+      return;
     }
+    if (!addCompareId(id)) {
+      // Keep what was typed: an emptied field reads as if the add worked.
+      setCompareError(`Case ${id} is already selected. Enter a different case ID.`);
+      return;
+    }
+    setCompareError(null);
     setCompareTyped("");
   };
 
-  const handleClearCompare = () => setCompareIds([]);
+  const handleClearCompare = () => {
+    setCompareIds([]);
+    setCompareTyped("");
+    setCompareError(null);
+  };
 
   const ingestItems = (items: SearchItem[]) => {
     const { ids, meta } = toPreviewData(items);
@@ -313,6 +359,7 @@ export function useDashboard() {
   // pills and their counts stay stable regardless of which filter is active.
   const loadFacetOptions = async () => {
     try {
+      setFacetError(false);
       const params = new URLSearchParams();
       params.set("fields", "tumor,sex,manufacturer,ct_phase,site_nat,year");
       // Same scope as Browse all and Apply (PanTS plus CancerVerse), so the pills
@@ -321,6 +368,9 @@ export function useDashboard() {
       params.set("dataset", "all");
       params.set("top_k", "64");
       const res = await fetch(`${API_BASE}/api/facets?${params.toString()}`);
+      // An error status (the backend answers 400 with {error} on an exception)
+      // is a failure too, not an empty option list; the panel offers Retry.
+      if (!res.ok) throw new Error(`Facets failed (${res.status})`);
       const data = await res.json();
       const counts = data.facets ?? {};
       // The API orders by count; years read newest first.
@@ -335,6 +385,7 @@ export function useDashboard() {
       });
     } catch (e) {
       console.error(e);
+      setFacetError(true);
     }
   };
 
@@ -498,6 +549,7 @@ export function useDashboard() {
   };
 
   const handleApplyFilters = () => {
+    track("dataset_search");
     setShowSavedState(false);
     appliedFiltersRef.current = filters;
     syncListUrl(filters, 1);
@@ -515,11 +567,32 @@ export function useDashboard() {
     loadCurated();
   };
 
+  const handleSetSearchId = (n: CaseId) => {
+    setSearchError(null);
+    setSearchId(n);
+  };
+
   const handleSearch = () => {
-    track("dataset_search");
-    if (searchId) {
-      const clamped = Math.max(1, Math.min(9901, searchId));
-      navigation("/case/" + clamped);
+    const raw = searchId === 0 ? "" : String(searchId).trim();
+    if (raw) {
+      // A card label pastes as it reads: PanTS_00000017 is case 17, and a
+      // CancerVerse id keeps its prefix so /case/ routes it to the CV endpoints.
+      const cv = /^CV_\d{8}$/i.test(raw);
+      const num = /^(?:PanTS_)?(\d+)$/i.exec(raw);
+      if (!cv && !num) {
+        setSearchError("Enter a case number from 1 to 9901, or a CancerVerse ID like CV_00000001.");
+        setSearchRejectCount((c) => c + 1);
+        return;
+      }
+      const n = num ? parseInt(num[1], 10) : 0;
+      if (!cv && (n < 1 || n > 9901)) {
+        setSearchError("Case IDs are 1 to 9901.");
+        setSearchRejectCount((c) => c + 1);
+        return;
+      }
+      setSearchError(null);
+      track("dataset_search");
+      navigation("/case/" + (cv ? raw.toUpperCase() : n));
       return;
     }
     handleApplyFilters();
@@ -536,9 +609,13 @@ export function useDashboard() {
     loading,
     skeletonCount,
     searchId,
-    setSearchId,
+    setSearchId: handleSetSearchId,
+    searchError,
+    searchRejectCount,
     fetchError,
+    facetError,
     retryLast,
+    retryFacets: loadFacetOptions,
     showFilters,
     setShowFilters,
     filters,
@@ -556,7 +633,8 @@ export function useDashboard() {
     savedIds,
     compareIds,
     compareTyped,
-    setCompareTyped,
+    setCompareTyped: handleSetCompareTyped,
+    compareError,
     handleToggleSave,
     toggleCompare,
     submitTypedCompare,
@@ -564,6 +642,7 @@ export function useDashboard() {
     handleShuffle,
     handleBrowseAll,
     handleResetFilters,
+    handleApplyFilters,
     handleSearch,
     handleCompare,
     goToPage,

@@ -7,19 +7,29 @@ import FilterPanel from "./components/FilterPanel";
 import ResultsSummary from "./components/ResultsSummary";
 import CaseGrid from "./components/CaseGrid";
 import Pagination from "./components/Pagination";
-import CompareTray from "./components/CompareTray";
+import CompareTray, { type CompareTrayHandle } from "./components/CompareTray";
 import SiteFooter from "../../components/SiteFooter";
 import styles from "./Homepage.module.css";
-import { PER_PAGE } from "./constants";
+import { FILTER_PANEL_ID, PER_PAGE } from "./constants";
+import { scrollBehavior } from "../../helpers/motion";
 
 export default function Homepage() {
   const dash = useDashboard();
   // The buttons that replace the list (Clear filters, Retry, the tray's Clear)
   // unmount with focus on them; this region outlives the swap, so focus goes here.
   const resultsRef = useRef<HTMLDivElement>(null);
+  const trayRef = useRef<CompareTrayHandle>(null);
   const focusResults = () => resultsRef.current?.focus({ preventScroll: true });
   const resetFilters = () => {
     dash.handleResetFilters();
+    focusResults();
+  };
+  // Apply closes the panel, which shortens the page under the scroll position
+  // (the panel is several screens tall on a phone), so bring the top back like
+  // goToPage does; focus then goes to the results it just changed.
+  const applyFilters = () => {
+    dash.handleApplyFilters();
+    window.scrollTo({ top: 0, behavior: scrollBehavior() });
     focusResults();
   };
   const retry = () => {
@@ -36,6 +46,15 @@ export default function Homepage() {
     dash.handleClearCompare();
     focusResults();
   };
+
+  // Always mounted, so the first pick is announced too (the tray itself only
+  // exists once something is picked).
+  const compareStatus =
+    dash.compareIds.length === 0
+      ? ""
+      : dash.compareIds.length === 1
+        ? "1 of 2 cases selected"
+        : "2 cases selected, Compare is ready";
 
   // overflow-x-clip, not hidden: hidden makes this wrapper a scroll container
   // and stops the sticky header from sticking.
@@ -70,17 +89,24 @@ export default function Homepage() {
           <SearchBar
             searchId={dash.searchId}
             setSearchId={dash.setSearchId}
+            searchError={dash.searchError}
+            rejectCount={dash.searchRejectCount}
             showFilters={dash.showFilters}
             setShowFilters={dash.setShowFilters}
             activeFilterCount={dash.activeFilterCount}
+            filterPanelId={FILTER_PANEL_ID}
             onSearch={dash.handleSearch}
           />
 
           {dash.showFilters && (
             <FilterPanel
+              id={FILTER_PANEL_ID}
               filters={dash.filters}
               setFilters={dash.setFilters}
               facetData={dash.facetData}
+              facetError={dash.facetError}
+              onRetryFacets={dash.retryFacets}
+              onApply={applyFilters}
               toggleMulti={dash.toggleMulti}
             />
           )}
@@ -97,6 +123,15 @@ export default function Homepage() {
         )}
 
         <div ref={resultsRef} tabIndex={-1} role="region" aria-label="Cases" className={styles.results}>
+          {dash.compareIds.length > 0 && (
+            <button
+              type="button"
+              onClick={() => trayRef.current?.focus()}
+              className={styles.trayShortcut}
+            >
+              Go to compare bar
+            </button>
+          )}
           {!dash.showSaved && !dash.loading && dash.fetchError ? (
             <div className={styles.fetchError} role="alert">
               <p className={styles.fetchErrorText}>{dash.fetchError}</p>
@@ -136,14 +171,19 @@ export default function Homepage() {
 
       {dash.compareIds.length > 0 && (
         <CompareTray
+          ref={trayRef}
           compareIds={dash.compareIds}
           compareTyped={dash.compareTyped}
           setCompareTyped={dash.setCompareTyped}
+          compareError={dash.compareError}
           onSubmitTyped={dash.submitTypedCompare}
           onClear={clearCompare}
           onCompare={dash.handleCompare}
         />
       )}
+      <p role="status" className="sr-only">
+        {compareStatus}
+      </p>
       <SiteFooter />
     </div>
   );

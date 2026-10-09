@@ -1,19 +1,27 @@
 .compareTray {
   position: fixed;
-  bottom: 24px;
+  /* Above the sticky site footer (its height is --footer-h, see SiteFooter),
+     not inside its band. */
+  bottom: calc(var(--footer-h, 40px) + 16px);
   left: 50%;
   transform: translateX(-50%);
   z-index: var(--z-overlay);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  /* A wrapped row on a phone centres instead of leaving one button stranded left. */
+  justify-content: center;
   gap: 10px;
+  /* Fixed at left: 50% the box is offered only half the viewport, so a
+     shrink-to-fit width wrapped "Compare" onto a second row at 768px. Size it
+     to its content instead, up to the viewport less a 16px gutter each side. */
+  width: max-content;
   max-width: calc(100vw - 32px);
   background: rgba(14, 15, 18, 0.94);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 12px;
+  border-radius: 6px;
   padding: 10px 14px;
   box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.6);
   color: #ffffff;
@@ -22,7 +30,7 @@
 
 .compareTrayIds {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .compareTrayForm {
@@ -32,52 +40,158 @@
 }
 
 .compareTrayInput {
-  width: 96px;
-  padding: 5px 8px;
-  border-radius: 8px;
+  /* 15 characters of the mono face plus the side padding and border, so a
+     pasted card label ("PanTS_00000017", 14) shows whole, not scrolled. */
+  width: calc(15ch + 22px);
+  min-height: 36px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border-radius: 6px;
   border: 1px solid rgba(255, 255, 255, 0.2);
   background: rgba(255, 255, 255, 0.06);
   color: #ffffff;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 12px;
+  font-size: 13px;
   outline: none;
 }
-
-.compareTrayBtn {
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  color: #ffffff;
-  border-radius: 8px;
-  padding: 5px 10px;
-  cursor: pointer;
-  font-size: 12px;
+.compareTrayInput::placeholder {
+  color: rgba(255, 255, 255, 0.6);
 }
 
+/* Red border on a rejected id, the same red as the message under it. */
+.compareTrayInput[aria-invalid="true"] {
+  border-color: #f87171;
+}
+
+/* White rings: the site's blue ring would vanish on the dark tray. */
+.compareTrayInput:focus-visible,
+.compareTrayBtn:focus-visible,
+.compareTrayAddBtn:focus-visible,
+.compareTrayCompareBtn:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+/* 36px tall (40px on a phone); font-family is set here because the global
+   button rule would otherwise inherit the page's. */
+.compareTrayBtn,
+.compareTrayAddBtn,
+.compareTrayCompareBtn {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.compareTrayBtn,
 .compareTrayAddBtn {
   background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.2);
   color: #ffffff;
-  border-radius: 8px;
-  padding: 5px 10px;
-  font-size: 12px;
-  cursor: pointer;
-}
-.compareTrayAddBtn:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
 }
 
+/* Hover keeps each button's own edge; the global button:hover border would
+   otherwise take the near-black over the white edges on the dark tray. */
+.compareTrayBtn:hover,
+.compareTrayAddBtn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* An explicit muted fill and text, not opacity: half-faded white on the
+   near-black tray read as a rendering fault rather than "not yet". */
+.compareTrayAddBtn:disabled,
+.compareTrayCompareBtn:disabled {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.62);
+  cursor: not-allowed;
+}
+
+/* Mirrors the dashboard SearchBar's inline error (small red text, aria-live),
+   lightened for legibility on the tray's dark background. */
+.compareTrayError {
+  /* Zero width with a full-row minimum: the message takes its own row at the
+     tray's width but adds nothing to it (a percentage flex-basis would count
+     the text's full length), so an error does not widen the box. The -10px
+     right margin cancels the tray's 10px gap, which the zero-width item would
+     otherwise still add to the tray's content width. */
+  flex: 0 0 auto;
+  /* First, on its own row above the controls, although it follows the form in
+     the DOM. The bar is fixed to the bottom and grows upward, so a message
+     arriving adds its row at the top and the field and buttons stay where the
+     pointer is. */
+  order: -1;
+  width: 0;
+  min-width: 100%;
+  margin: 0 -10px 0 0;
+  text-align: center;
+  color: #f87171;
+  font-size: 13px;
+}
+
+/* JHU blue, like the selected Compare chips on the cards; the light border
+   keeps the navy button distinct from the near-black tray. */
 .compareTrayCompareBtn {
-  background: #2563eb;
-  border: none;
+  background: #002d72;
+  border: 1px solid rgba(255, 255, 255, 0.35);
   color: #ffffff;
-  border-radius: 8px;
-  padding: 5px 12px;
-  cursor: pointer;
-  font-size: 12px;
   font-weight: 600;
 }
-.compareTrayCompareBtn:disabled {
-  background: rgba(37, 99, 235, 0.4);
-  cursor: not-allowed;
+.compareTrayCompareBtn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+/* A phone or small tablet: a full-width bar (ids, the form on its own row so
+   the field has room for a full case id, then the buttons) instead of a
+   content-sized box in the middle of the screen. The footer is static from
+   640px down, so the bar only clears it above that. */
+@media (max-width: 767px) {
+  .compareTray {
+    left: 16px;
+    right: 16px;
+    transform: none;
+    width: auto;
+    max-width: none;
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 12px;
+    bottom: calc(var(--footer-h, 0px) + 12px);
+  }
+  .compareTrayIds {
+    flex-basis: 100%;
+    order: -2;
+  }
+  /* The stacked bar is left-aligned, so its message is too. The bar has its
+     own width and an 8px gap, so there is no gap to cancel. */
+  .compareTrayError {
+    /* Between the ids and the field it describes: above the field, so the
+       upward-growing bar keeps the field and buttons in place. */
+    order: -1;
+    text-align: left;
+    margin-right: 0;
+  }
+  .compareTrayForm {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .compareTrayInput {
+    flex: 1 1 0;
+    min-width: 0;
+    width: auto;
+    min-height: 40px;
+    /* 16px stops iOS zooming the page when the field takes focus. */
+    font-size: 16px;
+  }
+  .compareTrayBtn,
+  .compareTrayAddBtn,
+  .compareTrayCompareBtn {
+    min-height: 40px;
+  }
+  /* The buttons sit on the right in both states (with the form present they
+     wrap to their own row). */
+  .compareTrayBtn {
+    margin-left: auto;
+  }
 }
