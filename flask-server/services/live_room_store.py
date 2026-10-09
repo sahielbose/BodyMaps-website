@@ -48,6 +48,7 @@ from services.live_quiz import (
     public_question,
     reveal_for,
 )
+from services.label_scheme import viewer_labelmap_path
 from services.quiz_telemetry import QuizTelemetry
 
 try:  # Linux production path; tests on other platforms still keep thread safety.
@@ -672,6 +673,13 @@ class LiveRoomStore:
             quiz_pack_id = str(pack["pack_id"])
             host_claim = secrets.token_urlsafe(32)
         case_files = self._resolve_case(str(case_id), resolution)
+        # The room edits and serves the mask in the viewer's organ ids; the dataset
+        # numbers them differently. The quiz reveal keeps reading the raw mask
+        # (source_mask_path), because its pack names the raw lesion label.
+        try:
+            viewer_mask = viewer_labelmap_path(case_files.mask_path)
+        except Exception as exc:
+            raise LiveRoomError("Dataset segmentation could not be read") from exc
         room_id = str(uuid.uuid4())
         room_key = secrets.token_urlsafe(32)
         created = self._now()
@@ -686,7 +694,8 @@ class LiveRoomStore:
             "geometry_hash": case_files.geometry_hash,
             "dimensions": list(case_files.dimensions),
             "base_ct_path": str(case_files.ct_path),
-            "base_mask_path": str(case_files.mask_path),
+            "base_mask_path": "",
+            "source_mask_path": str(case_files.mask_path),
             "latest_seq": 0,
             "mask_snapshot_seq": 0,
             "mask_events_since_snapshot": 0,
@@ -711,6 +720,11 @@ class LiveRoomStore:
             "undone_event_ids": [],
         }
         with self._locked(room_id, require_exists=False) as room_dir:
+            # A copy in the room, so the room never depends on a shared cache file.
+            base_mask = room_dir / "base_mask_viewer.nii.gz"
+            shutil.copyfile(viewer_mask, base_mask)
+            base_mask.chmod(0o600)
+            metadata["base_mask_path"] = str(base_mask)
             _atomic_json(room_dir / "state.json", state)
             (room_dir / "events.jsonl").touch(mode=0o600)
             (room_dir / "events.jsonl").chmod(0o600)
@@ -860,7 +874,7 @@ class LiveRoomStore:
     @staticmethod
     def _require_quiz(metadata: dict[str, Any]) -> None:
         if metadata.get("mode", "review") != "quiz":
-            raise LiveRoomError("This Live Room is not a quiz")
+            raise LiveRoomError("This live room is not a quiz")
 
     @staticmethod
     def _require_host(metadata: dict[str, Any], participant_id: str, lease_id: str) -> None:
@@ -2115,7 +2129,9 @@ class LiveRoomStore:
         path = room_dir / ("quiz_reveal_mask.nii.gz" if revealed else "quiz_blank_mask.nii.gz")
         if path.exists():
             return path
-        image = nib.load(str(metadata["base_mask_path"]))
+        # The pack's source_labels are raw dataset values. A room made before the
+        # viewer copy existed has only base_mask_path, and that one is raw.
+        image = nib.load(str(metadata.get("source_mask_path") or metadata["base_mask_path"]))
         source = np.asanyarray(image.dataobj)
         output_data = np.zeros(image.shape[:3], dtype=np.uint8)
         if revealed:

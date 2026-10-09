@@ -65,37 +65,6 @@ class Constants:
     DECIMAL_PRECISION_HU = 1
     VOXEL_THRESHOLD = 100
 
-    PREDEFINED_LABELS = {
-        0: "adrenal_gland_left",
-        1: "adrenal_gland_right",
-        2: "aorta",
-        3: "bladder",
-        4:"celiac_artery",
-        5: "colon",
-        6: "common_bile_duct",
-        7: "duodenum",
-        8: "femur_left",
-        9: "femur_right",
-        10: "gall_bladder",
-        11: "kidney_left",
-        12: "kidney_right",
-        13: "liver",
-        14: "lung_left",
-        15: "lung_right",
-        16: "pancreas_body",
-        17: "pancreas_head",
-        18: "pancreas_tail",
-        19: "pancreas",
-        20: "pancreatic_duct",
-        21: "pancreatic_lesion",
-        22: "postcava",
-        23: "prostate",
-        24: "spleen",
-        25: "stomach",
-        26: "superior_mesenteric_artery",
-        27: "veins"
-    }
-    
     MODEL_ALIASES = {
         # GE
         "lightspeed 16": "LightSpeed 16",

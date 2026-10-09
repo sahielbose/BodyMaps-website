@@ -23,6 +23,9 @@ def build_headers(token: str, worker_id: str) -> dict:
 
 
 def run_inference(input_path: str, work_dir: str) -> tuple[str, str | None]:
+    # The command must leave the model's own label ids in output_mask. The
+    # server converts the uploaded mask into the viewer's ids itself, so a
+    # command that converted it as well would shift the labels twice.
     output_mask = os.path.join(work_dir, "combined_labels.nii.gz")
     output_csv = os.path.join(work_dir, "output.csv")
 

@@ -9,7 +9,14 @@ from services.mesh_generation import (
     generate_mesh_manifest,
     generate_organ_glb_bytes,
     LABELS as MESH_LABELS,
-    safe_filename,
+    organ_glb_filename,
+    relabel_legacy_manifest,
+)
+from services.label_scheme import (
+    SCHEME as LABEL_SCHEME,
+    VIEWER_LABELS,
+    to_viewer,
+    viewer_labelmap_path,
 )
 from services.request_limits import trusted_client_ip
 from services.inference_job_queue import InferenceJobQueue, QueueFullError
@@ -388,7 +395,7 @@ def proxy_image():
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt, label
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from openpyxl import load_workbook
 
 
@@ -486,16 +493,56 @@ def _read_manifest_or_none(manifest_path):
         return None
 
 
+def _current_manifest_or_none(manifest_path):
+    """A cached manifest in viewer ids, or None when there is none to serve.
+
+    A manifest baked before dataset masks were converted (no "labelScheme")
+    names each mesh by its raw mask value. It is relabelled rather than rebaked,
+    because a rebake needs the mask, which may not be on this server. Saving the
+    relabelled copy is best effort: the mesh mount may be read-only, and the
+    relabel is cheap enough to repeat on every read.
+    """
+    manifest = _read_manifest_or_none(manifest_path)
+    if manifest is None or "labelScheme" in manifest:
+        return manifest
+    manifest = relabel_legacy_manifest(manifest)
+    try:
+        with atomic_destination(manifest_path, suffix=".part") as tmp_path:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+    except OSError as error:
+        print("[mesh-manifest] relabelled manifest not saved:", str(error))
+    return manifest
+
+
 def _manifest_with_request_urls(manifest, pants_id):
     """Return a manifest whose mesh URLs always use the current browser origin."""
     for organ in manifest.get("organs", []):
-        filename = f"{safe_filename(str(organ.get('key', '')))}.glb"
+        filename = organ_glb_filename(organ)
         # Do not derive an absolute URL from Flask's request scheme. Behind a
         # TLS-terminating proxy Flask sees HTTP, which would make browsers block
         # these meshes as mixed content. A relative URL inherits the HTTPS origin
         # of the viewer and also works for a deployment under a base path.
-        organ["url"] = f"{_api_prefix_path()}/cases/{pants_id}/render_only/{filename}"
+        # The scheme query keeps a browser from reusing a GLB it cached when the
+        # same file name held a different organ.
+        organ["url"] = f"{_api_prefix_path()}/cases/{pants_id}/render_only/{filename}?v={LABEL_SCHEME}"
     return manifest
+
+
+def _mesh_file_organ_key(display_id, filename):
+    """The organ a relabelled manifest draws from this GLB file, if any."""
+    manifest_path = os.path.join(Constants.MESH_PATH, secure_filename(display_id), "manifest.json")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if manifest.get("labelScheme") != LABEL_SCHEME:
+        return None
+    for organ in manifest.get("organs") or []:
+        if isinstance(organ, dict) and organ_glb_filename(organ) == filename:
+            return str(organ.get("key") or "") or None
+    return None
 
 
 @api_blueprint.route("/cases/<case_id>/mesh-manifest")
@@ -509,7 +556,7 @@ def get_mesh_manifest(case_id):
     case_dir = os.path.join(Constants.MESH_PATH, pants_id)
     manifest_path = os.path.join(case_dir, "manifest.json")
 
-    manifest = _read_manifest_or_none(manifest_path)
+    manifest = _current_manifest_or_none(manifest_path)
     if manifest is not None:
         return jsonify(_manifest_with_request_urls(manifest, pants_id))
 
@@ -528,7 +575,7 @@ def get_mesh_manifest(case_id):
 
     with _mesh_bake_lock(pants_id):
         # Another request may have finished the bake while we waited.
-        manifest = _read_manifest_or_none(manifest_path)
+        manifest = _current_manifest_or_none(manifest_path)
         if manifest is not None:
             return jsonify(_manifest_with_request_urls(manifest, pants_id))
         try:
@@ -560,7 +607,11 @@ def get_mesh_file(display_id, filename):
         # live manifest. Generation failure is a 500; a failed cache write is
         # NOT (the bytes are in memory — serve them anyway).
         safe_name = secure_filename(filename)
-        organ_key = safe_name[:-4] if safe_name.endswith(".glb") else safe_name
+        # A relabelled manifest can draw an organ from a file named after
+        # another one (its geometry came from the raw mask value), so ask it first.
+        organ_key = _mesh_file_organ_key(display_id, safe_name) or (
+            safe_name[:-4] if safe_name.endswith(".glb") else safe_name
+        )
         mask_digits = "".join(ch for ch in str(display_id) if ch.isdigit())
         seg_path = _ai_local_mask_path(mask_digits) if mask_digits else None
         if seg_path is None:
@@ -604,8 +655,8 @@ def get_label_colormap(clabel_id):
     clabel_path = os.path.join(Constants.PANTS_PATH, "mask_only", get_panTS_id(int(clabel_id)),  'combined_labels.nii.gz')
 
     try:
-        clabel_array = nib.load(clabel_path)
-        clabel_array = clabel_array.get_fdata()
+        # Colours are keyed by organ id, so convert the dataset mask to viewer ids.
+        clabel_array = to_viewer(np.asanyarray(nib.load(clabel_path).dataobj))
         print("[DEBUG] Nifti loaded, shape =", clabel_array.shape)
 
         filled_array = fill_voids_with_nearest_label(clabel_array)
@@ -696,17 +747,15 @@ def get_mask_data():
     # session-based lookup instead; only numeric catalog ids still go through
     # get_mask_data_internal.
     if str(session_key).strip().isdigit():
-        result = get_mask_data_internal(session_key)
-
-        # For numeric PanTS cases, fall back to the robust label-based computation
-        # (with HuggingFace download) when the local dataset path is unavailable,
-        # so organ statistics resolve even without a full local PanTS install.
-        if not isinstance(result, dict) or result.get("error") or not result.get("organ_metrics"):
-            robust = _ai_compute_organ_metrics_from_labels(str(session_key).strip())
-            if robust and robust.get("organ_metrics"):
-                result = robust
+        result = _mask_data_for_case(str(session_key).strip())
     else:
         job = _get_inference_job(session_key)
+        if job is not None:
+            # A session id is not a bearer token: only its owner (or an admin)
+            # may read its organ stats. A missing job still answers as before.
+            _job, access_error = _job_for_current_user(session_key)
+            if access_error is not None:
+                return access_error
         result = get_session_mask_data(session_key, job)
 
     return jsonify(result)
@@ -944,14 +993,15 @@ def _build_report_data(id):
         shape = ct_nii.shape
         ct_array = ct_nii.get_fdata()
         mask_nii = nib.load(mask_path)
-        mask_array = mask_nii.get_fdata().astype(np.uint8)
+        # Every path above is a PanTS dataset mask: convert it to viewer ids once.
+        mask_array = to_viewer(np.asanyarray(mask_nii.dataobj))
         min_shape = tuple(min(c, m) for c, m in zip(ct_array.shape, mask_array.shape))
         ct_array = ct_array[:min_shape[0], :min_shape[1], :min_shape[2]]
         mask_array = mask_array[:min_shape[0], :min_shape[1], :min_shape[2]]
         voxel_volume = np.prod(mask_nii.header.get_zooms()) / 1000
         affine = mask_nii.affine
 
-        LABELS = {v: k for k, v in Constants.PREDEFINED_LABELS.items()}
+        LABELS = {meta["key"]: label_id for label_id, meta in VIEWER_LABELS.items()}
 
         SOLID_ORGAN_HU_RANGE = (-20, 150)
         GI_HOLLOW_ORGAN_HU_RANGE = (-300, 200)
@@ -966,10 +1016,9 @@ def _build_report_data(id):
             "renal_vein_right", "common_bile_duct", "pancreatic_duct",
         }
         for organ, label_id in LABELS.items():
-            if label_id == 0:
-                continue
             mask = (mask_array == label_id)
-            if not np.any(mask):
+            # A few stray voxels (a bladder speck by the lung) are label noise, not an organ.
+            if np.count_nonzero(mask) < Constants.VOXEL_THRESHOLD:
                 continue
             volume = float(np.sum(mask) * voxel_volume)
             mean_hu = float(np.mean(ct_array[mask]))
@@ -1080,7 +1129,9 @@ def _build_report_data(id):
                         organ_volumes[organ]['status'] = 'check'
 
         comments = radgpt_comments or "Clinical comments unavailable."
-        impression_items = radgpt_impression or ["No impression available for this case."]
+        # Empty when the report has none: the web report shows its own fallback
+        # and the PDF writes its own "No impression" line below.
+        impression_items = radgpt_impression or []
         result = {
             "case_id": id,
             "patient": {"age": age, "sex": sex},
@@ -1911,7 +1962,7 @@ def _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path):
         ct_nii = nib.load(ct_path)
         mask_nii = nib.load(mask_path_combined)
         ct_array = ct_nii.get_fdata()
-        mask_array = mask_nii.get_fdata().astype(np.uint8)
+        mask_array = to_viewer(np.asanyarray(mask_nii.dataobj))
         min_shape = tuple(min(c, m) for c, m in zip(ct_array.shape, mask_array.shape))
         ct_array = ct_array[:min_shape[0], :min_shape[1], :min_shape[2]]
         mask_array = mask_array[:min_shape[0], :min_shape[1], :min_shape[2]]
@@ -1923,10 +1974,8 @@ def _draw_report_pdf(report_data, temp_pdf_path, output_pdf_path):
         col_x = [left_margin + i * (img_w + col_gap) for i in range(num_cols)]
         col_i = 0
 
-        organ_label_map = {v: k for k, v in Constants.PREDEFINED_LABELS.items()}
+        organ_label_map = {meta["key"]: label_id for label_id, meta in VIEWER_LABELS.items()}
         for organ, label_id in organ_label_map.items():
-            if label_id == 0:
-                continue
             check_and_reset_page(img_h + row_gap + 20)
             x = col_x[col_i]
             overlay_path = f"/tmp/report_{case_id}_{organ}_overview.png"
@@ -2109,44 +2158,40 @@ async def get_segmentations(combined_labels_id):
     # the viewer can show the CT alone.
     if get_dataset_from_case_id(secure_filename(combined_labels_id)) == "CancerVerse":
         return jsonify({"masks_available": False}), 200
-    nifti_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(secure_filename(combined_labels_id))}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
-    labels = list(Constants.PREDEFINED_LABELS.values())
-    # ?res=low → serve the precomputed low-res mask (paired with the low-res CT so the
+    try:
+        pants_id = get_panTS_id(secure_filename(combined_labels_id))
+    except ValueError:
+        return jsonify({"error": "Case id must be numeric"}), 400
+
+    # ?res=low → the precomputed low-res mask (paired with the low-res CT so the
     # overlay stays aligned). It lives under LOWRES_ROOT (a writable disk), NOT the
-    # read-only mask_only mount. Falls back to full res below if it hasn't been generated.
+    # read-only mask_only mount. Then full res, then the HuggingFace mirror, which
+    # the browser used to fetch itself; it now comes here so it is converted too.
+    raw_path = None
     if (request.args.get('res') or '').strip().lower() == 'low':
         low_name = Constants.COMBINED_LABELS_NIFTI_FILENAME.replace('.nii.gz', '_lowres.nii.gz')
-        low_path = f"{LOWRES_ROOT}/mask_only/{get_panTS_id(secure_filename(combined_labels_id))}/{low_name}"
+        low_path = f"{LOWRES_ROOT}/mask_only/{pants_id}/{low_name}"
         if os.path.exists(low_path):
-            return _serve_dataset_volume(low_path)
+            raw_path = low_path
+    if raw_path is None:
+        nifti_path = f"{Constants.PANTS_PATH}/mask_only/{pants_id}/{Constants.COMBINED_LABELS_NIFTI_FILENAME}"
+        if os.path.exists(nifti_path):
+            raw_path = nifti_path
+    if raw_path is None:
+        raw_path = _ai_download_case_file(pants_id, "mask_only", Constants.COMBINED_LABELS_NIFTI_FILENAME)
 
-    img = nib.load(nifti_path)
+    # Mirror get-main-nifti's missing-file handling: a clean JSON 404 lets the
+    # viewer fail fast instead of receiving a werkzeug HTML 500 page.
+    if raw_path is None:
+        print(f"Could not find a segmentation for {pants_id}. ")
+        return jsonify({"error": "Could not find filepath"}), 404
 
     try:
-        serve_path = nifti_path
-        if img.get_data_dtype() != np.uint8:
-            # The source is a float label map; Cornerstone needs uint8. Cache the
-            # converted copy in a WRITABLE temp dir and serve THAT — never write
-            # into the dataset's mask_only/ (it is read-only on the server, and an
-            # HTTP GET must not mutate ground-truth data). Writing the sibling into
-            # mask_only/ 500'd the segmentation endpoint in production.
-            cache_dir = "/tmp/pants_uint8"
-            os.makedirs(cache_dir, exist_ok=True)
-            converted_path = os.path.join(
-                cache_dir,
-                f"{get_panTS_id(secure_filename(combined_labels_id))}_combined_labels_uint8.nii.gz",
-            )
-            if not os.path.exists(converted_path):
-                print("⚠️ Detected float label map, converting to uint8 for Cornerstone compatibility...")
-                raw = np.asanyarray(img.dataobj)
-                data = np.rint(raw).astype(np.uint8)
-
-                new_img = nib.Nifti1Image(data, img.affine, header=img.header)
-                new_img.set_data_dtype(np.uint8)
-                nib.save(new_img, converted_path)
-            serve_path = converted_path
-
-        return _serve_dataset_volume(serve_path)
+        # Always the viewer-id copy, whatever the query says: the dataset numbers
+        # organs differently, and an old client without ?labels= must not get raw
+        # values either. The copy is uint8, which Cornerstone needs, and lives in a
+        # writable cache, never in the dataset's mask_only/.
+        return _serve_dataset_volume(viewer_labelmap_path(raw_path))
 
     except Exception as e:
         print(f"❌ [get-segmentations ERROR] {e}")
@@ -3161,7 +3206,7 @@ def complete_pull_job(job_id):
         return jsonify(_public_job_payload(job)), 200
     except PermissionError as e:
         return jsonify({"error": str(e)}), 403
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
 
 
@@ -3996,8 +4041,10 @@ def api_facets():
         guarantee = (_arg("guarantee","0") or "0").strip().lower() in ("1","true","yes","y")
 
         # 先應用目前的過濾條件
-        df_now = apply_filters(DF)
-        base_for_ranges = df_now if len(df_now) else DF
+        # Same scope as /api/search (?dataset=), so the pills count what Apply returns.
+        base_df = select_dataset_df()
+        df_now = apply_filters(base_df)
+        base_for_ranges = df_now if len(df_now) else base_df
 
         facets: Dict[str, List[Dict[str, Any]]] = {}
         unknown_counts: Dict[str, int] = {}
@@ -4018,7 +4065,7 @@ def api_facets():
         for f in fields:
             ex = exclude_map.get(f, set())
             # 若 guarantee=1 且目前篩完為空，改用全量 DF 以「保證列出所有可能值」
-            src = (DF if (guarantee and len(df_now) == 0) else df_now)
+            src = (base_df if (guarantee and len(df_now) == 0) else df_now)
             df_facet = apply_filters(src, exclude=ex)
             res = _facet_counts_with_unknown(df_facet, f, top_k=top_k)
 
@@ -4354,13 +4401,9 @@ def _ai_download_case_file(pants_id, rel_path, filename):
         return None
 
 
-def _ai_local_mask_path(case_id):
-    """On-disk combined_labels.nii.gz for a numeric PanTS id — local dataset,
-    then low-res mirror, then a cached HuggingFace download. None if absent."""
-    pants_id = _ai_pants_id_or_none(case_id)
-    if not pants_id:
-        return None
-
+def _ai_raw_mask_path(pants_id):
+    """The dataset's own combined_labels for a sanitized id — local dataset, then
+    low-res mirror, then a cached HuggingFace download. None if absent."""
     if Constants.PANTS_PATH:
         local = os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, "combined_labels.nii.gz")
         if os.path.exists(local):
@@ -4371,6 +4414,26 @@ def _ai_local_mask_path(case_id):
         return lowres
 
     return _ai_download_case_file(pants_id, "mask_only", "combined_labels.nii.gz")
+
+
+def _ai_local_mask_path(case_id):
+    """On-disk labelmap for a numeric PanTS id, in viewer ids. None if absent.
+
+    The dataset numbers organs differently from the viewer, so this returns the
+    converted copy. Organ metrics, lesion grounding, the inventory and mesh
+    baking all read it, so they all name an organ the way the viewer does.
+    """
+    pants_id = _ai_pants_id_or_none(case_id)
+    if not pants_id:
+        return None
+    raw_path = _ai_raw_mask_path(pants_id)
+    if not raw_path:
+        return None
+    try:
+        return viewer_labelmap_path(raw_path)
+    except Exception as error:
+        print(f"[ai metrics] label conversion failed for {pants_id}: {error}")
+        return None
 
 
 def _ai_local_image_path(case_id):
@@ -4394,8 +4457,8 @@ def _ai_compute_organ_metrics_from_labels(case_id):
     This is the fallback that makes organ-volume questions work WITHOUT a full
     local PanTS install: both files are pulled from the HuggingFace mirror when
     missing. Volume = voxel count * (sx*sy*sz mm) / 1000 -> cm3. Uses the
-    mesh-generation label ids (1-indexed, liver = 14), which match
-    combined_labels.nii.gz. Returns {"organ_metrics": [...]} or None.
+    viewer's label ids (1-indexed, liver = 14), which the labelmap from
+    _ai_mask_path_for is in. Returns {"organ_metrics": [...]} or None.
     """
     if not MESH_LABELS:
         return None
@@ -4409,6 +4472,8 @@ def _ai_compute_organ_metrics_from_labels(case_id):
         return None
 
     try:
+        from services.nifti_processor import has_large_connected_component
+
         mask_nii = nib.load(mask_path)
         mask = np.rint(np.asanyarray(mask_nii.dataobj)).astype(np.int32)
 
@@ -4428,19 +4493,47 @@ def _ai_compute_organ_metrics_from_labels(case_id):
                 print(f"[ai metrics] CT load skipped: {exc}")
                 ct = None
 
+        # One counting pass for every label instead of a full-volume comparison
+        # per label (that took 1.5-2 s on the larger cases). Negative values are
+        # background. The CT sums go a few slices at a time, so the float64
+        # weights bincount needs never copies the whole CT at once.
+        np.maximum(mask, 0, out=mask)
+        # Only catalog ids are reported, so anything above them is background.
+        # This also keeps a stray huge value from sizing the count arrays.
+        max_id = max(MESH_LABELS)
+        if int(mask.max()) > max_id:
+            mask[mask > max_id] = 0
+        size = max_id + 1
+        counts = np.bincount(mask.ravel(), minlength=size)
+        sums = None
+        if ct is not None:
+            sums = np.zeros(size, dtype=np.float64)
+            step = max(1, (1 << 22) // max(1, mask.shape[0] * mask.shape[1]))
+            for start in range(0, mask.shape[2], step):
+                stop = start + step
+                sums += np.bincount(
+                    mask[:, :, start:stop].ravel(),
+                    weights=ct[:, :, start:stop].ravel(),
+                    minlength=size,
+                )
+
         metrics = []
         for label_id, meta in MESH_LABELS.items():
-            organ_mask = mask == label_id
-            voxel_count = int(np.count_nonzero(organ_mask))
+            voxel_count = int(counts[label_id]) if 0 <= label_id < size else 0
             if voxel_count == 0:
                 continue
             entry = {
                 "organ_name": meta["key"],
                 "volume_cm3": round(voxel_count * voxel_cm3, 2),
                 "voxel_count": voxel_count,
+                # Same rule as NiftiProcessor: a large piece on the first or last slice.
+                "truncated": bool(
+                    has_large_connected_component(mask[:, :, 0] == label_id, 8)
+                    or has_large_connected_component(mask[:, :, -1] == label_id, 8)
+                ),
             }
-            if ct is not None:
-                entry["mean_hu"] = round(float(np.mean(ct[organ_mask])), 1)
+            if sums is not None:
+                entry["mean_hu"] = round(float(sums[label_id] / voxel_count), 1)
             metrics.append(entry)
 
         return {"organ_metrics": metrics}
@@ -4451,7 +4544,121 @@ def _ai_compute_organ_metrics_from_labels(case_id):
 
 # Computed metrics are static per case — cache them so repeat questions don't
 # re-download the NIfTI from HuggingFace or recompute every time (big latency win).
-_AI_METRICS_CACHE = {}
+# Only what THIS server computed goes in: numbers the browser sent are used for
+# that one request and never stored, or one account could poison every other
+# user's answers for the case. Keyed by case id, stamped with the labelmap's
+# mtime so a re-processed scan is recomputed, and capped so ids cannot pile up.
+_AI_METRICS_CACHE = OrderedDict()
+_AI_METRICS_CACHE_MAX = 64
+_AI_METRICS_CACHE_LOCK = threading.Lock()
+
+
+def _ai_metrics_stamp(identifier):
+    """mtime of the labelmap already on disk for this id, 0.0 when there is none.
+
+    Never downloads: it only decides whether a cached answer is still current.
+    """
+    try:
+        if identifier.isdigit():
+            pants_id = _ai_pants_id_or_none(identifier)
+            candidates = []
+            if pants_id and Constants.PANTS_PATH:
+                candidates.append(os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, "combined_labels.nii.gz"))
+            if pants_id:
+                candidates.append(os.path.join(LOWRES_ROOT, "mask_only", pants_id, "combined_labels_lowres.nii.gz"))
+            path = next((item for item in candidates if os.path.exists(item)), None)
+        else:
+            path = _session_seg_path(identifier)
+        return os.path.getmtime(path) if path else 0.0
+    except Exception:
+        return 0.0
+
+
+# /mask-data for a dataset case is static per case, but measuring a large CT
+# takes a second or more, and the viewer, compare page and assistant asked for it
+# on every open. Keyed by case id and stamped with the raw mask and CT the
+# measurement reads plus the label scheme, so a replaced file or a renumbering is
+# measured again. Entries are JSON text, so every reader gets its own copy. Only
+# numeric dataset ids: a session id carries an ownership check and per-job state.
+_MASK_DATA_CACHE = OrderedDict()
+_MASK_DATA_CACHE_MAX = 64
+_MASK_DATA_CACHE_LOCK = threading.Lock()
+
+
+def _file_stamp(path):
+    """(path, mtime_ns, size) of a file on disk, or None when it is absent."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (path, stat.st_mtime_ns, stat.st_size)
+
+
+def _mask_data_stamp(case_id):
+    """The files a dataset case's organ metrics come from, or None.
+
+    Looks in the order the measurement resolves them: the local dataset, the
+    low-res copy (mask only), then a copy already in the HuggingFace cache. It
+    only stats files and never downloads. None when no mask is on disk, so a
+    case measured from a fresh download is stored on its next request.
+    """
+    pants_id = _ai_pants_id_or_none(case_id)
+    if not pants_id:
+        return None
+    masks, cts = [], []
+    if Constants.PANTS_PATH:
+        masks.append(os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, "combined_labels.nii.gz"))
+        cts.append(os.path.join(Constants.PANTS_PATH, "image_only", pants_id, "ct.nii.gz"))
+    masks.append(os.path.join(LOWRES_ROOT, "mask_only", pants_id, "combined_labels_lowres.nii.gz"))
+    masks.append(os.path.join(_AI_HF_CACHE_ROOT, pants_id, "combined_labels.nii.gz"))
+    cts.append(os.path.join(_AI_HF_CACHE_ROOT, pants_id, "ct.nii.gz"))
+    mask = next((stamp for stamp in map(_file_stamp, masks) if stamp), None)
+    if mask is None:
+        return None
+    ct = next((stamp for stamp in map(_file_stamp, cts) if stamp), None)
+    return (LABEL_SCHEME, mask, ct)
+
+
+def _mask_data_for_case(case_id):
+    """Organ metrics for a numeric dataset case, measured once per stamp."""
+    # '7', '007' and '0007' are the same case, so they share one cache slot.
+    case_id = str(int(case_id))
+    stamp = _mask_data_stamp(case_id)
+    if stamp is not None:
+        with _MASK_DATA_CACHE_LOCK:
+            cached = _MASK_DATA_CACHE.get(case_id)
+            if cached is not None and cached[0] == stamp:
+                _MASK_DATA_CACHE.move_to_end(case_id)
+                return json.loads(cached[1])
+
+    result = get_mask_data_internal(case_id)
+    # Fall back to the label-based computation (with HuggingFace download) when
+    # the local dataset is unavailable, so organ statistics still resolve.
+    if not isinstance(result, dict) or result.get("error") or not result.get("organ_metrics"):
+        robust = _ai_compute_organ_metrics_from_labels(case_id)
+        if robust and robust.get("organ_metrics"):
+            result = robust
+
+    # Errors and empty answers are never kept, and neither is an answer whose
+    # files changed while it was measured (a CT fetched on this call, say).
+    if (
+        stamp is not None
+        and isinstance(result, dict)
+        and not result.get("error")
+        and result.get("organ_metrics")
+        and _mask_data_stamp(case_id) == stamp
+    ):
+        try:
+            encoded = json.dumps(result)
+        except (TypeError, ValueError):
+            encoded = None
+        if encoded is not None:
+            with _MASK_DATA_CACHE_LOCK:
+                _MASK_DATA_CACHE[case_id] = (stamp, encoded)
+                _MASK_DATA_CACHE.move_to_end(case_id)
+                while len(_MASK_DATA_CACHE) > _MASK_DATA_CACHE_MAX:
+                    _MASK_DATA_CACHE.popitem(last=False)
+    return result
 
 
 def _ai_mask_path_for(case_id):
@@ -4470,6 +4677,24 @@ def _ai_mask_path_for(case_id):
     except Exception as error:
         print("[ai lesion] session mask lookup failed:", type(error).__name__, error)
         return None
+
+
+def _ai_case_allowed(case_id):
+    """Whether this caller may have the assistant read this case's segmentation.
+
+    Dataset ids (PanTS numeric, CancerVerse CV) are open. Anything else is an
+    uploaded session: only its owner or an administrator may ask about it, so a
+    session id someone else knows does not leak that scan's organ volumes or
+    lesion findings through the assistant. Upload ids are client-chosen, so a CV
+    shaped id is only a dataset id when no upload job exists under it.
+    """
+    identifier = str(case_id or "").strip()
+    if not identifier or identifier.isdigit():
+        return True
+    if get_dataset_from_case_id(identifier) == "CancerVerse" and _get_inference_job(identifier) is None:
+        return True
+    _job, access_error = _job_for_current_user(identifier)
+    return access_error is None
 
 
 def _ai_component_facts(message, metrics, available_organs):
@@ -4734,8 +4959,15 @@ def _ai_load_metrics(case_id, supplied_metrics):
 
     identifier = str(case_id or "").strip()
 
-    if identifier and identifier in _AI_METRICS_CACHE:
-        return _AI_METRICS_CACHE[identifier]
+    cacheable = bool(identifier) and _is_safe_id(identifier)
+
+    if cacheable:
+        stamp = _ai_metrics_stamp(identifier)
+        with _AI_METRICS_CACHE_LOCK:
+            cached = _AI_METRICS_CACHE.get(identifier)
+            if cached is not None and cached[2] == stamp:
+                _AI_METRICS_CACHE.move_to_end(identifier)
+                return cached[0], cached[1]
 
     # Fast path: the browser already fetched these from THIS server's
     # /api/mask-data, so they are the same numbers the block below would
@@ -4748,21 +4980,14 @@ def _ai_load_metrics(case_id, supplied_metrics):
             if isinstance(item, dict)
         ]
         if cleaned:
-            if identifier:
-                _AI_METRICS_CACHE[identifier] = (cleaned, "frontend_supplied_metrics")
             return cleaned, "frontend_supplied_metrics"
 
     if identifier and _is_safe_id(identifier):
         try:
             if identifier.isdigit():
-                result = get_mask_data_internal(identifier)
-                # Fall back to the robust label-based computation (with HF
-                # download) when the local dataset path is unavailable, so
-                # organ-volume questions still resolve to real numbers.
-                if not isinstance(result, dict) or result.get("error") or not result.get("organ_metrics"):
-                    robust = _ai_compute_organ_metrics_from_labels(identifier)
-                    if robust and robust.get("organ_metrics"):
-                        result = robust
+                # The same numbers /mask-data serves, from its cache when the
+                # viewer already opened this case.
+                result = _mask_data_for_case(identifier)
                 source = "server_mask_data"
             else:
                 # Optional session metric helper isn't shipped in every deployment.
@@ -4791,7 +5016,11 @@ def _ai_load_metrics(case_id, supplied_metrics):
                     ]
 
                     if cleaned:
-                        _AI_METRICS_CACHE[identifier] = (cleaned, source)
+                        with _AI_METRICS_CACHE_LOCK:
+                            _AI_METRICS_CACHE[identifier] = (cleaned, source, _ai_metrics_stamp(identifier))
+                            _AI_METRICS_CACHE.move_to_end(identifier)
+                            while len(_AI_METRICS_CACHE) > _AI_METRICS_CACHE_MAX:
+                                _AI_METRICS_CACHE.popitem(last=False)
                         return cleaned, source
 
         except Exception as error:
@@ -6512,6 +6741,10 @@ def ai_command():
             or ""
         ).strip()
 
+        # Someone else's session is answered as if no case were open.
+        if not _ai_case_allowed(case_id):
+            case_id = ""
+
         requested_model = body.get("model")
 
         # Always use the configured default when the frontend does not
@@ -6815,6 +7048,9 @@ def ai_command_stream():
 
     viewer_state = body.get("viewer_state") if isinstance(body.get("viewer_state"), dict) else {}
     case_id = str(body.get("session_id") or body.get("case_id") or "").strip()
+    # Someone else's session is answered as if no case were open.
+    if not _ai_case_allowed(case_id):
+        case_id = ""
 
     requested_model = body.get("model")
     selected_model = (
@@ -7721,11 +7957,12 @@ def vessel_cpr(case_id):
         ct_obj = nib.load(ct_path)
         # float32 (see interactive_segment): halves the per-request RAM footprint.
         ct = ct_obj.get_fdata(dtype=np.float32)
-        labels = nib.load(mask_path).get_fdata(dtype=np.float32)
-        vessel_mask = (np.round(labels) == vessel_label).astype(np.uint8)
+        # The vessel and lesion ids are the viewer's; the dataset mask is not.
+        labels = to_viewer(np.asanyarray(nib.load(mask_path).dataobj))
+        vessel_mask = (labels == vessel_label).astype(np.uint8)
         if vessel_mask.sum() == 0:
             return jsonify({"error": "That vessel isn't segmented in this case."}), 422
-        lesion_mask = (np.round(labels) == lesion_label).astype(np.uint8)
+        lesion_mask = (labels == lesion_label).astype(np.uint8)
         has_lesion = lesion_mask.sum() > 0
 
         res = analyze_vessel(

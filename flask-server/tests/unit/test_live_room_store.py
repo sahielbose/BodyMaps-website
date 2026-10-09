@@ -80,7 +80,9 @@ def test_fast_room_keeps_full_resolution_mask(room_store):
     stored = json.loads((store.root / metadata["room_id"] / "metadata.json").read_text())
 
     assert stored["base_ct_path"].endswith("ct_lowres.nii.gz")
-    assert stored["base_mask_path"].endswith("combined_labels.nii.gz")
+    # The room edits a copy in viewer ids; the full-resolution dataset mask stays its source.
+    assert stored["base_mask_path"].endswith("base_mask_viewer.nii.gz")
+    assert stored["source_mask_path"].endswith("mask_only/PanTS_00000035/combined_labels.nii.gz")
     assert metadata["dimensions"] == [4, 4, 2]
 
 

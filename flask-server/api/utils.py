@@ -11,6 +11,7 @@ from models.application_session import ApplicationSession
 from models.combined_labels import CombinedLabels
 from models.base import db
 from constants import Constants
+from services.label_scheme import PANTS_LABELS, VIEWER_IDS, VIEWER_LABELS, to_viewer, viewer_labelmap_path
 
 
 from io import BytesIO
@@ -149,25 +150,13 @@ def get_mask_data_internal(id, fallback=False):
         main_nifti_path = os.path.join(Constants.PANTS_PATH, "image_only", pants_id, Constants.MAIN_NIFTI_FILENAME)
         combined_labels_path = os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, Constants.COMBINED_LABELS_NIFTI_FILENAME)
         print(f"[INFO] Processing NIFTI for id {id}")
-        organ_intensities = None
-        
-        organ_intensities_path = os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, Constants.ORGAN_INTENSITIES_FILENAME)
-        
-        nifti_processor = NiftiProcessor(main_nifti_path, combined_labels_path)
-        if not os.path.exists(organ_intensities_path) or not os.path.exists(combined_labels_path):
-            segmentation_path = os.path.join(Constants.PANTS_PATH, "mask_only", pants_id, "segmentations")
-            seg_filenames = os.listdir(segmentation_path)
-            
-            print(f"[INFO] Creating organ intesities at {organ_intensities_path} for id {id}")
-            
-            nifti_multi_dict = create_nifti_multi_dict(seg_filenames, segmentation_path)
-            combined_labels, organ_intensities = nifti_processor.combine_labels(seg_filenames, nifti_multi_dict, save=False)
 
-            with open(organ_intensities_path, "w") as f:
-                json.dump(organ_intensities, f)
-        with open(organ_intensities_path, "r") as f:
-            organ_intensities = json.load(f)
-        
+        # The mask is read in viewer ids, so the organ table is fixed: the organs a
+        # PanTS mask can hold, at their viewer ids. A per-case organ_intensities.json
+        # is never used, because its ids followed the order of the segmentations/
+        # directory listing, not the mask's own numbering.
+        organ_intensities = {key: VIEWER_IDS[key] for key in PANTS_LABELS.values()}
+        nifti_processor = NiftiProcessor(main_nifti_path, viewer_labelmap_path(combined_labels_path))
         nifti_processor.set_organ_intensities(organ_intensities)
         organ_metadata = nifti_processor.calculate_metrics()
         organ_metadata = clean_nan(organ_metadata)
@@ -199,26 +188,8 @@ def get_session_mask_data(session_id, job):
     _get_inference_job lives in api_blueprint.py and importing it back here
     would be circular (api_blueprint already does `from .utils import *`).
     """
-    from services.auto_segmentor import (
-        _EPAI_TO_VIEWER, _ATLASNET_TO_VIEWER, _SUPREM_TO_VIEWER,
-        _MEDIA_AGENTIC_ORGANS_TO_VIEWER, _MEDIA_AGENTIC_VERTEBRAE_TO_VIEWER,
-        _LESIONSEG_TO_VIEWER, _VIEWER_LABELS,
-    )
-    # _VIEWER_LABELS is {name: viewer_int}; the *_TO_VIEWER maps are
-    # {model_raw_label_int: viewer_int}. calculate_metrics() needs
-    # {name: model_raw_label_int} -- it indexes the combined-labels volume
-    # (which stores the model's own raw ints) directly by that value, so the
-    # viewer_int is only useful here as the join key back to a readable name.
-    _viewer_int_to_name = {v: k for k, v in _VIEWER_LABELS.items()}
-
-    model_to_viewer_map = {
-        "ePAI": _EPAI_TO_VIEWER,
-        "Atlas-Net": _ATLASNET_TO_VIEWER,
-        "SuPreM": _SUPREM_TO_VIEWER,
-        "MedIA-Agentic-Organs": _MEDIA_AGENTIC_ORGANS_TO_VIEWER,
-        "MedIA-Agentic-Vertebrae": _MEDIA_AGENTIC_VERTEBRAE_TO_VIEWER,
-        "LesionSegmenter": _LESIONSEG_TO_VIEWER,
-    }
+    from services.auto_segmentor import MODEL_TO_VIEWER
+    from services.label_scheme import VIEWER_LABELS
 
     try:
         if not job:
@@ -232,7 +203,7 @@ def get_session_mask_data(session_id, job):
         if not ct_path or not output_mask_dir or not model:
             return {"error": "Completed job is missing ct_path, output_mask_dir, or model"}
 
-        viewer_map = model_to_viewer_map.get(model)
+        viewer_map = MODEL_TO_VIEWER.get(model)
         if viewer_map is None:
             return {"error": f"No organ label map known for model {model!r}"}
 
@@ -240,16 +211,16 @@ def get_session_mask_data(session_id, job):
         if not os.path.exists(ct_path) or not os.path.exists(combined_labels_path):
             return {"error": "Session output files are missing on disk"}
 
-        # Multiple raw labels can share one viewer name (e.g. ePAI's three
-        # lesion subtypes all report as "pancreatic_lesion"); later entries
-        # win, same as every other place in this codebase that inverts one of
-        # these maps. Good enough to show real per-organ stats instead of
-        # nothing; not a fix for that pre-existing many-to-one collapse.
+        # _remap_combined_labels rewrote this mask into viewer ids when the
+        # model finished, so each organ is read at the viewer id the model's
+        # map sends it to, never at the model's own number. Raw classes that
+        # share an id (ePAI's three pancreatic lesion subtypes) are one organ
+        # in the mask as well.
         organ_intensities = {}
-        for model_label_val, viewer_int in viewer_map.items():
-            name = _viewer_int_to_name.get(viewer_int)
-            if name:
-                organ_intensities[name] = model_label_val
+        for viewer_id in sorted(set(viewer_map.values())):
+            meta = VIEWER_LABELS.get(viewer_id)
+            if meta:
+                organ_intensities[meta["key"]] = viewer_id
 
         nifti_processor = NiftiProcessor(ct_path, combined_labels_path, organ_intensities)
         organ_metadata = nifti_processor.calculate_metrics()
@@ -411,7 +382,7 @@ def generate_pdf_with_template(
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import letter
 
-    LABELS = {v: k for k, v in Constants.PREDEFINED_LABELS.items()}
+    LABELS = {meta["key"]: label_id for label_id, meta in VIEWER_LABELS.items()}
     NAME_TO_ORGAN = {
         # Pancreas and its lesions
         "pancreas": "pancreas",
@@ -509,7 +480,7 @@ def generate_pdf_with_template(
         title_width = temp_pdf.stringWidth(title_text, "Helvetica-Bold", 18)
         temp_pdf.drawString((width - title_width) / 2, height - 35, title_text)
         temp_pdf.setFont("Helvetica", 10)
-        sub_text = "Department of Radiology — AI-Generated Medical Report"
+        sub_text = "Department of Radiology, AI-generated medical report"
         sub_width = temp_pdf.stringWidth(sub_text, "Helvetica", 10)
         temp_pdf.drawString((width - sub_width) / 2, height - 52, sub_text)
         temp_pdf.setFont("Helvetica", 8)
@@ -562,7 +533,8 @@ def generate_pdf_with_template(
 
         # Load image data
         ct_array = ct_nii.get_fdata()
-        mask_array = nib.load(mask_path).get_fdata().astype(np.uint8)
+        # mask_path is a PanTS dataset mask: convert it to viewer ids once.
+        mask_array = to_viewer(np.asanyarray(nib.load(mask_path).dataobj))
         voxel_volume = np.prod(nib.load(mask_path).header.get_zooms()) / 1000  # mm³ to cm³
         print(np.unique(mask_array))
 
@@ -619,8 +591,6 @@ def generate_pdf_with_template(
         
         for organ, label_id in LABELS.items():
             if organ in NAME_TO_ORGAN and NAME_TO_ORGAN[organ] != organ:
-                continue
-            if label_id == 0:
                 continue
             mask = (mask_array == label_id)
             if not np.any(mask):
@@ -712,8 +682,6 @@ def generate_pdf_with_template(
         organ_data_str = ""
         for organ, label_id in LABELS.items():
             if organ in NAME_TO_ORGAN and NAME_TO_ORGAN[organ] != organ:
-                continue
-            if label_id == 0:
                 continue
             mask = (mask_array == label_id)
             if not np.any(mask):
@@ -1017,7 +985,7 @@ async def store_files(combined_labels_id):
     download(image_url, image_path)
 
     # labels
-    for label in list(Constants.PREDEFINED_LABELS.values()):
+    for label in list(PANTS_LABELS.values()):
         mask_url = f"https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/mask_only/{get_panTS_id(combined_labels_id)}/segmentations/{label}.nii.gz"
         mask_path = f"{Constants.PANTS_PATH}/mask_only/{get_panTS_id(combined_labels_id)}/segmentations/{label}.nii.gz"
         download(mask_url, mask_path)

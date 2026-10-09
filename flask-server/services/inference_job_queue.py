@@ -263,7 +263,30 @@ class InferenceJobQueue:
             os.makedirs(result_dir, exist_ok=True)
 
             mask_dest = os.path.join(result_dir, "combined_labels.nii.gz")
-            shutil.copy2(result_mask_path, mask_dest)
+            # Workers upload the model's own label ids (run_epai_worker.sh
+            # copies the raw nnU-Net prediction). Rewrite a copy into viewer
+            # ids with the same map the in-process runner uses. The upload stays
+            # raw and every result post makes a fresh copy, so a repeated post
+            # converts once too. Never the PanTS dataset table: that is for
+            # dataset masks only. The copy is converted beside the result and
+            # only then moved over it, so a bad repeat post leaves an earlier
+            # good result untouched.
+            from services.auto_segmentor import MODEL_TO_VIEWER, _remap_combined_labels
+            label_map = MODEL_TO_VIEWER.get(job.get("model"))
+            staged = os.path.join(result_dir, f".incoming-{uuid.uuid4().hex}.nii.gz")
+            shutil.copy2(result_mask_path, staged)
+            try:
+                if label_map is not None:
+                    try:
+                        _remap_combined_labels(staged, label_map)
+                    except (OSError, MemoryError):
+                        raise
+                    except Exception as e:
+                        raise ValueError(f"Result mask is not a readable NIfTI: {e}") from e
+                os.replace(staged, mask_dest)
+            finally:
+                if os.path.exists(staged):
+                    os.remove(staged)
 
             csv_dest = None
             if result_csv_path:

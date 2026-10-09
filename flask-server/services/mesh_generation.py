@@ -14,53 +14,59 @@ import trimesh
 
 from constants import Constants
 from services.atomic_write import atomic_destination
+from services.label_scheme import PANTS_TO_VIEWER, SCHEME as LABEL_SCHEME, VIEWER_LABELS
 from utils import *
 
 dotenv.load_dotenv()
 
-LABELS = {
-	1: {"key": "adrenal_gland_left", "name": "Left Adrenal Gland"},
-	2: {"key": "adrenal_gland_right", "name": "Right Adrenal Gland"},
-    3: {"key": "aorta", "name": "Aorta"},
-    4: {"key": "bladder", "name": "Bladder"},
-    5: {"key": "celiac_artery", "name": "Celiac Artery"},
-    6: {"key": "colon", "name": "Colon"},
-    7: {"key": "common_bile_duct", "name": "Common Bile Duct"},
-    8: {"key": "duodenum", "name": "Duodenum"},
-    9: {"key": "femur_left", "name": "Left Femur"},
-    10: {"key": "femur_right", "name": "Right Femur"},
-    11: {"key": "gall_bladder", "name": "Gall Bladder"},
-    12: {"key": "kidney_left", "name": "Left Kidney"},
-    13: {"key": "kidney_right", "name": "Right Kidney"},
-    14: {"key": "liver", "name": "Liver"},
-    15: {"key": "lung_left", "name": "Left Lung"},
-    16: {"key": "lung_right", "name": "Right Lung"},
-    17: {"key": "pancreas", "name": "Pancreas"},
-    18: {"key": "pancreas_body", "name": "Pancreas Body"},
-    19: {"key": "pancreas_head", "name": "Pancreas Head"},
-    20: {"key": "pancreas_tail", "name": "Pancreas Tail"},
-    21: {"key": "pancreatic_duct", "name": "Pancreatic Duct"},
-    22: {"key": "pancreatic_lesion", "name": "Pancreatic Lesion"},
-    23: {"key": "postcava", "name": "Postcava"},
-    24: {"key": "prostate", "name": "Prostate"},
-    25: {"key": "spleen", "name": "Spleen"},
-    26: {"key": "stomach", "name": "Stomach"},
-    27: {"key": "superior_mesenteric_artery", "name": "Superior Mesenteric Artery"},    
-    28: {"key": "veins", "name": "Veins"},
-    29: {"key": "intestine", "name": "Intestine"},
-    30: {"key": "renal_vein_left", "name": "Left Renal Vein"},
-    31: {"key": "renal_vein_right", "name": "Right Renal Vein"},
-    32: {"key": "cbd_stent", "name": "Common Bile Duct Stent"},
-    33: {"key": "liver_lesion", "name": "Liver Lesion"},
-    34: {"key": "kidney_lesion", "name": "Kidney Lesion"},
-    35: {"key": "colon_lesion", "name": "Colon Lesion"},
-}
+# The viewer's organ catalog. A dataset mask is converted to it before baking
+# (services.label_scheme), so a mesh id is always the catalog id.
+LABELS = VIEWER_LABELS
 
 _mesh_generation_lock = threading.Lock()
 
 
 def safe_filename(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_\\-]+", "_", s).lower()
+
+
+def organ_glb_filename(organ: dict) -> str:
+    """The GLB an organ entry draws: its own "file" when relabelled, else <key>.glb."""
+    return str(organ.get("file") or f"{safe_filename(str(organ.get('key', '')))}.glb")
+
+
+def relabel_legacy_manifest(manifest: dict) -> dict:
+    """Give a manifest baked from a raw PanTS mask the viewer's ids and names.
+
+    Manifests written before the label conversion (no "labelScheme") were meshed
+    straight from the dataset mask, so each entry's id is the raw mask value
+    while its key and name came from the viewer catalog at that id: the spleen
+    sits in "prostate.glb" as id 24 and the lesion in "veins.glb" as id 28. The
+    geometry is right, only the labels are wrong, so this maps every id through
+    the dataset-to-viewer table and keeps each entry pointing at the GLB that
+    holds its geometry. Nothing is rebaked, so no mask is needed.
+    """
+    organs = []
+    for organ in manifest.get("organs") or []:
+        if not isinstance(organ, dict):
+            continue
+        try:
+            raw_id = int(organ.get("id"))
+        except (TypeError, ValueError):
+            continue
+        viewer_id = int(PANTS_TO_VIEWER[raw_id]) if 0 <= raw_id < len(PANTS_TO_VIEWER) else 0
+        if viewer_id == 0:
+            continue
+        meta = VIEWER_LABELS[viewer_id]
+        organs.append({
+            **organ,
+            "id": viewer_id,
+            "key": meta["key"],
+            "name": meta["name"],
+            "file": organ_glb_filename(organ),
+        })
+    organs.sort(key=lambda organ: organ["id"])
+    return {**manifest, "organs": organs, "labelScheme": LABEL_SCHEME}
 
 
 def _manifest_is_complete(manifest_path: Path) -> bool:
@@ -70,9 +76,12 @@ def _manifest_is_complete(manifest_path: Path) -> bool:
         bounds = manifest["bounds"]
         if not isinstance(organs, list) or not isinstance(bounds, dict):
             return False
+        # A manifest without the marker carries raw dataset ids and is stale.
+        if manifest.get("labelScheme") != LABEL_SCHEME:
+            return False
         return all(
             isinstance(organ, dict)
-            and (manifest_path.parent / f"{safe_filename(str(organ.get('key', '')))}.glb").is_file()
+            and (manifest_path.parent / organ_glb_filename(organ)).is_file()
             for organ in organs
         )
     except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -343,6 +352,9 @@ def bake_case_meshes(
         "organs": [],
         "bounds": bounds,
         "affine": img.affine.tolist(),
+        # The labelmap given here is in viewer ids (dataset masks are converted
+        # first), so the ids below are catalog ids.
+        "labelScheme": LABEL_SCHEME,
     }
 
     for label_id, meta in LABELS.items():

@@ -11,45 +11,14 @@ import trimesh
 import argparse
 
 from constants import Constants
+from services.label_scheme import SCHEME as LABEL_SCHEME, VIEWER_LABELS, viewer_labelmap_path
 from utils import *
 
 dotenv.load_dotenv()
 
-# Replace these with your real PanTS label IDs.
-LABELS = {
-	1: {"key": "adrenal_gland_left", "name": "Left Adrenal Gland"},
-	2: {"key": "adrenal_gland_right", "name": "Right Adrenal Gland"},
-    3: {"key": "aorta", "name": "Aorta"},
-    4: {"key": "bladder", "name": "Bladder"},
-    5: {"key": "celiac_artery", "name": "Celiac Artery"},
-    6: {"key": "colon", "name": "Colon"},
-    7: {"key": "common_bile_duct", "name": "Common Bile Duct"},
-    8: {"key": "duodenum", "name": "Duodenum"},
-    9: {"key": "femur_left", "name": "Left Femur"},
-    10: {"key": "femur_right", "name": "Right Femur"},
-    11: {"key": "gall_bladder", "name": "Gall Bladder"},
-    12: {"key": "kidney_left", "name": "Left Kidney"},
-    13: {"key": "kidney_right", "name": "Right Kidney"},
-    14: {"key": "liver", "name": "Liver"},
-    15: {"key": "lung_left", "name": "Left Lung"},
-    16: {"key": "lung_right", "name": "Right Lung"},
-    17: {"key": "pancreas", "name": "Pancreas"},
-    18: {"key": "pancreas_body", "name": "Pancreas Body"},
-    19: {"key": "pancreas_head", "name": "Pancreas Head"},
-    20: {"key": "pancreas_tail", "name": "Pancreas Tail"},
-    21: {"key": "pancreatic_duct", "name": "Pancreatic Duct"},
-    22: {"key": "pancreatic_lesion", "name": "Pancreatic Lesion"},
-    23: {"key": "postcava", "name": "Postcava"},
-    24: {"key": "prostate", "name": "Prostate"},
-    25: {"key": "spleen", "name": "Spleen"},
-    26: {"key": "stomach", "name": "Stomach"},
-    27: {"key": "superior_mesenteric_artery", "name": "Superior Mesenteric Artery"},    
-    28: {"key": "veins", "name": "Veins"},
-    29: {"key": "intestine", "name": "Intestine"},
-    30: {"key": "renal_vein_left", "name": "Left Renal Vein"},
-    31: {"key": "renal_vein_right", "name": "Right Renal Vein"},
-    32: {"key": "cbd_stent", "name": "Common Bile Duct Stent"},
-}
+# The viewer's organ catalog. preprocess_case_by_index converts the dataset mask
+# to it first, so mesh ids are catalog ids.
+LABELS = VIEWER_LABELS
 
 
 def safe_filename(s: str) -> str:
@@ -225,6 +194,7 @@ def preprocess_case(display_id: str, label_nifti_path: str, output_root: str, *,
         "organs": [],
         "bounds": bounds,
         "affine": img.affine.tolist(),
+        "labelScheme": LABEL_SCHEME,
     }
 
     for label_id, meta in LABELS.items():
@@ -288,7 +258,8 @@ def preprocess_case_by_index(index: int, skip_existing: bool = False):
 
     preprocess_case(
         display_id=pants_case,
-        label_nifti_path=nifti_path,
+        # The dataset mask numbers organs differently from the viewer.
+        label_nifti_path=viewer_labelmap_path(nifti_path),
         output_root=output_path,
     )
 

@@ -683,6 +683,19 @@ _LESIONSEG_TO_VIEWER = {
     42: _VIEWER_LABELS["colon_lesion"],
 }
 
+# Every model whose raw output _remap_combined_labels rewrites into viewer ids,
+# with the map it uses. The in-process runners below, the pull-worker queue and
+# the session organ stats all go by this one table. Models missing from it keep
+# their output as written, in-process and from a pull worker alike.
+MODEL_TO_VIEWER = {
+    "ePAI": _EPAI_TO_VIEWER,
+    "Atlas-Net": _ATLASNET_TO_VIEWER,
+    "SuPreM": _SUPREM_TO_VIEWER,
+    "MedIA-Agentic-Organs": _MEDIA_AGENTIC_ORGANS_TO_VIEWER,
+    "MedIA-Agentic-Vertebrae": _MEDIA_AGENTIC_VERTEBRAE_TO_VIEWER,
+    "LesionSegmenter": _LESIONSEG_TO_VIEWER,
+}
+
 
 def _remap_combined_labels(nii_path: str, label_map: dict) -> None:
     """Remap integer labels in a NIfTI file in-place to match the viewer's scheme."""

@@ -14,15 +14,19 @@ import nibabel as nib
 import numpy as np
 from scipy.spatial import ConvexHull, distance
 
+from services.label_scheme import PANTS_IDS, VIEWER_IDS
+
 
 CASE_ID = "35"
 DATASET_CASE_ID = "PanTS_00000035"
-LESION_LABEL = 28
+# Ground truth reads the raw dataset mask, where the lesion is 28.
+LESION_LABEL = PANTS_IDS["pancreatic_lesion"]
 REVEAL_LABEL = 1
-# The generated mesh manifest uses the viewer's standard organ catalog, where
-# pancreatic_lesion.glb is ID 22. This is intentionally distinct from the
-# source Case 35 segmentation label above.
-LESION_MESH_ORGAN_ID = 22
+# The mesh manifest is in the viewer's organ catalog, where the lesion is 22:
+# the dataset mask is converted before baking, and a manifest baked before that
+# is relabelled when it is read. This is intentionally distinct from the source
+# segmentation label above.
+LESION_MESH_ORGAN_ID = VIEWER_IDS["pancreatic_lesion"]
 VERIFIED_LOCATION = "pancreatic tail"
 VERIFIED_REFERENCE_DIAMETER_MM = 23.3
 

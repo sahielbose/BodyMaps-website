@@ -1,6 +1,7 @@
 import nibabel as nib
 import numpy as np
 from constants import Constants
+from services.label_scheme import VIEWER_LABELS
 from werkzeug.datastructures import MultiDict
 import scipy.ndimage as ndimage
 import os
@@ -338,9 +339,10 @@ class NiftiProcessor:
                 original_to_new[original_label] = new_label
                 combined_labels_img_data[combined_labels_img_data == original_label] = new_label
 
+            # An uploaded labelmap is expected in the viewer's organ ids.
             for original_label, new_label in original_to_new.items():
-                organ_name = Constants.PREDEFINED_LABELS.get(
-                    original_label,
+                organ_name = VIEWER_LABELS.get(original_label, {}).get(
+                    "key",
                     f"label_{original_label}"
                 )
 
