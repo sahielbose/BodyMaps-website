@@ -2680,6 +2680,12 @@
   cursor: crosshair;
 }
 
+/* Box, scribble and lasso run off a finger drag on a touch screen, which the
+   browser would otherwise take for a page scroll or pinch. */
+.vp-pane--prompt-drag {
+  touch-action: none;
+}
+
 .vp-edit__method-grid {
   display: grid;
   grid-template-columns: 1fr;

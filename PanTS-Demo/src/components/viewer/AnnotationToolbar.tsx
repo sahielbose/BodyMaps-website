@@ -13,6 +13,11 @@ import {
 	IconCopy,
 	IconWaveSine,
 	IconCircleDashed,
+	IconTarget,
+	IconBoxAlignTopLeft,
+	IconScribble,
+	IconLasso,
+	IconSparkles,
 	IconCheck,
 } from "@tabler/icons-react";
 import "./AnnotationToolbar.css";
@@ -21,6 +26,12 @@ import { FlyoutArrow, FlyoutPanel, MenuColumn, MenuRow, MenuDivider, useFlyout }
 import { tooltipSide } from "../../helpers/viewer/tooltipSide";
 import { ribbonHiddenStrip, snapRibbonScroll } from "../../helpers/viewer/ribbonSnap";
 import { MAX_DIAMETER_MM, MIN_DIAMETER_MM } from "../../helpers/viewer/brushSize";
+import {
+	interactiveAttribution,
+	primeInteractiveLicense,
+	modelToolOffered,
+	useInteractiveCapabilities,
+} from "../../helpers/viewer/interactiveAttribution";
 import { useGuidedStepModalOpen, type GuidedFlowControls } from "../segmentation/SliceAnchorPickerUI";
 import { focusableWithin, useDialogFocus } from "../../hooks/useDialogFocus";
 
@@ -38,7 +49,8 @@ export type PrimaryEditTool =
 	| "paint" | "erase" | "scissors" | "levelTracing"
 	| "margin" | "smoothing" | "islands" | "logicalOperators"
 	| "growFromSeeds" | "fillBetweenSlices" | "copyAcrossSlices" | "hollow"
-	| "pointSegment" | "boxSegment"
+	| "pointSegment" | "boxSegment" | "scribbleSegment" | "lassoSegment"
+	| "refineSegment"
 	| null;
 export type ScissorsOperation = "eraseInside" | "eraseOutside" | "fillInside" | "fillOutside";
 export type ScissorsSliceCut = "unlimited" | "positive" | "negative" | "symmetric";
@@ -97,13 +109,30 @@ interface AnnotationToolbarProps {
 	 *  pointer-tracking effect below and .atb--horizontal__pointer. */
 	anchorRef?: React.RefObject<HTMLElement | null>;
 
+	/** False where the model can't be asked at all: an uploaded scan's
+	 *  session view has no dataset case for the backend to load, so the
+	 *  model tools are left out there instead of doing nothing on a click.
+	 *  Defaults to true. */
+	modelToolsAvailable?: boolean;
+
 }
 
-const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: typeof IconBrush; description: string }> = [	
+// The four model-prompt tools carry an attribution line under their
+// tooltips. Its text lives in interactiveAttribution(), which reads the
+// weights licence from the running model server (with today's licence as
+// the fallback) — the attribution and the licence scope belong right where
+// the feature is offered, not buried in a repo file, and they must track
+// whatever checkpoint the server actually loaded.
+const TOOL_DEFS: Array<{ id: Exclude<PrimaryEditTool, null>; label: string; Icon: typeof IconBrush; description: string; modelAttribution?: boolean }> = [
 	{ id: "paint", label: "Brush", Icon: IconBrush, description: "Paint freehand with a round brush." },
 	{ id: "erase", label: "Erase", Icon: IconEraser, description: "Erase parts of a shape manually." },
 	{ id: "scissors", label: "Scissors", Icon: IconScissors, description: "Lasso tool using anchor points." },
 	{ id: "levelTracing", label: "Level tracing", Icon: IconRipple, description: "Traces the boundary of similar intensity around cursor." },
+	{ id: "pointSegment", label: "Segment from click", Icon: IconTarget, description: "Click a structure once and the model proposes its full 3D mask.", modelAttribution: true },
+	{ id: "boxSegment", label: "Segment from box", Icon: IconBoxAlignTopLeft, description: "Drag a box around a structure on one slice to get its 3D mask.", modelAttribution: true },
+	{ id: "scribbleSegment", label: "Segment from scribble", Icon: IconScribble, description: "Draw a quick stroke over a structure and the model segments it in 3D.", modelAttribution: true },
+	{ id: "lassoSegment", label: "Segment from lasso", Icon: IconLasso, description: "Circle a structure freehand and the model segments everything inside.", modelAttribution: true },
+	{ id: "refineSegment", label: "Refine with model", Icon: IconSparkles, description: "The model redraws the class's outline from its current voxels, with no clicks.", modelAttribution: true },
 	{ id: "margin", label: "Margin", Icon: IconArrowsDiagonal, description: "Grow or shrink by a specified margin size." },
 	{ id: "smoothing", label: "Smoothing", Icon: IconWaveSine, description: "Smooth class boundaries." },
 	{ id: "islands", label: "Islands", Icon: IconDroplet, description: "Edit islands (connected components) in a class." },
@@ -123,7 +152,11 @@ const SCISSORS_OPERATIONS: { value: ScissorsOperation; label: string }[] = [
 
 // Tools that don't have an ApplyButton — they commit directly on pointer
 // interaction, so the rendering dot is the only feedback available.
-const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "scissors", "levelTracing", "pointSegment", "boxSegment"];
+const LIVE_COMMIT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["paint", "erase", "scissors", "levelTracing", "pointSegment", "boxSegment", "scribbleSegment", "lassoSegment"];
+
+// The model-prompt tools: equip-and-use like the brush, but no settings
+// flyout at all — everything they need is the click/drag gesture itself.
+const PROMPT_TOOLS: Exclude<PrimaryEditTool, null>[] = ["pointSegment", "boxSegment", "scribbleSegment", "lassoSegment"];
 
 // Which "explain Continue / Start over / Exit" message a guided tool falls
 // under. Grow from Seeds gets its own copy; the slice-range tools (Copy/Fill
@@ -293,17 +326,19 @@ const isFocusVisible = (el: Element): boolean => {
 // getBoundingClientRect of the hovered icon, so it's never clipped by the
 // dock's own overflow:hidden/auto rules.
 function IconTooltip({
-	id, label, description, anchorRect,
+	id, label, description, attribution, anchorRect,
 }: {
 	id: string;
 	label: string;
 	description: string;
+	attribution?: string;
 	anchorRect: DOMRect | null;
 }) {
 	const boxRef = useRef<HTMLDivElement>(null);
 	const [side, setSide] = useState<"above" | "below">("above");
 	// Its height is only known once rendered, so measure before paint and
-	// flip below the icon when it would run off the top of the window.
+	// flip below the icon when it would run off the top of the window (the
+	// model tools' tooltips carry a licence line and are tall).
 	useLayoutEffect(() => {
 		const box = boxRef.current;
 		if (!box || !anchorRect) return;
@@ -311,7 +346,7 @@ function IconTooltip({
 		const ceiling = topbar ? Math.max(0, topbar.getBoundingClientRect().bottom) : 0;
 		const next = tooltipSide(anchorRect, box.offsetHeight, window.innerHeight, undefined, undefined, ceiling);
 		if (next !== side) setSide(next);
-	}, [anchorRect, label, description, side]);
+	}, [anchorRect, label, description, attribution, side]);
 	if (!anchorRect) return null;
 	// Tooltip is centered above its icon by default (so it reads as an
 	// annotation on the icon rather than colliding with whatever settings
@@ -341,6 +376,7 @@ function IconTooltip({
 		>
 			<div className="atb-icon-tip__label">{label}</div>
 			<div className="atb-icon-tip__desc">{description}</div>
+			{attribution && <div className="atb-icon-tip__attribution">{attribution}</div>}
 		</div>,
 		document.body
 	);
@@ -351,13 +387,17 @@ export default function AnnotationToolbar({
 	diameterMm, onDiameterChange, onDiameterPreviewChange, scissorsOptions, onScissorsOptionsChange,
 	renderFlyout, scissorsPointCount, onScissorsCancel,
 	targetKey,
-	popupRef, onGuidedPickingChange, anchorRef,
+	popupRef, onGuidedPickingChange, anchorRef, modelToolsAvailable = true,
 }: AnnotationToolbarProps) {
 	// The hovered tool and its anchor rect live in one object so leaving one
 	// tile can never null the rect that the next tile's enter just queued.
 	const [hover, setHover] = useState<{ id: string; rect: DOMRect | null } | null>(null);
 	const hoveredTool = hover?.id ?? null;
 	const tipIdBase = useId();
+	// Fetch the live licence string once so the model-tool tooltips show what
+	// the running server actually reports rather than only the fallback.
+	useEffect(() => primeInteractiveLicense(), []);
+	const modelCaps = useInteractiveCapabilities();
 	const iconRefs = useRef<Record<string, HTMLElement | null>>({});
 	// Just the icon <button> itself, keyed the same as iconRefs — needed
 	// only for LIVE_COMMIT_TOOLS, whose wrapper div also contains the
@@ -467,11 +507,15 @@ export default function AnnotationToolbar({
 		el.addEventListener("scrollend", sync);
 		const ro = new ResizeObserver(() => sync());
 		ro.observe(el);
+		// Tools come and go with the model's capabilities without resizing the row.
+		const mo = new MutationObserver(() => sync());
+		mo.observe(el, { childList: true });
 		return () => {
 			window.clearTimeout(settleTimer);
 			el.removeEventListener("scroll", onScroll);
 			el.removeEventListener("scrollend", sync);
 			ro.disconnect();
+			mo.disconnect();
 		};
 	}, [open]);
 
@@ -1036,15 +1080,15 @@ export default function AnnotationToolbar({
 				data-more-start={toolsMore.start || undefined}
 				data-more-end={toolsMore.end || undefined}
 			>
-				{TOOL_DEFS.map(({ id, label, Icon, description }) => {
+				{TOOL_DEFS.filter(({ id, modelAttribution }) => modelToolOffered(id, modelCaps) && (modelToolsAvailable || !modelAttribution)).map(({ id, label, Icon, description, modelAttribution }) => {
 					// Only equip-and-use tools (paint/erase/scissors/level tracing)
 					// get a settings arrow; other tools open settings on icon click.
 					const hasSettingsArrow =
-						LIVE_COMMIT_TOOLS.includes(id) && id !== "pointSegment" && id !== "boxSegment";
+						LIVE_COMMIT_TOOLS.includes(id) && !PROMPT_TOOLS.includes(id);
 					const settingsOpenHere = toolFlyout.open && activeTool === id;
 					// The tip is only in the page while it shows, so the button
-					// points at it only then; that puts the description in the
-					// button's accessible description.
+					// points at it only then; that puts the description and the
+					// licence line in the button's accessible description.
 					const tipShown = hoveredTool === id && !toolFlyout.open && !!hover?.rect;
 					const tipId = `${tipIdBase}-tip-${id}`;
 					return (
@@ -1099,6 +1143,7 @@ export default function AnnotationToolbar({
 												? `${description} Pick a class first.`
 												: description
 									}
+									attribution={modelAttribution ? interactiveAttribution() : undefined}
 									anchorRect={hover?.rect ?? null}
 								/>
 							)}
@@ -1272,7 +1317,7 @@ export default function AnnotationToolbar({
 											onCloseSettings={() => toolFlyout.setOpen(false)}
 										/>
 									)}
-									{activeTool && !["paint", "erase", "scissors", "pointSegment", "boxSegment"].includes(activeTool) && renderFlyout(activeTool, handleToolApplied, () => toolFlyout.setOpen(false), setGuidedControls)}
+									{activeTool && !["paint", "erase", "scissors", ...PROMPT_TOOLS].includes(activeTool) && renderFlyout(activeTool, handleToolApplied, () => toolFlyout.setOpen(false), setGuidedControls)}
 								</div>
 							</div>
 						</div>

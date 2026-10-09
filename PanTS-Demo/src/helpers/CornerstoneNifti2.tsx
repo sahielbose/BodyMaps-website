@@ -2426,8 +2426,24 @@ export async function upgradeSegmentationVolume(fullResSegUrl: string): Promise<
 // Verified end-to-end against the live nninteractive-server on case 1
 // (point and box prompts, both resolutions, undo, segment switching).
 export interface InteractivePrompt {
-  pointLps: Point3;
+  /** The click, or the gesture's first vertex for boxes and strokes.
+   *  Required for every prompt except `refine`, which has no location. */
+  pointLps?: Point3;
   boxLps?: [Point3, Point3];
+  /** Stroke prompt: 2+ world points along a line the user drew on ONE pane.
+   *  The backend rasterizes it to a thin polyline mask on that slice and the
+   *  model segments the structure under it. pointLps should still carry the
+   *  stroke's first vertex. Takes precedence over boxLps server-side. */
+  scribbleLps?: Point3[];
+  /** The pane a scribble or lasso was drawn on. A stroke that stays on one
+   *  voxel row or column cannot reveal its own slice axis, so the server
+   *  takes it from here (optional: older callers leave it to the server's
+   *  guess from the stroke). */
+  plane?: CinePane;
+  /** Closed contour prompt: 3+ world points outlining the structure on ONE
+   *  pane. Rasterized server-side as a FILLED polygon — "everything inside
+   *  this outline is the object". Same conventions as scribbleLps. */
+  lassoLps?: Point3[];
   tolerance?: number;
   /** false = corrective prompt: carve the clicked region OUT of the current
    *  session's object instead of adding to it. Model-only (the backend
@@ -2436,6 +2452,12 @@ export interface InteractivePrompt {
    *  label; submitInteractiveSegmentPrompt throws a plain-English message
    *  (before any network round trip) when neither exists. */
   include?: boolean;
+  /** No prompt at all: send the class's current voxels and let the model
+   *  redraw them (nnInteractive's zero-shot label refinement). Needs a fresh
+   *  session so the answer replaces the class, and it only grows into
+   *  unlabeled voxels, so neighbouring classes are never overwritten. Use
+   *  refineClassWithModel rather than setting this directly. */
+  refine?: boolean;
 }
 
 /**
@@ -2680,16 +2702,27 @@ export async function submitInteractiveSegmentPrompt(
   const segVolume = cache.getVolume(segmentationId);
   if (!segVolume) throw new Error("No segmentation loaded for this case.");
 
-  const body: Record<string, unknown> = {
-    point_lps: [prompt.pointLps[0], prompt.pointLps[1], prompt.pointLps[2]],
-    res,
-  };
+  if (prompt.refine && !session) throw new Error("Refining needs its own prompt session.");
+  if (!prompt.refine && !prompt.pointLps) throw new Error("That prompt has no location.");
+  const body: Record<string, unknown> = { res };
+  if (prompt.refine) {
+    body.refine = true;
+  } else if (prompt.pointLps) {
+    body.point_lps = [prompt.pointLps[0], prompt.pointLps[1], prompt.pointLps[2]];
+  }
   if (prompt.boxLps) {
     body.box_lps = [
       [prompt.boxLps[0][0], prompt.boxLps[0][1], prompt.boxLps[0][2]],
       [prompt.boxLps[1][0], prompt.boxLps[1][1], prompt.boxLps[1][2]],
     ];
   }
+  if (prompt.scribbleLps) {
+    body.scribble_lps = prompt.scribbleLps.map((p) => [p[0], p[1], p[2]]);
+  }
+  if (prompt.lassoLps) {
+    body.lasso_lps = prompt.lassoLps.map((p) => [p[0], p[1], p[2]]);
+  }
+  if (prompt.plane && (prompt.scribbleLps || prompt.lassoLps)) body.plane = prompt.plane;
   if (prompt.tolerance != null) body.tolerance = prompt.tolerance;
   if (prompt.include === false) body.include = false;
   if (session) body.session_token = session.token;
@@ -2726,6 +2759,9 @@ export async function submitInteractiveSegmentPrompt(
         body.initial_seg_gz_b64 = _toBase64(await _compressGzip(seed));
       }
     }
+  }
+  if (prompt.refine && !seedMask) {
+    throw new Error("This class has no voxels to refine yet. Draw or segment it first.");
   }
   if (prompt.include === false && !session?.prevProposal && !seedMask) {
     // A corrective prompt needs something to carve from — either an object
@@ -2855,7 +2891,9 @@ export async function submitInteractiveSegmentPrompt(
       let idx = scan[0] + nx * (j + ny * k);
       for (let i = scan[0]; i < scan[1]; i++, idx++) {
         if (proposal.data[idx]) {
-          if (segScalars[idx] !== activeSegmentIndex) {
+          // A refine was never aimed anywhere, so it may only claim unlabeled
+          // voxels: a neighbouring class it grows into keeps its voxels.
+          if (segScalars[idx] !== activeSegmentIndex && !(prompt.refine && segScalars[idx] !== 0)) {
             if (sessionActive && !session!.priorValues.has(idx)) {
               session!.priorValues.set(idx, segScalars[idx]);
             }
@@ -2910,7 +2948,9 @@ export async function submitInteractiveSegmentPrompt(
   // recorded an interaction either way, and this stack must stay 1:1 with
   // the server's interaction stack or a later ctrl+z would rewind the
   // wrong server interaction.
-  if (changed > 0 || sessionActive) {
+  // A refine's session is released right after it answers, so a no-change
+  // refine has nothing to rewind and must not leave an empty Undo step.
+  if (changed > 0 || (sessionActive && !prompt.refine)) {
     const applyAndRefresh = (values: number[]) => {
       if (touchedIdx.length === 0) return;
       touchedIdx.forEach((idx, i) => { segScalars[idx] = values[i]; });
@@ -2932,7 +2972,7 @@ export async function submitInteractiveSegmentPrompt(
       session.undoBaseline = baseline;
     }
     const marker: PromptMarker | null =
-      sessionActive && session
+      sessionActive && session && prompt.pointLps && !prompt.refine
         ? {
             world: [prompt.pointLps[0], prompt.pointLps[1], prompt.pointLps[2]],
             include: prompt.include !== false,
@@ -2940,8 +2980,9 @@ export async function submitInteractiveSegmentPrompt(
         : null;
     if (marker) session!.markers.push(marker);
     // The server recorded this interaction and holds one undo snapshot for
-    // it.
-    if (sessionActive && session) session.serverUndoReady = true;
+    // it. A refine's session is released as soon as it answers, so it has
+    // nothing to rewind.
+    if (sessionActive && session && !prompt.refine) session.serverUndoReady = true;
     pushEditHistory({
       undo: () => {
         applyAndRefresh(priorValues);
@@ -2954,12 +2995,13 @@ export async function submitInteractiveSegmentPrompt(
           }
           // Fire-and-forget: the labelmap is already restored above, and
           // any sync failure marks the session dead, which is consistent
-          // too (the next prompt re-seeds from the restored labelmap).
-          // There is no server context left to rewind after a redo (dead)
-          // or once the server's one undo snapshot is used up; those end
-          // the session here rather than asking for an undo that can only
-          // come back 409.
-          if (!session.dead) {
+          // too (the next prompt re-seeds from the restored labelmap). A
+          // refine's session is released as soon as it answers, so there
+          // is no server context left to rewind. Nor is there after a redo
+          // (dead) or once the server's one undo snapshot is used up; those
+          // end the session here rather than asking for an undo that can
+          // only come back 409.
+          if (!prompt.refine && !session.dead) {
             if (session.serverUndoReady) {
               session.serverUndoReady = false;
               void _undoPromptOnServer(apiBase, caseId, session);
@@ -3004,6 +3046,44 @@ export async function submitInteractiveSegmentPrompt(
     // loaded mask, and it's dropped when the session ends.
     proposal: sessionActive ? proposal.data : null,
   };
+}
+
+/**
+ * Refine a class with the interactive model and no prompt: its current
+ * voxels go up as the initial segmentation and the model redraws them
+ * (nnInteractive's zero-shot label refinement, measured on PanTS case 1 to
+ * lift rough organ masks by 0.01 to 0.09 Dice). The redraw replaces the
+ * class, retracting voxels the model dropped and claiming only unlabeled
+ * ones, as one undoable edit.
+ *
+ * Runs in a session of its own, released as soon as it answers, so it never
+ * disturbs the prompt tools' session or holds a model-server slot. On a
+ * clean shipped label it still moves the boundary a little (0.91 to 0.97
+ * Dice against the original), which is why it is an explicit action with
+ * undo rather than something that happens on its own.
+ */
+export async function refineClassWithModel(
+  apiBase: string,
+  caseId: string | number,
+  activeSegmentIndex: number,
+  res: "low" | "full",
+  signal?: AbortSignal,
+): Promise<InteractivePromptResult> {
+  const session: PromptSessionState = {
+    token: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `refine-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    prevProposal: null,
+    priorValues: new Map(),
+    markers: [],
+  };
+  try {
+    return await submitInteractiveSegmentPrompt(
+      apiBase, caseId, activeSegmentIndex, { refine: true }, res, session, signal,
+    );
+  } finally {
+    releasePromptSession(apiBase, caseId, session.token);
+  }
 }
 
 /**

@@ -71,11 +71,12 @@ import FillBetweenSlicesFlyout from "../components/segmentation/FillBetweenSlice
 import CopyAcrossSlicesFlyout from "../components/segmentation/CopyAcrossSlicesFlyout";
 import { GuidedStepModal } from "../components/segmentation/SliceAnchorPickerUI";
 import HollowFlyout from "../components/segmentation/HollowFlyout";
+import RefineFlyout from "../components/segmentation/RefineFlyout";
 import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
 import { organTipPosition } from "../helpers/viewer/organTipPosition";
 import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
 import { voxelsLog } from "../helpers/viewer/editLog";
-import { useInteractivePromptTool } from "../helpers/viewer/useInteractivePromptTool";
+import { MODEL_NEEDS_DATASET_CASE, useInteractivePromptTool } from "../helpers/viewer/useInteractivePromptTool";
 import { loadRecentUploads, renameRecentUpload, runsOf } from "../helpers/recentUploads";
 import { useAuthIfPresent } from "../contexts/authContext";
 import { useRunsAdoptedVersion } from "../helpers/adoptLegacyRuns";
@@ -83,7 +84,7 @@ import {
   applyMargin, getActualMarginMm, getActualHollowMm,
   applyIslandsOperation, applyLogicalOperator, applySmoothing,
   deleteSegmentEverywhere, getSegmentAtVoxel, getActiveEditSegment, type LogicalOperation,
-  type LevelTraceOperation, projectPromptMarker
+  type LevelTraceOperation, projectPromptMarker, refineClassWithModel
 } from "../helpers/CornerstoneNifti2";
 import {
     API_BASE,
@@ -1282,6 +1283,29 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			onApplied={onApplied}
 			/>
 		);
+		case "refineSegment": {
+			const refineTarget = activeSegment;
+			const refineName = checkBoxData.find((o) => o.id === refineTarget)?.label;
+			const refineLabel = refineName ? classInSentence(refineName.replace(/_/g, " ")) : "this class";
+			return (
+				<RefineFlyout
+				classLabel={refineLabel}
+				refine={(signal) => {
+					if (refineTarget == null) {
+						return Promise.reject(new Error("Pick a class to refine first."));
+					}
+					if (pantsCase == null) {
+						return Promise.reject(new Error(MODEL_NEEDS_DATASET_CASE));
+					}
+					return refineClassWithModel(
+						API_BASE, pantsCase, refineTarget, fullRes ? "full" : "low", signal,
+					);
+				}}
+				onLog={(d) => sessionRef.current?.log("edit", d, 2000)}
+				onApplied={onApplied}
+				/>
+			);
+		}
 		case "smoothing":
 		return (
 			<SmoothingFlyout
@@ -1624,16 +1648,48 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const fullRes = isHd || enhance.state === "done";
 	const promptToolArmed =
 		activeToolbarTool === "pointSegment" ||
-		activeToolbarTool === "boxSegment";
+		activeToolbarTool === "boxSegment" ||
+		activeToolbarTool === "scribbleSegment" ||
+		activeToolbarTool === "lassoSegment";
 	const promptSegment = useInteractivePromptTool({
 		enabled: promptToolArmed,
-		mode: activeToolbarTool === "boxSegment" ? "box" : "point",
+		mode:
+			activeToolbarTool === "boxSegment"
+				? "box"
+				: activeToolbarTool === "scribbleSegment"
+					? "scribble"
+					: activeToolbarTool === "lassoSegment"
+						? "lasso"
+						: "point",
 		apiBase: API_BASE,
 		caseId: pantsCase ?? null,
 		activeSegmentIndex: activeSegment,
 		res: fullRes ? "full" : "low",
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
 	});
+	// The landed-prompt dots, the Smart fill and Grow seeds, and the Scissors and
+	// Lasso anchors are projected at render time, and a pan, the Zoom slider or a
+	// stage resize moves the camera without any React state change, so they would
+	// stay at their old screen position. Repaint on every camera change while
+	// there is a dot to place (level tracing does the same through
+	// cameraVersion). The frame delay lets the zoom effect finish applying first.
+	const [, setPromptMarkerCameraVersion] = useState(0);
+	const hasPromptMarkers = promptSegment.promptMarkers.length > 0;
+	const hasSeedMarkers = smartFill.hasForegroundMarks || smartFill.hasBackgroundMarks;
+	const hasDrawAnchors = activeDrawTool.anchorsCanvas.length > 0;
+	const hasCameraBoundOverlay = hasPromptMarkers || hasSeedMarkers || hasDrawAnchors;
+	useEffect(() => {
+		if (!hasCameraBoundOverlay || !viewerReady || !renderingEngine) return;
+		let frame = 0;
+		const unsubscribe = subscribeToMprViewChanges(() => {
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(() => setPromptMarkerCameraVersion((v) => v + 1));
+		});
+		return () => {
+			cancelAnimationFrame(frame);
+			unsubscribe();
+		};
+	}, [hasCameraBoundOverlay, viewerReady, renderingEngine]);
 	// What the Crosshair button shows and what a click on it does
 	// (see helpers/viewer/crosshairMode).
 	const crosshairModeState = {
@@ -1867,15 +1923,19 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		} else if (editMode === "smartfill" || promptToolArmed) {
 			setActiveMeasurementTool(null);
 			setActiveMaskEditTool(null);
-			if (activeToolbarTool === "boxSegment") {
+			if (
+				activeToolbarTool === "boxSegment" ||
+				activeToolbarTool === "scribbleSegment" ||
+				activeToolbarTool === "lassoSegment"
+			) {
 				// Drag prompts draw their gesture at the DOM level, like
 				// growFromSeeds' scribbles. toggleCrosshairTool(false) would
 				// leave PanTool active on the primary button, and the shared
 				// left-drag then pans the camera in step with the gesture:
 				// the world point under the cursor never changes, so the box
-				// collapses to a zero-extent prompt at the start corner.
-				// Nothing may own the primary button while one of these is
-				// armed.
+				// collapses to a zero-extent prompt at the start corner (and
+				// a scribble's world polyline smears). Nothing may own the
+				// primary button while one of these is armed.
 				releasePrimaryMouseTools();
 			} else {
 				// pointSegment and smartfill are click gestures; pan stays
@@ -2576,8 +2636,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			promptSegment.status !== "idle",
 		closeAnnotationToolbarIfOpen,
 		onEscape: disarmOnEscape,
-		// A drag of the box tool counts as drawing too, so the first Escape
-		// drops just that gesture and the second disarms the tool.
+		// A drag of the box, scribble or lasso tool counts as drawing too, so the
+		// first Escape drops just that gesture and the second disarms the tool.
 		cancelDrawing: () => cancelMeasurementInProgress() || promptSegment.cancelGesture(),
 	});
 	// Live-adjust the frame rate: if a clip is already running, restart it immediately at
@@ -3676,6 +3736,40 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						/>
 					);
 				})()}
+				{promptSegment.pane === pane && promptSegment.liveStroke && promptSegment.liveStroke.length > 1 && (
+					<svg
+						style={{
+							position: "absolute",
+							inset: 0,
+							width: "100%",
+							height: "100%",
+							pointerEvents: "none",
+							zIndex: 40,
+						}}
+					>
+						{activeToolbarTool === "lassoSegment" ? (
+							// Closed preview with a light fill so the user sees the
+							// enclosed region — the rasterizer fills it server-side.
+							<polygon
+								points={promptSegment.liveStroke.map(([x, y]) => `${x},${y}`).join(" ")}
+								fill="rgba(111, 211, 255, 0.12)"
+								stroke="#6fd3ff"
+								strokeWidth={2.5}
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							/>
+						) : (
+							<polyline
+								points={promptSegment.liveStroke.map(([x, y]) => `${x},${y}`).join(" ")}
+								fill="none"
+								stroke="#6fd3ff"
+								strokeWidth={2.5}
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							/>
+						)}
+					</svg>
+				)}
 				{/* Landed prompts of the live refinement session: green = add,
 				    red = remove. Rendered on EVERY pane (a 3D point belongs to
 				    one slice per orientation); projectPromptMarker hides those
@@ -5050,7 +5144,7 @@ const aiAvailableOrgans = useMemo(() => {
 						style={{ ...panelStyle("axial"), ...paneGridStyle("axial") }}
 						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("axial")(e); }}>
 						<div
-							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
+							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${promptSegment.dragArmed ? " vp-pane--prompt-drag" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 							data-label="Axial"
 							ref={axial_ref}
 							onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("axial")(e); }}
@@ -5071,6 +5165,9 @@ const aiAvailableOrgans = useMemo(() => {
 								levelTracing.handleMouseMove("axial")(e);
 								promptSegment.handleMouseMove("axial")(e);
 							}}
+							onPointerDown={promptSegment.handlePointerDown("axial")}
+							onPointerMove={promptSegment.handlePointerMove("axial")}
+							onPointerUp={promptSegment.handlePointerUp("axial")}
 							onMouseLeave={() => { handlePaneHoverLeave("axial")(); levelTracing.clearPreview(); }}
 							onWheel={focusedPane.handleWheel("axial")}
 						></div>
@@ -5134,7 +5231,7 @@ const aiAvailableOrgans = useMemo(() => {
 						style={{ ...panelStyle("sagittal"), ...paneGridStyle("sagittal") }}
 						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("sagittal")(e); }}>
 					<div
-						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
+						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${promptSegment.dragArmed ? " vp-pane--prompt-drag" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Sagittal"
 						ref={sagittal_ref}
 						onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("sagittal")(e); }}
@@ -5155,6 +5252,9 @@ const aiAvailableOrgans = useMemo(() => {
 							levelTracing.handleMouseMove("sagittal")(e);
 							promptSegment.handleMouseMove("sagittal")(e);
 						}}
+						onPointerDown={promptSegment.handlePointerDown("sagittal")}
+						onPointerMove={promptSegment.handlePointerMove("sagittal")}
+						onPointerUp={promptSegment.handlePointerUp("sagittal")}
 						onMouseLeave={() => { handlePaneHoverLeave("sagittal")(); levelTracing.clearPreview(); }}
 						onWheel={focusedPane.handleWheel("sagittal")}
 					></div>
@@ -5219,7 +5319,7 @@ const aiAvailableOrgans = useMemo(() => {
 						style={{ ...panelStyle("coronal"), ...paneGridStyle("coronal") }}
 						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("coronal")(e); }}>
 					<div
-						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
+						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${promptSegment.dragArmed ? " vp-pane--prompt-drag" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Coronal"
 						ref={coronal_ref}
 						onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("coronal")(e); }}
@@ -5242,6 +5342,9 @@ const aiAvailableOrgans = useMemo(() => {
 							levelTracing.handleMouseMove("coronal")(e);
 							promptSegment.handleMouseMove("coronal")(e);
 						}}
+						onPointerDown={promptSegment.handlePointerDown("coronal")}
+						onPointerMove={promptSegment.handlePointerMove("coronal")}
+						onPointerUp={promptSegment.handlePointerUp("coronal")}
 						onMouseLeave={() => { handlePaneHoverLeave("coronal")(); levelTracing.clearPreview(); }}
 						onWheel={focusedPane.handleWheel("coronal")}
 					></div>
@@ -5707,6 +5810,9 @@ const aiAvailableOrgans = useMemo(() => {
 				targetKey={activeCatalogOrganId ?? activeSegment}
 				popupRef={annotationPopupRef}
 				sliceJumpRef={sliceJumpWrapRef}
+				// The model reads the CT from the dataset by case id; an uploaded
+				// scan's session view has none to give it.
+				modelToolsAvailable={pantsCase != null}
 			/>
 			{/* Point/box-segment APPLYING/SUCCESS/ERROR overlay. Reuses the exact
 			    same centered GuidedStepModal (blurred backdrop + "Got it") that

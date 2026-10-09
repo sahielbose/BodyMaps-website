@@ -3,7 +3,9 @@
 // Mirrors usePolygonDraw's architecture (pane tracking, world-space storage,
 // canvas reprojection) but for the simpler prompt gestures: a single click
 // submits immediately in "point" mode; a click-drag defines two corners and
-// submits on mouseup in "box" mode.
+// submits on mouseup in "box" mode; a freehand drag collects a polyline and
+// submits it on mouseup in "scribble" mode (open stroke over the structure)
+// and "lasso" mode (closed contour around it, filled server-side).
 //
 // The tool is equip-and-use, like the brush: it stays armed after a
 // successful prompt, and consecutive prompts share one PromptSessionState —
@@ -12,7 +14,7 @@
 // as context) instead of segmenting from scratch. Disarming the tool,
 // switching the target class, or changing case/resolution ends the session;
 // the next prompt starts a fresh object.
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import {
 	canvasPointToWorld,
 	worldToCanvasPoint,
@@ -28,6 +30,7 @@ import {
 	type PromptMarker,
 	type PromptSessionState,
 } from "../CornerstoneNifti2";
+import { interactiveAttribution, primeInteractiveLicense } from "./interactiveAttribution";
 // Avoid importing Point3 from "@cornerstonejs/core/types" directly — Vite's
 // import analysis doesn't reliably resolve that subpath for every file (it
 // works from CornerstoneNifti2.tsx, which Vite already had in its graph, but
@@ -35,7 +38,7 @@ import {
 // everything this file does with it.
 type Point3 = [number, number, number];
 
-export type PromptMode = "point" | "box";
+export type PromptMode = "point" | "box" | "scribble" | "lasso";
 
 // Slice-thickness ratio (max spacing / min spacing) at or above which the
 // arm-time thick-slice notice shows. 3 splits the measured cases cleanly:
@@ -127,6 +130,12 @@ export function useInteractivePromptTool({
 	const [dragStartCanvas, setDragStartCanvas] = useState<[number, number] | null>(null);
 	const [dragStartWorld, setDragStartWorld] = useState<Point3 | null>(null);
 	const [liveBoxCanvas, setLiveBoxCanvas] = useState<[[number, number], [number, number]] | null>(null);
+	// Stroke gesture (scribble): points accumulate in refs — the source of
+	// truth mousemove appends to — with a state mirror for the overlay, so
+	// rapid mousemoves can't lose points to a stale-closure state read.
+	const strokeCanvasRef = useRef<[number, number][]>([]);
+	const strokeWorldRef = useRef<Point3[]>([]);
+	const [liveStrokeCanvas, setLiveStrokeCanvas] = useState<[number, number][] | null>(null);
 	const paneRef = useRef<CinePane | null>(null);
 	const busyRef = useRef(false);
 	// Drives the applying/success overlay (mirrors CopyAcrossSlicesFlyout's
@@ -158,7 +167,7 @@ export function useInteractivePromptTool({
 		// spacing scaled up by make_lowres.py) or, where the server has none, the
 		// full scan, and nothing here says which. The ratio holds on both.
 		setStatusMessage(
-			`This scan has thick slices. Interactive segmentation is less reliable here: boundaries will be rougher, and thin structures may be out of reach entirely. On thick scans a box tends to overshoot on large solid organs, so prefer a single click for those, and keep the box for air-filled structures such as the lungs.`
+			`This scan has thick slices. Interactive segmentation is less reliable here: boundaries will be rougher, and thin structures may be out of reach entirely. On thick scans a box tends to overshoot on large solid organs, so prefer a single click for those, and keep the box and lasso for air-filled structures such as the lungs.`
 		);
 	// mode is in the deps so a tool switch gives the check another chance if
 	// the labelmap had not finished loading at first arm; the ref keeps the
@@ -230,6 +239,10 @@ export function useInteractivePromptTool({
 			releaseNow();
 		};
 	}, []);
+	// The hint modal's attribution line reads the licence the running model
+	// server reports; start that fetch before the first result needs it.
+	useEffect(() => primeInteractiveLicense(apiBase), [apiBase]);
+
 	// The marker overlay reads session.markers, which undo/redo closures
 	// mutate from OUTSIDE the React tree (they live in the shared edit
 	// history). Those closures repaint the labelmap through the
@@ -239,14 +252,21 @@ export function useInteractivePromptTool({
 	const [, bumpMarkersVersion] = useState(0);
 	useEffect(() => subscribeToSegmentationEdits(() => bumpMarkersVersion((v) => v + 1)), []);
 
+	// The touch or pen pointer that owns the drag in progress; a second finger
+	// is ignored until it lifts.
+	const activePointerRef = useRef<number | null>(null);
 	const reset = useCallback(() => {
 		setDragStartCanvas(null);
 		setDragStartWorld(null);
 		setLiveBoxCanvas(null);
+		strokeCanvasRef.current = [];
+		strokeWorldRef.current = [];
+		setLiveStrokeCanvas(null);
 		paneRef.current = null;
+		activePointerRef.current = null;
 	}, []);
 
-	// Escape mid-drag: drops the half-drawn box (and its preview)
+	// Escape mid-drag: drops the half-drawn box or stroke (and its preview)
 	// without submitting it, and without touching the tool or its session.
 	// Returns whether there was a gesture to cancel, so the keyboard handler
 	// only lets a second Escape through to disarm the tool.
@@ -257,9 +277,9 @@ export function useInteractivePromptTool({
 	}, [reset]);
 
 	const submit = useCallback(async (
-		_pane: CinePane,
+		pane: CinePane,
 		pointWorld: Point3,
-		opts: { box?: [Point3, Point3]; include?: boolean } = {},
+		opts: { box?: [Point3, Point3]; scribble?: Point3[]; lasso?: Point3[]; include?: boolean } = {},
 	) => {
 		const include = opts.include ?? true;
 		if (busyRef.current) return; // one in-flight request at a time
@@ -272,12 +292,15 @@ export function useInteractivePromptTool({
 			return;
 		}
 		// A prompt placed in the black margin around the scan has no voxel to
-		// work on, and the server would answer with a misleading failure. A box
-		// counts as on the scan when any part of it overlaps the scan.
-		const onScan = opts.box ? boxTouchesScan(opts.box) : isWorldPointInSegmentation(pointWorld);
+		// work on, and the server would answer with a misleading failure. A
+		// shape counts as on the scan when any of its points is, and a box when
+		// any part of it overlaps the scan.
+		const onScan = opts.box
+			? boxTouchesScan(opts.box)
+			: (opts.scribble ?? opts.lasso ?? [pointWorld]).some((p) => isWorldPointInSegmentation(p));
 		if (!onScan) {
 			setStatus("error");
-			setStatusMessage(opts.box ? OUTSIDE_SCAN_SHAPE_MESSAGE : OUTSIDE_SCAN_MESSAGE);
+			setStatusMessage(opts.box || opts.scribble || opts.lasso ? OUTSIDE_SCAN_SHAPE_MESSAGE : OUTSIDE_SCAN_MESSAGE);
 			return;
 		}
 		// No corrective-prompt gate here: whether a right-click has something
@@ -318,7 +341,10 @@ export function useInteractivePromptTool({
 		onBusyChange?.(true);
 		setStatus("applying");
 		setStatusMessage(null);
-		const prompt = { pointLps: pointWorld, boxLps: opts.box, tolerance, include };
+		// The pane the stroke was drawn on tells the server which volume axis is
+		// the slice axis; a perfectly straight stroke cannot reveal it itself.
+		const plane = opts.scribble || opts.lasso ? pane : undefined;
+		const prompt = { pointLps: pointWorld, boxLps: opts.box, scribbleLps: opts.scribble, lassoLps: opts.lasso, plane, tolerance, include };
 		// Cancel (the applying card's button, or Escape) and the deadline both
 		// abort the request; `stopped` records which, so the catch below can
 		// tell them from a real failure.
@@ -372,11 +398,28 @@ export function useInteractivePromptTool({
 					setStatusMessage(
 						"The segmentation model didn't answer, so this came from a simple intensity fill around your prompt instead. Check the result, and undo it if it spread too far."
 					);
+				} else if (result.degenerate) {
+					// The request succeeded but the model landed almost no
+					// voxels (a point on a lung returns single digits out of
+					// 1.5M). Logging "+8 voxels" as success while nothing visible
+					// appears reads as a broken tool, so say what actually
+					// happened and steer to the prompt types that work there.
+					setStatus("success");
+					const landed = `${result.added.toLocaleString()} ${result.added === 1 ? "voxel" : "voxels"}`;
+					// A box, lasso or scribble got here too, and telling that
+					// reader to draw a box or lasso (or naming a click they
+					// never made) would be circular.
+					const pointShaped = !opts.box && !opts.scribble && !opts.lasso;
+					setStatusMessage(
+						pointShaped
+							? `The model found almost nothing at that click (${landed}). Point prompts work poorly on large or air-filled structures such as the lungs or colon. Draw a box or lasso around the target instead, or keep clicking if the target really is that small.`
+							: `The model found almost nothing inside that shape (${landed}). Try a box that sits snugly on the structure, a different slice, or a single click in its centre.`
+					);
 				} else if (result.sessionActive && !refineHintShownRef.current) {
 					refineHintShownRef.current = true;
 					setStatus("success");
 					setStatusMessage(
-						`The tool stays armed, and each new ${isTouchInput() ? "tap refines this same object: tap adds, touch and hold removes" : "click refines this same object: left-click adds, right-click (or Alt-click) removes"}. Switching classes starts a fresh one.`
+						`The tool stays armed, and each new ${isTouchInput() ? "tap refines this same object: tap adds, touch and hold removes" : "click refines this same object: left-click adds, right-click (or Alt-click) removes"}. Switching classes starts a fresh one. ${interactiveAttribution()}`
 					);
 				} else {
 					// Feedback is the mask itself plus the log line — a modal
@@ -387,7 +430,7 @@ export function useInteractivePromptTool({
 			} else {
 				const msg = include
 					? "Interactive segment: nothing changed from that prompt. Try a different spot."
-					: opts.box
+					: opts.box || opts.scribble || opts.lasso
 						? "Nothing to remove inside that shape. It didn't change the object."
 						: "Nothing to remove there. That click didn't change the object.";
 				setStatus("error");
@@ -484,6 +527,24 @@ export function useInteractivePromptTool({
 	const handleContextMenu = (pane: CinePane) => (e: MouseEvent) => {
 		if (!enabled) return;
 		e.preventDefault();
+		// A finger held still fires this mid-drag (Android long-press). Once the
+		// finger has moved it is a real drag: leave it alone so the lift still
+		// submits the box or stroke instead of finding the session busy with a
+		// stray corrective point. A finger that has not moved is the long-press
+		// corrective gesture; it ends the drag so the lift submits nothing more.
+		// "Moved" is the lift's own test, so a drag the lift would still turn
+		// into a point (finger jitter) is a long-press, not a box or stroke.
+		if (activePointerRef.current !== null) {
+			const box = liveBoxCanvas;
+			const pts = strokeCanvasRef.current;
+			let pathLen = 0;
+			for (let i = 1; i < pts.length; i++) pathLen += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+			const moved = box
+				? Math.abs(box[1][0] - box[0][0]) >= 4 || Math.abs(box[1][1] - box[0][1]) >= 4
+				: pts.length >= (mode === "lasso" ? 3 : 2) && pathLen >= 8;
+			if (moved) return;
+			reset();
+		}
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		const world = canvasPointToWorld(pane, canvasPos);
@@ -491,36 +552,70 @@ export function useInteractivePromptTool({
 		void submit(pane, world, { include: false });
 	};
 
-	// Box mode: mousedown starts the drag, mousemove updates the live preview
-	// rectangle, mouseup submits both corners. Mirrors the pointer semantics a
-	// user already expects from the scissors' click-drag box operations.
+	// Drag modes (box and scribble): mousedown starts the gesture, mousemove
+	// updates the live preview (rectangle or polyline), mouseup submits. Box
+	// mirrors the pointer semantics a user already expects from the scissors'
+	// click-drag operations; scribble collects the freehand path itself.
 	// Alt held at mousedown makes the whole gesture corrective (remove);
 	// polarity is latched at the start so releasing Alt mid-drag doesn't
 	// silently flip what the submit will do.
 	const dragIncludeRef = useRef(true);
+	const isStrokeMode = mode === "scribble" || mode === "lasso";
+	// A finger or pen fires pointer events and no mousemove, so the drag
+	// gestures also run off these (see handlePointerDown). When the browser
+	// then emulates a mousedown for a tap, it must not start a second gesture;
+	// only the mouse path checks this, so a real touch can follow straight on.
+	const lastTouchAtRef = useRef(0);
 	const handleMouseDown = (pane: CinePane) => (e: MouseEvent) => {
 		if (enabled && mode === "point" && e.button === 0) clickDownRef.current = [e.clientX, e.clientY];
-		if (!enabled || mode !== "box") return;
+		if (!enabled || (mode !== "box" && !isStrokeMode)) return;
+		if (Date.now() - lastTouchAtRef.current < 1000) return;
+		startDrag(pane, e);
+	};
+	// Returns whether a gesture started.
+	const startDrag = (pane: CinePane, e: MouseEvent): boolean => {
 		// Left button only — the right button belongs to handleContextMenu's
 		// corrective point, and a right-drag would otherwise strand a live
 		// preview when the context menu event interrupts it.
-		if (e.button !== 0) return;
+		if (e.button !== 0) return false;
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		const world = canvasPointToWorld(pane, canvasPos);
-		if (!world) return;
+		if (!world) return false;
 		dragIncludeRef.current = !e.altKey;
 		paneRef.current = pane;
 		setDragStartCanvas(canvasPos);
 		setDragStartWorld(world);
-		setLiveBoxCanvas([canvasPos, canvasPos]);
+		if (mode === "box") {
+			setLiveBoxCanvas([canvasPos, canvasPos]);
+		} else {
+			strokeCanvasRef.current = [canvasPos];
+			strokeWorldRef.current = [world];
+			setLiveStrokeCanvas([canvasPos]);
+		}
+		return true;
 	};
 
 	const handleMouseMove = (pane: CinePane) => (e: MouseEvent) => {
-		if (!enabled || mode !== "box" || paneRef.current !== pane || !dragStartCanvas) return;
+		if (!enabled || paneRef.current !== pane || !dragStartCanvas) return;
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
-		setLiveBoxCanvas([dragStartCanvas, canvasPos]);
+		if (mode === "box") {
+			setLiveBoxCanvas([dragStartCanvas, canvasPos]);
+		} else if (isStrokeMode) {
+			const pts = strokeCanvasRef.current;
+			const last = pts[pts.length - 1];
+			// ≥2px spacing keeps the point count proportional to path length,
+			// not event rate — a slow careful stroke stays a few hundred
+			// points instead of thousands.
+			if (!last || Math.hypot(canvasPos[0] - last[0], canvasPos[1] - last[1]) >= 2) {
+				const world = canvasPointToWorld(pane, canvasPos);
+				if (!world) return;
+				pts.push(canvasPos);
+				strokeWorldRef.current.push(world);
+				setLiveStrokeCanvas([...pts]);
+			}
+		}
 	};
 
 	// A drag released outside the pane never reaches the pane's mouseup
@@ -532,19 +627,49 @@ export function useInteractivePromptTool({
 		if (!dragStartCanvas) return;
 		const abandon = () => reset();
 		window.addEventListener("mouseup", abandon);
+		// The browser took a touch drag for its own (a system gesture, an
+		// incoming call): pointercancel bubbles here from the captured pane.
+		window.addEventListener("pointercancel", abandon);
 		window.addEventListener("blur", abandon);
 		return () => {
 			window.removeEventListener("mouseup", abandon);
+			window.removeEventListener("pointercancel", abandon);
 			window.removeEventListener("blur", abandon);
 		};
 	}, [dragStartCanvas, reset]);
 
 	const handleMouseUp = (pane: CinePane) => (e: MouseEvent) => {
-		if (!enabled || mode !== "box" || paneRef.current !== pane || !dragStartWorld) return;
+		if (!enabled || (mode !== "box" && !isStrokeMode) || paneRef.current !== pane || !dragStartWorld) return;
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
 		const startWorld = dragStartWorld;
 		const include = dragIncludeRef.current;
+
+		if (isStrokeMode) {
+			const worldPts = strokeWorldRef.current;
+			const canvasPts = strokeCanvasRef.current;
+			reset();
+			// Path length, not displacement: a stroke that curls back to its
+			// start is a real scribble/lasso, while a jitter-only "click" isn't.
+			let pathLen = 0;
+			for (let i = 1; i < canvasPts.length; i++) {
+				pathLen += Math.hypot(canvasPts[i][0] - canvasPts[i - 1][0], canvasPts[i][1] - canvasPts[i - 1][1]);
+			}
+			const minPts = mode === "lasso" ? 3 : 2;
+			if (worldPts.length < minPts || pathLen < 8) {
+				// Degenerate stroke -> point prompt, same polarity, mirroring
+				// the degenerate-box behavior below.
+				void submit(pane, startWorld, { include });
+			} else if (mode === "lasso") {
+				// No need to repeat the first point — the rasterizer closes
+				// the polygon itself.
+				void submit(pane, worldPts[0], { lasso: worldPts, include });
+			} else {
+				void submit(pane, worldPts[0], { scribble: worldPts, include });
+			}
+			return;
+		}
+
 		const endWorld = canvasPointToWorld(pane, canvasPos);
 		reset();
 		if (!endWorld) return;
@@ -559,6 +684,39 @@ export function useInteractivePromptTool({
 			void submit(pane, startWorld, { box: [startWorld, endWorld], include });
 		}
 	};
+
+	// Touch and pen drive the same drag gestures through pointer events: a
+	// finger drag fires pointer events and no mousemove, and Cornerstone's
+	// ghost-click filter swallows the mouse events a tap emulates. Mouse
+	// pointers are left to the mouse handlers above, so nothing runs twice.
+	// The pane captures the pointer so a drag that leaves it still ends here.
+	// One pointer at a time: a second finger during a drag must not restart the
+	// box or feed the stroke.
+	const handlePointerDown = (pane: CinePane) => (e: PointerEvent) => {
+		if (e.pointerType === "mouse" || !enabled || (mode !== "box" && !isStrokeMode)) return;
+		if (!e.isPrimary || activePointerRef.current !== null) return;
+		try {
+			(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+		} catch {
+			// The pointer is already gone; the drag still runs without capture.
+		}
+		if (startDrag(pane, e)) activePointerRef.current = e.pointerId;
+	};
+	const handlePointerMove = (pane: CinePane) => (e: PointerEvent) => {
+		if (e.pointerType === "mouse" || e.pointerId !== activePointerRef.current) return;
+		handleMouseMove(pane)(e);
+	};
+	const handlePointerUp = (pane: CinePane) => (e: PointerEvent) => {
+		if (e.pointerType === "mouse") return;
+		if (e.pointerId !== activePointerRef.current) return;
+		activePointerRef.current = null;
+		lastTouchAtRef.current = Date.now();
+		handleMouseUp(pane)(e);
+	};
+
+	// Whether a drag tool is armed, so the panes stop the browser scrolling or
+	// zooming the page under the finger (touch-action: none, set in the CSS).
+	const dragArmed = enabled && (mode === "box" || isStrokeMode);
 
 	// Canvas-space live box for the overlay, reprojected against the CURRENT
 	// camera on every render, same reasoning as usePolygonDraw's toCanvas().
@@ -578,6 +736,7 @@ export function useInteractivePromptTool({
 	return {
 		pane,
 		liveBox: liveBoxDisplay,
+		liveStroke: liveStrokeCanvas,
 		promptMarkers,
 		status,
 		statusMessage,
@@ -589,6 +748,10 @@ export function useInteractivePromptTool({
 		handleMouseDown,
 		handleMouseMove,
 		handleMouseUp,
+		handlePointerDown,
+		handlePointerMove,
+		handlePointerUp,
+		dragArmed,
 		cancel: reset,
 		cancelGesture,
 		reset,

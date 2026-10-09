@@ -105,6 +105,16 @@
     color: rgba(255, 255, 255, 0.7);
 }
 
+/* The model licence line under a model tool's description. */
+.atb-icon-tip__attribution {
+    margin-top: 5px;
+    padding-top: 5px;
+    border-top: 1px solid rgba(255, 255, 255, 0.09);
+    font-size: 11px;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.6);
+}
+
 .atb__tooltip strong {
     font-size: 12px;
     color: #fff;
