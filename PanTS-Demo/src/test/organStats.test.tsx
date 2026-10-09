@@ -182,7 +182,7 @@ describe("Organ Statistics — population percentiles", () => {
 		expect(screen.getByTitle("Download as JSON")).toBeTruthy();
 	});
 
-	it("falls back to an em dash when an organ has no reference or an invalid volume", async () => {
+	it("falls back to n/a when an organ has no reference or an invalid volume", async () => {
 		renderViewer();
 		// The toolbar is visible by default; open Organ statistics (grouped under
 		// the "Panels" dropdown alongside Organs/Case metadata/Measurements).
@@ -190,8 +190,26 @@ describe("Organ Statistics — population percentiles", () => {
 		fireEvent.click(screen.getByRole("menuitem", { name: "Organ stats" }));
 		await screen.findByText("%ile");
 
-		// spleen has no bucket and the kidney volume is flagged → two "—" cells.
-		const dashes = await screen.findAllByText("—");
-		expect(dashes.length).toBeGreaterThanOrEqual(2);
+		// spleen has no bucket and the kidney volume is flagged → at least two
+		// "n/a" cells (the placeholder is readable text, not an em dash).
+		const missing = await screen.findAllByText("n/a");
+		expect(missing.length).toBeGreaterThanOrEqual(2);
+		expect(screen.queryAllByText("—")).toHaveLength(0);
+	});
+});
+
+describe("Viewer shell layout", () => {
+	it("docks Organ statistics beside the viewports, inside the body row", async () => {
+		const { container } = renderViewer();
+		fireEvent.click(screen.getByLabelText("Panels"));
+		fireEvent.click(screen.getByRole("menuitem", { name: "Organ stats" }));
+		await screen.findByText("%ile");
+
+		const stats = container.querySelector(".vp-stats");
+		const body = container.querySelector(".vp-body");
+		expect(stats).not.toBeNull();
+		// It used to render after .vp-body closed, stacked under the panes.
+		expect(stats!.parentElement).toBe(body);
+		expect(body!.querySelector(":scope > .vp-stage")).not.toBeNull();
 	});
 });

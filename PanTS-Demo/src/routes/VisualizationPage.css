@@ -32,9 +32,15 @@
   margin-right: min(var(--atb-segpanel-w, 320px), 45vw);
 }
 
-.VisualizationPage.annotation-open .vp-stage {
-  /* Shrinks automatically (flex: 1 1 auto, overflow:hidden) by the
-     ribbon+panel height plus 10px breathing room below. */
+.VisualizationPage.annotation-open .vp-stage,
+.VisualizationPage.annotation-open .vp-organs,
+.VisualizationPage.annotation-open .vp-body>.vp-stats,
+.VisualizationPage.annotation-open .vp-body>.vp-measure {
+  /* The ribbon is centred over the whole row left of the segments panel, so
+     everything docked in that row starts below it, not just the stage (it
+     used to cover the Organs panel's header). The stage shrinks
+     automatically (flex: 1 1 auto, overflow:hidden) by the ribbon+panel
+     height plus 10px breathing room below. */
   margin-top: calc(var(--atb-ribbon-h, 49px) + var(--atb-panel-h, 0px) + 10px);
   /* Kept in sync with .atb-shell's / .segpop's own open/close transitions
      so the ribbon, popup, and viewport resize move together. */
@@ -54,8 +60,32 @@
 }
 
 /* Phone width. There is no room to dock anything beside a usable stage, so
-   annotate mode stacks the segments panel under the stage rather than beside it. */
+   the organ list and the right-hand panels (organ stats, case metadata,
+   measurements) float over the viewports as sheets from their usual side
+   instead of pushing the stage off screen, and annotate mode stacks the
+   segments panel under the stage rather than beside it. */
 @media (max-width: 640px) {
+  .vp-organs.vp-organs--open,
+  .vp-body>.vp-stats,
+  .vp-body>.vp-measure {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 30;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.6);
+  }
+
+  .vp-organs.vp-organs--open {
+    left: 0;
+    width: min(300px, 88vw);
+  }
+
+  .vp-body>.vp-stats,
+  .vp-body>.vp-measure {
+    right: 0;
+    width: min(350px, 92vw);
+  }
+
   .VisualizationPage.annotation-open .vp-body {
     margin-right: 0;
     /* SegmentsPopup.css turns the panel into a bottom sheet this tall. */
@@ -1467,7 +1497,10 @@
    so it keeps its mounted state without occupying space when closed. */
 .vp-organs {
   display: none;
-  flex: 0 0 288px;
+  /* Fluid, but never under 248px: at 26vw a 768px window gave 200px, and the
+     names wrapped to three lines. The 312px ceiling keeps the longest name
+     ("Superior mesenteric artery") on one line on a desktop window. */
+  flex: 0 0 clamp(248px, 26vw, 312px);
   min-height: 0;
   font-family: var(--vp-font);
   background: rgba(14, 15, 18, 0.94);
@@ -1481,31 +1514,46 @@
   display: flex;
 }
 
-.vp-organs__title {
-  font-family: var(--vp-font);
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  color: var(--vp-text);
-}
-
-.vp-organs__back {
-  width: 30px;
-  height: 30px;
-  padding: 5px;
-  border-radius: 8px;
-  color: var(--vp-text);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.vp-organs__back:hover {
-  background: var(--vp-hover);
-}
-
+/* The list scrolls; its bottom padding is inside the scroller so the last
+   chip clears the panel's edge instead of being cut 32px above it. */
 .vp-organs__list {
-  margin-right: -8px;
-  padding-right: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 16px 16px;
+}
+
+/* Indents: the organ rows and nested groups step in from their system. A
+   sub-group's chip sits one chevron (26px) right of its own indent, and an
+   organ row has no chevron or spacer, so the l0 indent is the sub indent plus
+   those 26px: organs and sub-group chips share one left edge. The l1 rows
+   (organs inside a sub-group) step a further 20px in from that chip. Tighter
+   under 900px, where the dock is narrow and every pixel is a wrapped name;
+   the chevron there keeps its 26px (its touch target grows with a pseudo
+   element, not width), so the children stay clearly right of the chip. */
+.vp-organs__sub {
+  padding-left: 12px;
+}
+
+.vp-organs__row--l0 {
+  padding-left: 38px;
+}
+
+.vp-organs__row--l1 {
+  padding-left: 46px;
+}
+
+@media (max-width: 899px) {
+  .vp-organs__sub {
+    padding-left: 8px;
+  }
+
+  .vp-organs__row--l0 {
+    padding-left: 34px;
+  }
+
+  .vp-organs__row--l1 {
+    padding-left: 44px;
+  }
 }
 
 .vp-organs__list::-webkit-scrollbar {
@@ -1518,18 +1566,6 @@
 }
 
 /* refined disclosure chevron */
-/* Organ chip: the 2px border is always present so toggling an organ only
-   changes its color, never its size (a border-0 <-> border-2 swap shifted the
-   chip and everything below it). */
-.vp-organ-chip {
-  border: 2px solid transparent;
-}
-
-.vp-organ-chip:hover,
-.vp-organ-chip.is-on {
-  border-color: var(--chip-color, gray);
-}
-
 .vp-organs__chevron {
   width: 18px;
   height: 18px;
@@ -1549,8 +1585,107 @@
   transform: rotate(90deg);
 }
 
+/* A group's expand/collapse button: the chevron, plus the name for a
+   top-level system (a sub-group's name is its own checkbox chip). */
+.vp-organs__disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 4px 2px 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #ffffff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.vp-organs__disclosure:hover .vp-organs__chevron {
+  color: var(--vp-text);
+  background: var(--vp-hover);
+}
+
+.vp-organs__system {
+  font-size: 18px;
+  line-height: 28px;
+}
+
+@media (max-width: 899px) {
+  .vp-organs__system {
+    font-size: 16px;
+  }
+}
+
+.vp-organs__group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vp-organs__group-list[hidden] {
+  display: none;
+}
+
+/* An organ, or a sub-group chip, as a checkbox. Shown organs get a ring in
+   their own colour (an inset shadow, so hovering or toggling never changes
+   the row's size or moves its text) and full-white text; hidden organs
+   drop to the dimmer text colour, so the state doesn't rest on colour. */
+.vp-organs__item {
+  padding: 4px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--vp-text-dim);
+  font: inherit;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.12s, color 0.12s;
+}
+
+.vp-organs__item:hover {
+  background: var(--vp-hover);
+  color: var(--vp-text);
+}
+
+.vp-organs__item[aria-checked="true"] {
+  color: #ffffff;
+  box-shadow: inset 0 0 0 2px var(--organ-color, #808080);
+}
+
+/* Sub-group with only some organs shown: a half-strength ring. */
+.vp-organs__item[aria-checked="mixed"] {
+  color: #ffffff;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--organ-color, #808080) 50%, transparent);
+}
+
+.vp-organs__item:focus-visible {
+  outline: 2px solid var(--vp-accent);
+  outline-offset: 2px;
+}
+
+/* Each organ row is the anchor for its jump button, which floats over the
+   row's right end instead of holding a 24px slot the chip has to work around.
+   The row reserves that end, so the button never sits over a long organ name
+   and a click on the name's last characters still toggles the organ. */
+.vp-organs__row {
+  position: relative;
+  padding-right: 24px;
+}
+
 /* "Jump to organ" target button next to each organ — centers the MPR on that organ. */
 .vp-organs__jump {
+  position: absolute;
+  top: 50%;
+  /* The group checkboxes are 19px and flush with the list's right edge, so a
+     24px button centres on them at -2.5px (32px on touch: -6.5px, below). It
+     hangs into the list's padding, never over the name, which the row's
+     padding-right keeps clear. */
+  right: -2.5px;
+  transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1567,15 +1702,34 @@
   transition: opacity 0.12s, color 0.15s, background 0.15s;
 }
 
-/* reveal only when hovering that organ's row (or when focused via keyboard) */
-.vp-organs__list .flex:hover>.vp-organs__jump,
-.vp-organs__jump:focus-visible {
+/* A touch screen has no hover to reveal the button, so it is always drawn and
+   the row keeps room for it. */
+@media (hover: none) {
+  .vp-organs__row {
+    padding-right: 32px;
+  }
+}
+
+/* Revealed while the pointer is over that organ's row or focus is anywhere
+   in it (tabbing onto the organ shows its jump button), and always on
+   touch screens, which have no hover to reveal it. */
+.vp-organs__row:hover>.vp-organs__jump,
+.vp-organs__row:focus-within>.vp-organs__jump {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .vp-organs__jump {
+    right: -6.5px;
+    width: 32px;
+    height: 32px;
+    opacity: 1;
+  }
 }
 
 .vp-organs__jump:hover {
   color: var(--vp-accent);
-  background: var(--vp-hover);
+  background: #23262d;
 }
 
 /* custom checkbox */
@@ -1603,15 +1757,50 @@
   transform: scale(0.92);
 }
 
+/* The tick is dark: white on the pale accent is about 2.4:1. */
 .vp-checkbox--on {
   background: var(--vp-accent);
   border-color: var(--vp-accent);
+  color: #08090b;
+}
+
+/* Touch: the box stays 19px, its hit area grows to 33px. The disclosure
+   chevrons get a 32px minimum height and a wider hit area drawn by a pseudo
+   element, so the chevron keeps its 18px column and a sub-group's organs stay
+   indented from its chip. */
+@media (max-width: 640px), (pointer: coarse) {
+  .vp-checkbox {
+    position: relative;
+  }
+
+  .vp-checkbox::after {
+    content: "";
+    position: absolute;
+    inset: -7px;
+  }
+
+  .vp-organs__disclosure {
+    position: relative;
+    min-height: 32px;
+  }
+
+  .vp-organs__disclosure::after {
+    content: "";
+    position: absolute;
+    inset: 0 -4px 0 -10px;
+  }
 }
 
 /* ---- Organ statistics panel — docked right of the stage (in flow, not overlay) ---- */
+.vp-stats:focus {
+  outline: none;
+}
+
 .vp-stats {
-  flex: 0 0 350px;
-  width: 350px;
+  /* Fluid cap so the dock shrinks on narrow windows instead of starving the stage,
+     with a floor so the header (title, export chips, close) still fits one line. */
+  flex: 0 0 clamp(280px, 32vw, 350px);
+  width: clamp(280px, 32vw, 350px);
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -1621,52 +1810,137 @@
   border-left: 1px solid var(--vp-border);
   font-family: var(--vp-font);
   overflow: hidden;
+  /* The header and the detail grid below answer to the dock's own width (280px
+     at 768, the phone sheet's 345px), not the window's. */
+  container: vp-stats / inline-size;
 }
 
-.vp-stats__head {
+/* ---- Shared header of the four docks (PanelHeader.tsx): Organs, Organ
+   statistics, Case metadata, Measurements. One height, one title style, one
+   close button, so the docks read as a family and swapping between them never
+   moves the content. ---- */
+.vp-panel-head {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  gap: 8px;
+  box-sizing: border-box;
+  min-height: 48px;
+  padding: 0 8px 0 16px;
   border-bottom: 1px solid var(--vp-border);
 }
 
-.vp-stats__actions {
+/* A long title truncates; the header never wraps onto a second line. */
+.vp-panel-head .vp-panel__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vp-panel-head__actions {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.vp-stats__export {
+.vp-panel-head__chip {
+  min-height: 26px;
+  padding: 0 9px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid var(--vp-border);
+  border-radius: 6px;
   color: var(--vp-text-dim);
   font-family: var(--vp-mono);
-  font-size: 9.5px;
+  font-size: 10px;
   letter-spacing: 0.06em;
-  border-radius: 6px;
-  padding: 3px 7px;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.vp-stats__export:hover {
+.vp-panel-head__chip:hover {
   color: var(--vp-text);
   background: rgba(255, 255, 255, 0.12);
 }
 
-.vp-stats__close {
+/* An icon button, not a text glyph. padding: 0 because the site-wide button
+   padding (src/index.css) would otherwise swallow the icon. */
+.vp-panel-head__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
   color: var(--vp-text-dim);
-  font-size: 20px;
-  line-height: 1;
   cursor: pointer;
-  padding: 0 4px;
 }
 
-.vp-stats__close:hover {
+.vp-panel-head__close:hover {
   color: var(--vp-text);
+  background: var(--vp-hover);
 }
+
+/* Touch: every control in the header reaches a 36px target. */
+@media (max-width: 640px), (pointer: coarse) {
+  .vp-panel-head__close {
+    width: 36px;
+    height: 36px;
+  }
+
+  .vp-panel-head__chip {
+    min-height: 32px;
+    padding: 0 12px;
+    font-size: 10.5px;
+  }
+}
+
+/* In a dock under 300px (768px windows) the title, two chips and the close
+   button share about 255px: tighten the chips and the title's tracking so the
+   title is never clipped. Placed after the touch block so it wins there too. */
+@container vp-stats (max-width: 300px) {
+  .vp-panel-head {
+    gap: 4px;
+  }
+
+  .vp-panel-head .vp-panel__title {
+    letter-spacing: 0.08em;
+  }
+
+  .vp-panel-head__actions {
+    gap: 4px;
+  }
+
+  .vp-panel-head__chip {
+    padding: 0 8px;
+  }
+}
+
+/* One empty / status message for all the docks: plain sentence, left aligned,
+   at least the dim text colour. The hint sits under it on its own line. */
+.vp-panel__empty {
+  padding: 20px 16px;
+  font-family: var(--vp-font);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--vp-text-dim);
+  text-align: left;
+}
+
+.vp-panel__hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  /* No lone last word ("case.") on a line of its own. */
+  text-wrap: pretty;
+}
+
 
 /* Out-of-range summary banner above the table. */
 .vp-stats__summary {
@@ -1681,15 +1955,7 @@
 }
 
 .vp-stats__summary strong {
-  color: #465bfc;
-}
-
-.vp-stats__msg {
-  padding: 24px 16px;
-  font-family: var(--vp-mono);
-  font-size: 12px;
-  color: var(--vp-text-dim);
-  text-align: center;
+  color: var(--vp-accent);
 }
 
 .vp-stats__table {
@@ -1708,9 +1974,11 @@
 
 .vp-stats__row {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 0.8fr;
+  grid-template-columns: minmax(0, 1fr) 60px 48px;
   gap: 8px;
-  align-items: center;
+  /* Top-aligned: a name with a "Clipped at scan edge" hint is a taller cell, and the numbers
+     stay level with the first line of the name instead of floating down the block. */
+  align-items: start;
   padding: 9px 10px;
   border-radius: 8px;
   font-family: var(--vp-font);
@@ -1720,20 +1988,23 @@
 
 /* 4-column layout when the population percentile column is present. */
 .vp-stats__table--pct .vp-stats__row {
-  grid-template-columns: 1.15fr 0.8fr 0.55fr 0.85fr;
+  grid-template-columns: minmax(0, 1fr) 56px 48px 44px;
   gap: 6px;
 }
 
-.vp-stats__row span:nth-child(2),
-.vp-stats__row span:nth-child(3),
-.vp-stats__row span:nth-child(4) {
+.vp-stats__row>span:nth-child(2),
+.vp-stats__row>span:nth-child(3),
+.vp-stats__row>span:nth-child(4) {
   font-family: var(--vp-mono);
   font-size: 11px;
+  /* The height of the name's first line (the 18px chevron box), so these sit level with it. */
+  line-height: 18px;
   color: var(--vp-text-dim);
   text-align: right;
 }
 
-/* Percentile cell: number stacked over a tiny distribution sparkline. */
+/* Percentile cell: number stacked over a tiny distribution sparkline. The top padding puts
+   the number on the same centre line as the other numeric cells. */
 .vp-stats__pct {
   display: flex;
   flex-direction: column;
@@ -1741,14 +2012,20 @@
   gap: 3px;
 }
 
+.vp-stats__row>span.vp-stats__pct {
+  padding-top: 2px;
+  line-height: 14px;
+}
+
 .vp-stats__pctnum {
   font-family: var(--vp-mono);
   font-size: 11px;
 }
 
-/* Muted by default, highlighted when in the extreme tails (<p5 / >p95). */
+/* Muted by default, highlighted when in the extreme tails (<p5 / >p95). The
+   viewer's dark-surface blue: #465bfc read at under 4:1 on this dock. */
 .vp-stats__pct--flag {
-  color: #465bfc !important;
+  color: var(--vp-accent) !important;
   font-weight: 600;
 }
 
@@ -1783,7 +2060,7 @@
 }
 
 .vp-spark__marker--flag {
-  background: #465bfc;
+  background: var(--vp-accent);
 }
 
 /* Explicit index-based stripe (not :nth-child) since expanded detail rows are interleaved
@@ -1796,6 +2073,7 @@
   position: sticky;
   top: 0;
   background: rgba(14, 15, 18, 0.96);
+  align-items: center;
 }
 
 .vp-stats__row--head span {
@@ -1805,6 +2083,14 @@
   text-transform: uppercase;
   color: var(--vp-text-faint) !important;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Indent ORGAN to where the organ names start: the chevron box (14px + 2 x 3px side padding,
+   pulled 4px left) plus the 4px gap in .vp-stats__name. The numeric columns are fixed-width
+   grid tracks, so this does not move them. */
+.vp-stats__row--head>span:first-child {
+  padding-left: 20px;
 }
 
 /* Each data row expands in place to reveal the full metric breakdown (median, std dev,
@@ -1818,11 +2104,51 @@
   background: var(--vp-hover);
 }
 
+/* The organ cell: chevron beside the name, so a name that wraps hangs under
+   itself and not under the chevron. */
+.vp-stats__name {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* The disclosure button inside that cell: looks like plain text, toggles the row. */
+.vp-stats__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.vp-stats__toggle:focus-visible {
+  outline: 2px solid var(--vp-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.vp-stats__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A real icon in a box large enough to see and point at, not a 10px glyph. */
 .vp-stats__chevron {
-  display: inline-block;
-  width: 10px;
-  margin-right: 2px;
-  font-size: 10px;
+  flex: none;
+  box-sizing: content-box;
+  width: 14px;
+  height: 14px;
+  margin: -3px 0 -3px -4px;
+  padding: 5px 3px;
   color: var(--vp-text-faint);
   transition: transform 0.15s ease;
 }
@@ -1831,16 +2157,24 @@
   transform: rotate(90deg);
 }
 
-.vp-stats__truncated-flag {
-  margin-left: 5px;
-  font-size: 10px;
-  color: #465bfc;
-  cursor: help;
+/* "Not in this scan" under an organ the scan holds no voxels of. */
+.vp-stats__label .vp-panel__hint {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--vp-text-dim);
+}
+
+/* "Clipped at scan edge": why the volume reads n/a. Amber, like the summary
+   banner, so it reads as a caution rather than the blue highlight. */
+.vp-stats__label .vp-stats__clipped {
+  color: rgb(255, 180, 84);
 }
 
 .vp-stats__detail {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  /* minmax(0, ...): a plain 1fr will not shrink below its text, which pushed
+     "Not measured" out of the dock. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 3px 14px;
   margin: -2px 4px 6px;
   padding: 8px 10px;
@@ -1862,11 +2196,29 @@
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--vp-text-faint);
+  white-space: nowrap;
 }
 
 .vp-stats__detail-item span:last-child {
   font-size: 11px;
   color: var(--vp-text-dim);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* The reason behind a truncated organ's n/a values, across both columns. */
+.vp-stats__detail-note {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: rgb(255, 180, 84);
+  text-wrap: pretty;
+}
+
+/* Two columns of label and value need about 300px; below that they stack. */
+@container vp-stats (max-width: 300px) {
+  .vp-stats__detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* ---- Case metadata panel — shares the .vp-stats dock shell (right of the stage) ---- */

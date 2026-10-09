@@ -16,6 +16,7 @@ import {
     IconChartBar,
     IconCheck,
     IconChevronDown,
+    IconChevronRight,
     IconCircle,
     IconClick,
     IconEye,
@@ -40,8 +41,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEve
 import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { Link, useLocation, useParams } from "react-router-dom";
+import PanelHeader from "../components/PanelHeader";
 import AISidebar from "../components/AIAssistant/AISidebar";
 import { track } from "../helpers/analytics";
+import { formatCaseMetaValue } from "../helpers/demographics";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
 import MeasurementPanel from "../components/MeasurementPanel/MeasurementPanel";
 import { SegmentationMeshViewer } from "../components/viewer/MeshViewer";
@@ -193,13 +196,15 @@ import { type MaskingArea } from "../components/segmentation/MaskingSelect";
 import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
 import { loadLocalNiftiAsRawBlobUrl } from "../helpers/localNifti";
 import {
-    describeBasis,
     loadOrganNorms,
     type OrganNorms,
+    percentileTitle,
 } from "../helpers/organNorms";
 import {
     computeStatRows,
     downloadStats,
+    fmtVolumeCm3,
+    isAbsentOrgan,
     summarizeOutOfRange,
     type OrganMetric,
 } from "../helpers/organStatsExport";
@@ -276,30 +281,19 @@ const METADATA_FIELDS: { key: string; label: string }[] = [
 	{ key: "sex", label: "Sex" },
 	{ key: "age", label: "Age" },
 	{ key: "tumor", label: "Tumor" },
-	{ key: "ct phase", label: "CT Phase" },
+	{ key: "ct phase", label: "CT phase" },
 	{ key: "manufacturer", label: "Manufacturer" },
-	{ key: "manufacturer model", label: "Scanner Model" },
-	{ key: "study year", label: "Study Year" },
-	{ key: "study type", label: "Study Type" },
+	{ key: "manufacturer model", label: "Scanner model" },
+	{ key: "study year", label: "Study year" },
+	{ key: "study type", label: "Study type" },
 	{ key: "site nationality", label: "Site" },
 ];
 
-const formatMetaValue = (key: string, v: unknown): string => {
-	if (key === "tumor") {
-		if (v === 1 || v === true) return "Yes";
-		if (v === 0 || v === false) return "No";
-		return "Unknown";
-	}
-	if (v === null || v === undefined || v === "") return "—";
-	if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(1);
-	return String(v);
-};
-
 type OrganStat = OrganMetric;
 
-// Formats a nullable metric for the organ-stats detail drawer — "—" when the backend
-// didn't compute it (e.g. an empty/degenerate mask), fixed-point otherwise.
-const fmtStat = (v: number | null, digits = 0): string => (v === null ? "—" : v.toFixed(digits));
+// Formats a nullable metric for the organ-stats detail drawer: "n/a" (as in the table above it) when the
+// backend didn't compute it (e.g. an empty/degenerate mask), fixed-point otherwise.
+const fmtStat = (v: number | null, digits = 0): string => (v === null ? "n/a" : v.toFixed(digits));
 
 // The reading timeline prints these lines as logged, so each edit is worded
 // like the Annotate menu it came from, not as the operation's internal name.
@@ -830,6 +824,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const [organStats, setOrganStats] = useState<OrganStat[] | null>(null);
 	const [statsLoading, setStatsLoading] = useState(false);
 	const [statsError, setStatsError] = useState(false);
+	// The request itself failed (offline, a server error), as opposed to the server answering
+	// that this case has no statistics. Only this one is worth a Try again.
+	const [statsFailed, setStatsFailed] = useState(false);
+	// Try again unmounts itself (the panel swaps to "Computing…"), so focus moves to the dock first.
+	const statsPanelRef = useRef<HTMLDivElement>(null);
 	// Row index of the organ whose full metric breakdown (median/std dev/skew/kurtosis/...)
 	// is expanded inline. Only one at a time — keeps the panel compact by default.
 	const [expandedStatRow, setExpandedStatRow] = useState<number | null>(null);
@@ -843,9 +842,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// already supplies demographics). demographicsTriedRef guards the fetch so it only
 	// ever runs once per case, even if no matching row is found (in which case
 	// caseMetadata stays null and the panel shows its "not available" state).
+	// The panel reads metadataLookedUp, not the ref: a ref write doesn't re-render,
+	// so a failed or empty lookup left it on "Loading…".
 	const [showMetadata, setShowMetadata] = useState(false);
 	const [caseMetadata, setCaseMetadata] = useState<Record<string, unknown> | null>(null);
 	const demographicsTriedRef = useRef(false);
+	const [metadataLookedUp, setMetadataLookedUp] = useState(false);
+	// A lookup that failed (as opposed to one that found no row), so the panel can offer
+	// another try instead of claiming the case has no metadata.
+	const [metadataError, setMetadataError] = useState(false);
 	// Measured download progress for the loading screen (from the nifti loader's real
 	// bytes-loaded/total — accurate, not a guess).
 	const [dlPct, setDlPct] = useState<number | null>(null);
@@ -3527,19 +3532,24 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		if (organStats || statsLoading) return;
 		setStatsLoading(true);
 		setStatsError(false);
+		setStatsFailed(false);
 		try {
 			const fd = new FormData();
 			fd.append("sessionKey", String(caseId));
 			const res = await fetch(`${API_BASE}/api/mask-data`, { method: "POST", body: fd });
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const data = await res.json();
-			// The endpoint returns its errors with HTTP 200 + an `error` field, so check both.
-			if (!res.ok || data.error) {
-				throw new Error(data.error || `HTTP ${res.status}`);
+			// The endpoint returns its errors with HTTP 200 + an `error` field: that is the
+			// server's own answer for this case, not a failed request.
+			if (data.error) {
+				console.error(data.error);
+				setStatsError(true);
+				return;
 			}
 			setOrganStats((data.organ_metrics ?? []) as OrganStat[]);
 		} catch (e) {
 			console.error(e);
-			setStatsError(true);
+			setStatsFailed(true);
 		} finally {
 			setStatsLoading(false);
 		}
@@ -3551,6 +3561,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// demographicsTriedRef (not "!demographics", which a case with no matching row would
 	// never satisfy) guards the fetch so a missing row is only looked up once, not on
 	// every panel open.
+	// Try again unmounts itself (the panel swaps to "Loading…"), so focus moves to the panel first.
+	const metadataPanelRef = useRef<HTMLDivElement>(null);
 	const loadPercentileContext = async () => {
 		if (!normsTried.current) {
 			normsTried.current = true;
@@ -3561,10 +3573,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		// case-id match) rather than adding a per-case metadata route.
 		if (!demographicsTriedRef.current && pantsCase) {
 			demographicsTriedRef.current = true;
+			setMetadataError(false);
 			try {
 				const res = await fetch(
-					`${API_BASE}/api/search?caseid=${encodeURIComponent(pantsCase)}&per_page=1`
+					`${API_BASE}/api/search?caseid=${encodeURIComponent(pantsCase)}&per_page=1${isCvCase ? "&dataset=cancerverse" : ""}`
 				);
+				if (!res.ok) throw new Error(`Metadata lookup failed (${res.status})`);
 				const data = await res.json();
 				const item = Array.isArray(data.items) ? data.items[0] : null;
 				if (item) {
@@ -3581,8 +3595,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					});
 					setCaseMetadata(item);
 				}
-			} catch {
-				/* percentile/metadata panels just fall back to their "not available" state */
+				setMetadataLookedUp(true);
+			} catch (err) {
+				// Not a "no row" answer, so allow another attempt (panel reopen or Try again).
+				console.error("Case metadata lookup failed", err);
+				demographicsTriedRef.current = false;
+				setMetadataError(true);
 			}
 		}
 	};
@@ -5112,58 +5130,57 @@ const aiAvailableOrgans = useMemo(() => {
 			{quizPractice && quizPractice.dockOpen && (
 				<QuizPracticeDock controller={quizPractice} />
 			)}
-			</div>
-			{hoverOrganTip.visible && (
-				<div
-					className="vp-organ-tip"
-					style={{ left: hoverOrganTip.x, top: hoverOrganTip.y, borderLeftColor: hoverOrganTip.color }}
-				>
-					<span className="vp-organ-tip__swatch" style={{ background: hoverOrganTip.color }} />
-					{hoverOrganTip.text}
-				</div>
-			)}
-
+			{/* Right docks. Organ stats, case metadata and measurements share the
+			    slot right of the stage and sit in flow inside .vp-body, so opening one
+			    narrows the viewports instead of stacking under them (on a phone they
+			    become an overlay, see VisualizationPage.css). */}
 			{showStats && (
-				<div className="vp-stats">
-					<div className="vp-stats__head">
-						<span className="vp-panel__title">Organ Statistics</span>
-						<div className="vp-stats__actions">
-							{statRows.length > 0 && (
+				<div className="vp-stats" ref={statsPanelRef} tabIndex={-1}>
+					<PanelHeader title="Organ statistics" closeLabel="Close organ statistics" onClose={() => setShowStats(false)}>
+						{statRows.length > 0 && (
+							<>
+								<button
+									type="button"
+									className="vp-panel-head__chip"
+									onClick={() => downloadStats(statRows, "csv", caseId)}
+									title="Download as CSV"
+								>
+									CSV
+								</button>
+								<button
+									type="button"
+									className="vp-panel-head__chip"
+									onClick={() => downloadStats(statRows, "json", caseId)}
+									title="Download as JSON"
+								>
+									JSON
+								</button>
+							</>
+						)}
+					</PanelHeader>
+					{statsLoading ? (
+						<div className="vp-panel__empty">Computing…</div>
+					) : statsFailed ? (
+						<div className="vp-panel__empty" role="status">
+							Could not load organ statistics.
+							<span className="vp-panel__hint">
+								<button type="button" className="vp-btn" onClick={() => { statsPanelRef.current?.focus(); void loadOrganStats(); }}>
+									Try again
+								</button>
+							</span>
+						</div>
+					) : statsError ? (
+						<div className="vp-panel__empty">
+							{sessionId ? (
+								"Organ statistics could not be computed for this scan. Try again later."
+							) : (
 								<>
-									<button
-										className="vp-stats__export"
-										onClick={() => downloadStats(statRows, "csv", caseId)}
-										title="Download as CSV"
-									>
-										CSV
-									</button>
-									<button
-										className="vp-stats__export"
-										onClick={() => downloadStats(statRows, "json", caseId)}
-										title="Download as JSON"
-									>
-										JSON
-									</button>
+									Organ statistics aren't available for this case here.
+									<span className="vp-panel__hint">
+										(They're computed from the dataset volumes on the server.)
+									</span>
 								</>
 							)}
-							<button
-								className="vp-stats__close"
-								onClick={() => setShowStats(false)}
-								aria-label="Close organ statistics"
-							>
-								×
-							</button>
-						</div>
-					</div>
-					{statsLoading ? (
-						<div className="vp-stats__msg">Computing…</div>
-					) : statsError ? (
-						<div className="vp-stats__msg">
-							Organ statistics aren't available for this case here.
-							<br />
-							<span style={{ opacity: 0.7 }}>
-								(They're computed from the dataset volumes on the server.)
-							</span>
 						</div>
 					) : statRows.length > 0 ? (
 						<>
@@ -5176,51 +5193,55 @@ const aiAvailableOrgans = useMemo(() => {
 										.join(", ")}
 								</div>
 							)}
-							<div className={`vp-stats__table${organNorms ? " vp-stats__table--pct" : ""}`}>
-								<div className="vp-stats__row vp-stats__row--head">
-									<span>Organ</span>
-									<span>Volume</span>
-									<span>Mean HU</span>
-									{organNorms && <span title="Volume percentile vs the dataset">%ile</span>}
+							<div className={`vp-stats__table${organNorms ? " vp-stats__table--pct" : ""}`} role="table" aria-label="Organ statistics">
+								<div className="vp-stats__row vp-stats__row--head" role="row">
+									<span role="columnheader">Organ</span>
+									<span role="columnheader">Volume</span>
+									<span role="columnheader">Mean HU</span>
+									{organNorms && <span role="columnheader" title="Volume percentile vs the dataset">%ile</span>}
 								</div>
 								{statRows.map((r, i) => {
 									const flagged = r.percentile !== null && (r.percentile < 5 || r.percentile > 95);
 									const expanded = expandedStatRow === i;
 									return (
 										<React.Fragment key={`${r.organ_name}-${i}`}>
+											{/* The whole row still toggles on a click; the organ name is the real
+											    disclosure button, so the values stay addressable cells. */}
 											<div
 												className={`vp-stats__row vp-stats__row--expandable${i % 2 === 1 ? " vp-stats__row--odd" : ""}`}
-												role="button"
-												tabIndex={0}
-												aria-expanded={expanded}
+												role="row"
 												onClick={() => setExpandedStatRow(expanded ? null : i)}
-												onKeyDown={(e) => {
-													if (e.key === "Enter" || e.key === " ") {
-														e.preventDefault();
-														setExpandedStatRow(expanded ? null : i);
-													}
-												}}
 											>
-												<span>
-													<span className={`vp-stats__chevron${expanded ? " vp-stats__chevron--open" : ""}`}>
-														›
-													</span>
-													{r.label}
-													{r.truncated && (
-														<span className="vp-stats__truncated-flag" title="Mask reaches the volume edge — metrics may be clipped">
-															⚠
+												<span className="vp-stats__name" role="cell">
+													<button type="button" className="vp-stats__toggle" aria-expanded={expanded}>
+														<IconChevronRight
+															aria-hidden="true"
+															size={14}
+															className={`vp-stats__chevron${expanded ? " vp-stats__chevron--open" : ""}`}
+														/>
+														<span className="vp-stats__label">
+															{r.label}
+															{isAbsentOrgan(r) && <span className="vp-panel__hint">Not in this scan</span>}
+															{r.truncated && !isAbsentOrgan(r) && (
+																<span className="vp-panel__hint vp-stats__clipped">Clipped at scan edge</span>
+															)}
 														</span>
-													)}
+													</button>
 												</span>
-												<span>{r.volume_cm3 === null || r.truncated ? "NA" : `${Math.round(r.volume_cm3)} cm³`}</span>
-												<span>{r.mean_hu === null ? "NA" : Math.round(r.mean_hu)}</span>
+												<span role="cell">{r.volume_cm3 === null || r.truncated || isAbsentOrgan(r) ? "n/a" : fmtVolumeCm3(r.volume_cm3)}</span>
+												<span role="cell">{r.mean_hu === null ? "n/a" : Math.round(r.mean_hu)}</span>
 												{organNorms && (
 													<span
+														role="cell"
 														className={`vp-stats__pct${flagged ? " vp-stats__pct--flag" : ""}`}
 														title={
 															r.percentile !== null
-																? `${Math.round(r.percentile)}th percentile vs ${describeBasis(r.basis as string)} (n=${r.n})`
-																: "No reference group for this organ"
+																? percentileTitle(r.percentile, r.basis as string, r.n)
+																: isAbsentOrgan(r)
+																	? "Not in this scan"
+																	: r.truncated
+																		? "Clipped at scan edge"
+																		: "No reference group for this organ"
 														}
 													>
 														{r.percentile !== null ? (
@@ -5229,45 +5250,50 @@ const aiAvailableOrgans = useMemo(() => {
 																<PercentileBar percentile={r.percentile} flagged={flagged} />
 															</>
 														) : (
-															"—"
+															"n/a"
 														)}
 													</span>
 												)}
 											</div>
 											{expanded && (
-												<div className="vp-stats__detail">
-													<div className="vp-stats__detail-item">
+												<div className="vp-stats__detail" role="row">
+													<div className="vp-stats__detail-item" role="cell">
 														<span>Median HU</span>
 														<span>{fmtStat(r.median)}</span>
 													</div>
-													<div className="vp-stats__detail-item">
-														<span>Std Dev HU</span>
+													<div className="vp-stats__detail-item" role="cell">
+														<span>Std dev HU</span>
 														<span>{fmtStat(r.standard_deviation)}</span>
 													</div>
-													<div className="vp-stats__detail-item">
+													<div className="vp-stats__detail-item" role="cell">
 														<span>Min HU</span>
 														<span>{fmtStat(r.min_value)}</span>
 													</div>
-													<div className="vp-stats__detail-item">
+													<div className="vp-stats__detail-item" role="cell">
 														<span>Max HU</span>
 														<span>{fmtStat(r.max_value)}</span>
 													</div>
-													<div className="vp-stats__detail-item">
+													<div className="vp-stats__detail-item" role="cell">
 														<span>Skewness</span>
 														<span>{fmtStat(r.skewness, 2)}</span>
 													</div>
-													<div className="vp-stats__detail-item">
+													<div className="vp-stats__detail-item" role="cell">
 														<span>Kurtosis</span>
 														<span>{fmtStat(r.kurtosis, 2)}</span>
 													</div>
-													<div className="vp-stats__detail-item">
-														<span>Voxel Count</span>
-														<span>{r.voxel_count === null || r.truncated ? "—" : r.voxel_count.toLocaleString()}</span>
+													<div className="vp-stats__detail-item" role="cell">
+														<span>Voxel count</span>
+														<span>{r.voxel_count === null || r.truncated ? "n/a" : r.voxel_count.toLocaleString()}</span>
 													</div>
-													<div className="vp-stats__detail-item">
+													<div className="vp-stats__detail-item" role="cell">
 														<span>Truncated</span>
 														<span>{r.truncated ? "Yes" : "No"}</span>
 													</div>
+													{r.truncated && !isAbsentOrgan(r) && (
+														<div className="vp-stats__detail-note" role="cell">
+															Clipped at scan edge, so volume and voxel count are not shown.
+														</div>
+													)}
 												</div>
 											)}
 										</React.Fragment>
@@ -5276,30 +5302,30 @@ const aiAvailableOrgans = useMemo(() => {
 							</div>
 						</>
 					) : (
-						<div className="vp-stats__msg">No organ data available.</div>
+						<div className="vp-panel__empty">No organ data available.</div>
 					)}
 				</div>
 			)}
 
 			{showMetadata && (
-				<div className="vp-stats">
-					<div className="vp-stats__head">
-						<span className="vp-panel__title">Case Metadata</span>
-						<button
-							className="vp-stats__close"
-							onClick={() => setShowMetadata(false)}
-							aria-label="Close case metadata"
-						>
-							×
-						</button>
-					</div>
+				<div className="vp-stats" ref={metadataPanelRef} tabIndex={-1}>
+					<PanelHeader title="Case metadata" closeLabel="Close case metadata" onClose={() => setShowMetadata(false)} />
 					{!pantsCase ? (
-						<div className="vp-stats__msg">
+						<div className="vp-panel__empty">
 							Case metadata is only available for dataset cases.
 						</div>
 					) : !caseMetadata ? (
-						<div className="vp-stats__msg">
-							{demographicsTriedRef.current
+						<div className="vp-panel__empty" role="status">
+							{metadataError ? (
+								<>
+									Could not load metadata.
+									<span className="vp-panel__hint">
+										<button type="button" className="vp-btn" onClick={() => { metadataPanelRef.current?.focus(); void loadPercentileContext(); }}>
+											Try again
+										</button>
+									</span>
+								</>
+							) : metadataLookedUp
 								? "No metadata available for this case."
 								: "Loading…"}
 						</div>
@@ -5309,7 +5335,7 @@ const aiAvailableOrgans = useMemo(() => {
 								<div className={`vp-meta__row${i % 2 === 1 ? " vp-meta__row--odd" : ""}`} key={key}>
 									<span className="vp-meta__label">{label}</span>
 									<span className="vp-meta__value">
-										{formatMetaValue(key, caseMetadata[key])}
+										{formatCaseMetaValue(key, caseMetadata[key])}
 									</span>
 								</div>
 							))}
@@ -5324,6 +5350,17 @@ const aiAvailableOrgans = useMemo(() => {
 					onJump={(mm) => setCrosshairMm(mm)}
 				/>
 			)}
+			</div>
+			{hoverOrganTip.visible && (
+				<div
+					className="vp-organ-tip"
+					style={{ left: hoverOrganTip.x, top: hoverOrganTip.y, borderLeftColor: hoverOrganTip.color }}
+				>
+					<span className="vp-organ-tip__swatch" style={{ background: hoverOrganTip.color }} />
+					{hoverOrganTip.text}
+				</div>
+			)}
+
 			{/* Kept mounted (display toggles) so the chat history survives open/close. */}
 			{!soloChallenge && liveRoom?.metadata.mode !== "quiz" && <AISidebar
 				open={showAISidebar}
