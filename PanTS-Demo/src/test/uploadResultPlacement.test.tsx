@@ -104,7 +104,7 @@ describe("completed inference actions", () => {
     const doneBar = await screen.findByText("Inference complete", {}, { timeout: 5000 });
     expect(doneBar.closest(".dropzone")).toBe(dropzone);
     // No Cancel button left once there's nothing to cancel.
-    expect(screen.queryByRole("button", { name: "Cancel all" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Cancel all scans in 2 scans started / })).not.toBeInTheDocument();
     // The spinning icon next to the status line stops once nothing is running -
     // it was previously left spinning forever alongside "Inference complete".
     expect(dropzone.querySelector(".upload-spinner")).toBeNull();
@@ -112,7 +112,7 @@ describe("completed inference actions", () => {
 
     // Viewing it releases the slot - the box goes back to normal instead of
     // holding onto a finished batch forever.
-    await user.click(screen.getByRole("button", { name: "View details" }));
+    await user.click(screen.getByRole("button", { name: /^View details for 2 scans started / }));
     await waitFor(() =>
       expect(screen.queryByText("Inference complete")).not.toBeInTheDocument(),
     );

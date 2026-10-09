@@ -85,9 +85,10 @@ describe("formatRelativeTime", () => {
 
 describe("recentStatusColor", () => {
 	it("maps each status to its color", () => {
-		expect(recentStatusColor("Failed")).toBe("#ef4444");
+		expect(recentStatusColor("Failed")).toBe("#b91c1c");
+		expect(recentStatusColor("Cancelled")).toBe("#b45309");
 		expect(recentStatusColor("Processing")).toBe("#6a6a6a");
-		expect(recentStatusColor("Completed")).toBe("#8f8f8f");
+		expect(recentStatusColor("Completed")).toBe("#6a6a6a");
 	});
 });
 

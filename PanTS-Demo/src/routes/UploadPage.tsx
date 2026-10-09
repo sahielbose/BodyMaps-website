@@ -1,4 +1,5 @@
 import React, {
+  Fragment,
   lazy,
   Suspense,
   useCallback,
@@ -139,7 +140,10 @@ import {
   markRecentUploadViewed,
   renameRecentUpload,
   formatRelativeTime,
+  scanSourceName,
+  scanAccessibleName,
   groupUploads,
+  batchButtonNames,
   isGroupInFlight,
   loadRecentUploads,
   recentStatusColor,
@@ -196,6 +200,21 @@ const formatBytes = (bytes: number): string => {
     i++;
   }
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
+};
+
+// Source file, model and age of a single scan, as separate items with the same
+// bullet separator the batch row uses, so rows in one list punctuate alike. The
+// separator is its own element (not text glued to the source), so the phone can
+// drop the one after the source name when the name takes its own line.
+const scanMetaItems = (u: RecentUpload): React.ReactNode[] => {
+  const items: React.ReactNode[] = [];
+  const source = scanSourceName(u);
+  if (source) items.push(<span key="source" className="upload-row__source">{source}</span>);
+  if (u.model) items.push(<span key="model">{u.model}</span>);
+  items.push(<span key="age">{formatRelativeTime(u.timestamp)}</span>);
+  return items.flatMap((item, i) =>
+    i === 0 ? [item] : [<span key={`sep${i}`} className="upload-row__sep" aria-hidden="true">•</span>, item],
+  );
 };
 
 // Coarse on purpose: a to-the-second countdown on a throughput estimate reads as
@@ -474,12 +493,31 @@ const UploadPage: React.FC = () => {
     setRenamingId(u.sessionId);
     setRenameValue(u.label);
   };
+  // The scan whose name button takes focus back once its input is gone. Set
+  // only when Enter or Escape ends the edit; a blur means focus went
+  // somewhere the user chose.
+  const renameRefocusRef = useRef<string | null>(null);
   const commitRename = () => {
     if (renamingId) setRecentUploads(renameRecentUpload(renamingId, renameValue));
     setRenamingId(null);
   };
+  const endRenameFromKeyboard = (commit: boolean) => {
+    renameRefocusRef.current = renamingId;
+    if (commit) commitRename();
+    else setRenamingId(null);
+  };
+  useEffect(() => {
+    const sid = renameRefocusRef.current;
+    if (renamingId !== null || !sid) return;
+    renameRefocusRef.current = null;
+    Array.from(document.querySelectorAll<HTMLElement>("[data-rename-trigger]"))
+      .find((el) => el.dataset.renameTrigger === sid)
+      ?.focus();
+  }, [renamingId]);
   // Which batch's "View details" popup is open (null = none).
   const [detailsBatchId, setDetailsBatchId] = useState<string | null>(null);
+  // Focus lands here when the popup closes and its opener is gone.
+  const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   // Sub-state of each Active card: "waiting" | "uploading" | "queued" | "running".
   const [sessionPhases, setSessionPhases] = useState<Record<string, string>>(
     {},
@@ -629,7 +667,18 @@ const UploadPage: React.FC = () => {
     setIsDragOver(false);
   }, []);
 
+  // Where focus goes once a chip is removed: the next chip's remove button
+  // (the previous one for the last chip), or the file picker when none is
+  // left. Without it focus falls to <body>.
+  const chipRefocusRef = useRef<string | "picker" | null>(null);
+  const selectNiftiBtnRef = useRef<HTMLButtonElement | null>(null);
+  // Run turns disabled the moment it hands the selection over, so a keyboard
+  // user who pressed it would be dropped on <body>; see handleRunEpaiInference.
+  const runBtnRef = useRef<HTMLButtonElement | null>(null);
   const removeItem = (id: string) => {
+    const at = selectedItems.findIndex((item) => item.id === id);
+    const neighbour = selectedItems[at + 1] ?? selectedItems[at - 1];
+    chipRefocusRef.current = neighbour ? neighbour.id : "picker";
     const pre = itemUploadRef.current.get(id);
     if (pre) {
       uploadAbortRef.current.get(pre.sid)?.abort();
@@ -648,6 +697,37 @@ const UploadPage: React.FC = () => {
       return rest;
     });
   };
+
+  useEffect(() => {
+    const target = chipRefocusRef.current;
+    if (!target) return;
+    chipRefocusRef.current = null;
+    if (target === "picker") selectNiftiBtnRef.current?.focus();
+    else
+      Array.from(document.querySelectorAll<HTMLElement>("[data-chip-remove]"))
+        .find((el) => el.dataset.chipRemove === target)
+        ?.focus();
+  }, [selectedItems]);
+
+  // Where focus goes once a Cancel or a Completed uploads row's remove button
+  // has taken its own control out of the page: the next row's remove button
+  // (the previous one for the last row), else the file picker after a Cancel or
+  // the page heading after the last row. Only used when focus really was lost,
+  // so a person who has moved on is not pulled back.
+  const listRefocusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const target = listRefocusRef.current;
+    if (!target) return;
+    listRefocusRef.current = null;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    if (target === "@picker") selectNiftiBtnRef.current?.focus();
+    else if (target === "@heading") pageHeadingRef.current?.focus({ preventScroll: true });
+    else
+      (Array.from(document.querySelectorAll<HTMLElement>("[data-row-remove]"))
+        .find((el) => el.dataset.rowRemove === target) ?? pageHeadingRef.current)
+        ?.focus({ preventScroll: true });
+  }, [recentUploads]);
 
   // Treat folder and manual multi-file selection identically after the browser
   // gives us File objects. Folder support differs among browsers, but the upload
@@ -1671,7 +1751,9 @@ const UploadPage: React.FC = () => {
 
     // Snapshot then clear the selection, and queue every scan's run. Each lands
     // on the upload chain in selection order and is dispatched to the GPU queue
-    // as soon as its own upload finishes.
+    // as soon as its own upload finishes. Run is disabled by the empty
+    // selection, so focus on it moves to the file picker rather than <body>.
+    if (document.activeElement === runBtnRef.current) chipRefocusRef.current = "picker";
     setSelectedItems([]);
     for (const item of items) {
       await startScanRun(item, model, batch);
@@ -1798,6 +1880,7 @@ const UploadPage: React.FC = () => {
   // Run has been clicked, instead of a separate card appearing lower on the
   // page - the same box that took the upload keeps showing its status.
   const groups = groupUploads(recentUploads);
+  const batchNames = batchButtonNames(groups);
   const inFlight = groups.filter(isGroupInFlight);
   const closeNote = closeInfo.active
     ? closeInfo.eta === null
@@ -1840,7 +1923,10 @@ const UploadPage: React.FC = () => {
   );
 
   // ── A single in-flight scan (not part of a batch) ──
-  const ProcessingCard = ({ u }: { u: RecentUpload }) => {
+  // A render helper, not a component declared in render: the ETA ticker
+  // re-renders once a second, and a fresh component type each time would
+  // remount the card and throw keyboard focus off its Cancel button.
+  const processingCard = (u: RecentUpload) => {
     const phase = sessionPhases[u.sessionId];
     const queuePos = queuePositions[u.sessionId];
     const phaseLabel =
@@ -1849,34 +1935,27 @@ const UploadPage: React.FC = () => {
       phase === "queued" ? (queuePos ? `#${queuePos} in queue` : "Queued for GPU") :
       "Running…";
     return (
-      <div style={{
-        background: "#f5f5f5", border: "1px solid rgba(0, 45, 114, 0.14)", borderRadius: "12px",
-        padding: "16px 20px", display: "flex", flexDirection: "column", gap: "12px",
-      }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-            <div style={{
-              width: "36px", height: "36px", borderRadius: "8px", flexShrink: 0,
-              background: "rgba(0, 45, 114, 0.04)", border: "1px solid rgba(0, 45, 114, 0.12)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}>{/* A static pulsing dot per scan instead of a spinning wheel:
+      <div key={u.sessionId} className="upload-proc-card">
+        <div className="upload-row">
+          <div className="upload-row__main">
+            <div className="upload-row__icon upload-row__icon--live">{/* A static pulsing dot per scan instead of a spinning wheel:
                  multiple in-flight scans shouldn't each spin. The single
                  spinner lives in the batch ProcessingSummaryBar. */}
-              <span className="animate-pulse" style={{ width: 8, height: 8, borderRadius: "50%", background: "#002d72", display: "block" }} />
+              <span className="animate-pulse upload-row__dot" />
             </div>
-            <div>
-              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{u.label}</div>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
-                {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
+            <div className="upload-row__text">
+              <div className="upload-row__title">{u.label}</div>
+              <div className="upload-row__meta">
+                {scanMetaItems(u)}
                 <span className={`proc-close-note${closeInfo.active ? "" : " proc-close-note--ready"}`}>
-                  {" "}· {closeNote}
+                  <span className="proc-close-note__sep" aria-hidden="true">• </span>{closeNote}
                 </span>
               </div>
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: phase === "queued" ? "#6a6a6a" : "#002d72" }}>{phaseLabel}</span>
-            <button className="active-cancel-btn" onClick={() => cancelRun(u)}>Cancel</button>
+          <div className="upload-row__actions">
+            <span className={`upload-row__status${phase === "queued" ? " upload-row__status--quiet" : ""}`}>{phaseLabel}</span>
+            <button type="button" className="active-cancel-btn" aria-label={`Cancel ${scanAccessibleName(u, recentUploads)}`} onClick={() => { listRefocusRef.current = "@picker"; cancelRun(u); }}>Cancel</button>
           </div>
         </div>
         {/* No real percent-complete exists for inference (nnU-Net doesn't
@@ -1886,7 +1965,7 @@ const UploadPage: React.FC = () => {
             once actually running: during "queued" there's no dispatch-time
             signal to build an estimate from. */}
         {phase === "running" && (
-          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a" }}>
+          <div className="upload-row__eta">
             {estimateRemaining(
               u.model || "",
               runningStartedAtRef.current.get(u.sessionId) ?? Date.now(),
@@ -1902,7 +1981,7 @@ const UploadPage: React.FC = () => {
   const inFlightCards = inFlight.length > 0 && (
     <div className="dropzone-inflight" onClick={(e) => e.stopPropagation()} style={{ display: "flex", flexDirection: "column", gap: "8px", width: "100%" }}>
       {inFlight.map(g => {
-        if (g.kind === "single") return <ProcessingCard key={g.upload.sessionId} u={g.upload} />;
+        if (g.kind === "single") return processingCard(g.upload);
         const running = g.uploads.filter(u => u.status === "Processing");
         const done = g.uploads.filter(u => u.status === "Completed").length;
         const phases = running.map(u => sessionPhases[u.sessionId]);
@@ -1910,11 +1989,14 @@ const UploadPage: React.FC = () => {
           phases.some(p => p === undefined || p === "running") ? "Running…" :
           phases.some(p => p === "queued") ? "Queued for GPU" : "Uploading…";
         return (
-          <ProcessingSummaryBar key={g.batchId} title={g.label} running={running.length}
+          <ProcessingSummaryBar key={g.batchId} title={g.label} buttonName={batchNames.get(g.batchId)} running={running.length}
             done={done} statusLabel={statusLabel}
             closeNote={closeNote} closeReady={!closeInfo.active}
             onViewDetails={() => { track("upload_open_batch_details"); setDetailsBatchId(g.batchId); }}
-            onCancelAll={() => running.forEach(u => cancelRun(u))} />
+            onCancelAll={() => {
+              listRefocusRef.current = "@picker";
+              running.forEach(u => cancelRun(u));
+            }} />
         );
       })}
     </div>
@@ -1983,6 +2065,7 @@ const UploadPage: React.FC = () => {
     <div className="dropzone-completed" onClick={(e) => e.stopPropagation()} style={{ width: "100%" }}>
       <ProcessingSummaryBar
         title={activeBatchCompleted.label}
+        buttonName={batchNames.get(activeBatchCompleted.batchId)}
         running={0}
         done={activeBatchCompleted.uploads.filter((u) => u.status === "Completed").length}
         statusLabel={
@@ -2033,7 +2116,8 @@ const UploadPage: React.FC = () => {
 
       <Header />
 
-      <div className="upload-main">
+      <main className="upload-main">
+        <h1 ref={pageHeadingRef} tabIndex={-1} className="sr-only">Upload a CT scan</h1>
         <div className="upload-card">
           {/* ── Drop zone ── */}
           <div
@@ -2173,6 +2257,8 @@ const UploadPage: React.FC = () => {
                         </span>
                         <button
                           className="file-chip-preview"
+                          aria-label={`${isOpen ? "Hide" : "Preview"} ${name}`}
+                          aria-expanded={isOpen}
                           onClick={() =>
                             setPreviewItemId((prev) =>
                               prev === item.id ? null : item.id,
@@ -2185,6 +2271,7 @@ const UploadPage: React.FC = () => {
                           className="file-chip-remove"
                           onClick={() => removeItem(item.id)}
                           aria-label={`Remove ${name}`}
+                          data-chip-remove={item.id}
                         >
                           ×
                         </button>
@@ -2193,7 +2280,7 @@ const UploadPage: React.FC = () => {
                         <div className="file-chip-progress-track">
                           <div
                             className="file-chip-progress-fill"
-                            style={{ width: `${uploadPct}%` }}
+                            style={{ transform: `scaleX(${uploadPct / 100})` }}
                           />
                         </div>
                       )}
@@ -2202,10 +2289,11 @@ const UploadPage: React.FC = () => {
                 })}
               </div>
             )}
-            <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+            <div className="dropzone-btn-row">
               <button
                 type="button"
                 className="dropzone-btn"
+                ref={selectNiftiBtnRef}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (ensureAccount()) fileInputRef.current?.click();
@@ -2391,14 +2479,23 @@ const UploadPage: React.FC = () => {
             </div>
 
             <button
+              type="button"
               className="run-btn"
+              ref={runBtnRef}
               onClick={handleRunEpaiInference}
               // Not gated on isUploading: that flag now also covers background
               // pre-uploads (started the moment a file is selected, before Run
               // is even clickable), and Run needs to stay clickable while one
               // is in flight - handleRunEpaiInference's own empty-selection
               // check is what prevents a double-submit, not this.
-              disabled={!selectedModel}
+              // Nothing selected means nothing to view or run, so it reads as
+              // unavailable (and says why) instead of answering with an error.
+              disabled={!selectedModel || selectedItems.length === 0}
+              title={
+                selectedItems.length === 0
+                  ? (selectedModel === "None" ? "Select a scan to view first" : "Select a file to upload first")
+                  : undefined
+              }
             >
               {selectedModel === "None" ? "View" : "Run"}
             </button>
@@ -2448,22 +2545,23 @@ const UploadPage: React.FC = () => {
             setRecentUploads(next);
           };
 
-          const SectionLabel = ({ children }: { children: React.ReactNode }) => (
-            <div style={{
-              fontFamily: "'Space Grotesk', sans-serif", fontSize: "11px", fontWeight: 600,
-              letterSpacing: "0.12em", textTransform: "uppercase", color: "#8f8f8f",
-              marginBottom: "16px", paddingLeft: "4px",
-            }}>{children}</div>
-          );
-
-          const RemoveBtn = ({ onClick }: { onClick: (e: React.MouseEvent) => void }) => (
-            <button onClick={onClick} title="Remove" style={{
-              background: "transparent", border: "none", padding: "4px", cursor: "pointer",
-              color: "rgba(0,0,0,0.2)", lineHeight: 0, borderRadius: "4px", transition: "color 0.15s",
-            }}
-              onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
-              onMouseLeave={e => (e.currentTarget.style.color = "rgba(0,0,0,0.2)")}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          // A row is taken out of the list by its key (session or batch id);
+          // focus then goes to the next row's remove button, see listRefocusRef.
+          const rowKeys = finished.map((g) => (g.kind === "single" ? g.upload.sessionId : g.batchId));
+          const removeButton = (label: string, key: string, onClick: (e: React.MouseEvent) => void) => (
+            <button
+              type="button"
+              className="upload-remove-btn"
+              data-row-remove={key}
+              onClick={(e) => {
+                const at = rowKeys.indexOf(key);
+                listRefocusRef.current = rowKeys[at + 1] ?? rowKeys[at - 1] ?? "@heading";
+                onClick(e);
+              }}
+              title="Remove"
+              aria-label={`Remove ${label}`}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <polyline points="3 6 5 6 21 6" />
                 <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
                 <path d="M10 11v6M14 11v6" />
@@ -2473,14 +2571,8 @@ const UploadPage: React.FC = () => {
           );
 
           // One shared icon container so single + batch entries line up identically.
-          const iconBox = {
-            width: "40px", height: "40px", borderRadius: "8px", flexShrink: 0,
-            background: "rgba(0,0,0,0.06)", border: "1px solid rgba(0,0,0,0.12)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-          } as const;
-
-          const FileIcon = () => (
-            <div style={iconBox}>
+          const fileIcon = (
+            <div className="upload-row__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#111111" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                 <polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" />
@@ -2491,8 +2583,8 @@ const UploadPage: React.FC = () => {
 
           // Batch: stacked-layers glyph in the identical container (no ✓ — misleading
           // when a batch has 0 completed).
-          const BatchIcon = () => (
-            <div style={iconBox}>
+          const batchIcon = (
+            <div className="upload-row__icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#111111" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polygon points="12 2 2 7 12 12 22 7 12 2" />
                 <polyline points="2 17 12 22 22 17" /><polyline points="2 12 12 17 22 12" />
@@ -2500,96 +2592,123 @@ const UploadPage: React.FC = () => {
             </div>
           );
 
-          // Shared card wrapper — identical padding/min-height for single + batch.
-          const cardWrap = {
-            background: "#f5f5f5", border: "1px solid rgba(0,0,0,0.06)", borderRadius: "12px",
-            padding: "14px 20px", minHeight: "72px", boxSizing: "border-box",
-            display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px",
-          } as const;
-
-          const smallBtn = {
-            background: "transparent", border: "1px solid rgba(0,0,0,0.1)", borderRadius: "6px",
-            padding: "6px 12px", color: "#111111", fontFamily: "'Space Grotesk', sans-serif",
-            fontSize: "11px", cursor: "pointer",
-          } as const;
-
-          // ProcessingCard is hoisted above (near the top of render) since the
-          // dropzone now needs it too.
+          // processingCard is hoisted above (near the top of render) since the
+          // dropzone now needs it too. The rows below are plain render
+          // helpers rather than components declared in render, so a re-render
+          // updates them in place instead of remounting them (which dropped
+          // keyboard focus from their buttons). Single and batch rows share
+          // the .upload-row shape, which stacks on phones (UploadPage.css).
 
           // ── A finished individual scan: status, View, Download, remove ──
-          const CompletedCard = ({ u }: { u: RecentUpload }) => (
-            <div onClick={() => openSession(u)} style={{ ...cardWrap, cursor: canView(u) ? "pointer" : "default" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "16px", minWidth: 0 }}>
-                <FileIcon />
-                <div style={{ minWidth: 0 }}>
+          const completedCard = (u: RecentUpload) => (
+            <div
+              key={u.sessionId}
+              className={`upload-row upload-row--card${canView(u) ? " upload-row--openable" : ""}`}
+              // A drag that selects the name and is let go outside the field
+              // clicks this row (the nearest common ancestor), not the input.
+              onClick={() => { if (renamingId === u.sessionId) return; openSession(u); }}
+            >
+              <div className="upload-row__main">
+                {fileIcon}
+                <div className="upload-row__text">
                   {renamingId === u.sessionId ? (
-                    <input
-                      autoFocus
-                      value={renameValue}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => setRenameValue(e.target.value)}
-                      onBlur={commitRename}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") commitRename();
-                        else if (e.key === "Escape") setRenamingId(null);
-                      }}
-                      style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", border: "1px solid rgba(0, 45, 114, 0.3)", borderRadius: "6px", padding: "2px 6px", width: "100%", maxWidth: "260px" }}
-                    />
+                    // The field floats over a slot as tall as the title's line
+                    // (see .upload-rename-slot), so starting a rename cannot
+                    // grow the row or move the meta line.
+                    <div className="upload-rename-slot">
+                      <input
+                        autoFocus
+                        className="upload-rename-input"
+                        aria-label="Scan name"
+                        value={renameValue}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onBlur={commitRename}
+                        onKeyDown={(e) => {
+                          // The Enter that picks an IME candidate (key 229 on
+                          // some browsers) belongs to the composition.
+                          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                          if (e.key !== "Enter" && e.key !== "Escape") return;
+                          // Focus is about to land on the name button, which
+                          // would otherwise take this same key press as its own
+                          // Enter and reopen the edit.
+                          e.preventDefault();
+                          endRenameFromKeyboard(e.key === "Enter");
+                        }}
+                      />
+                    </div>
                   ) : (
                     // Click the name itself to rename it - no separate pencil
                     // icon needed (matches how Claude's own chat titles work).
-                    // Underline-on-hover is the only affordance that this text
-                    // is interactive; the tooltip keeps surfacing the original
+                    // Underline-on-hover is the only visual affordance; it is a
+                    // real button, so it can be reached and used from the
+                    // keyboard. The tooltip keeps surfacing the original
                     // filename once it's been renamed away from it.
-                    <span
+                    <button
+                      type="button"
                       title={u.sourceName || "Click to rename"}
+                      aria-label={`Rename ${scanAccessibleName(u, recentUploads)}`}
+                      data-rename-trigger={u.sessionId}
                       onClick={(e) => { e.stopPropagation(); startRename(u); }}
-                      className="upload-rename-trigger"
-                      style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block", cursor: "text", maxWidth: "260px" }}
+                      className="upload-rename-trigger upload-row__title"
                     >
-                      {u.label}
-                    </span>
+                      <span className="upload-rename-trigger__text">{u.label}</span>
+                    </button>
                   )}
-                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px" }}>
-                    {u.model ? `${u.model} · ` : ""}{formatRelativeTime(u.timestamp)}
+                  <div className="upload-row__meta">
+                    {scanMetaItems(u)}
                   </div>
                 </div>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
-                <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "12px", fontWeight: 500, color: recentStatusColor(u.status) }}>{u.status}</span>
-                {canView(u) && <button style={smallBtn} onClick={(e) => { e.stopPropagation(); openSession(u); }}>View</button>}
-                {u.status === "Completed" && <button style={smallBtn} onClick={(e) => { e.stopPropagation(); downloadResult(u.sessionId); }}>Download</button>}
-                <RemoveBtn onClick={(e) => { e.stopPropagation(); setRecentUploads(removeRecentUpload(u.sessionId)); }} />
+              <div className="upload-row__actions">
+                <span className="upload-row__status" style={{ color: recentStatusColor(u.status) }}>{u.status}</span>
+                {canView(u) && <button type="button" className="upload-small-btn" aria-label={`View ${scanAccessibleName(u, recentUploads)}`} onClick={(e) => { e.stopPropagation(); openSession(u); }}>View</button>}
+                {u.status === "Completed" && <button type="button" className="upload-small-btn" aria-label={`Download ${scanAccessibleName(u, recentUploads)}`} onClick={(e) => { e.stopPropagation(); downloadResult(u.sessionId); }}>Download</button>}
+                {removeButton(scanAccessibleName(u, recentUploads), u.sessionId, (e) => { e.stopPropagation(); setRecentUploads(removeRecentUpload(u.sessionId)); })}
               </div>
             </div>
           );
 
           // ── A finished batch: same card shape as a single (uniform icon + height),
           //    a "N completed · M failed" line, View details + Download + remove ──
-          const CompletedBatchBar = ({ batchId, label, uploads }: { batchId: string; label: string; uploads: RecentUpload[] }) => {
+          const completedBatchBar = (batchId: string, label: string, uploads: RecentUpload[], timestamp: number) => {
+            // Two batches of the same size read alike, so the row carries the model
+            // (when every scan used one) and how long ago it finished, as a single does.
+            const model = uploads.every((u) => u.model === uploads[0].model) ? uploads[0].model : "";
             const done = uploads.filter(u => u.status === "Completed").length;
             const failed = uploads.filter(u => u.status === "Failed" || u.status === "Cancelled").length;
             return (
-              <div style={cardWrap}>
-                <div style={{ display: "flex", alignItems: "center", gap: "16px", minWidth: 0 }}>
-                  <BatchIcon />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "14px", fontWeight: 600, color: "#111111" }}>{label}</div>
-                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#6a6a6a", marginTop: "2px", display: "flex", alignItems: "center", gap: "6px" }}>
-                      <span>{done} completed</span>
-                      {failed > 0 && (
-                        <>
-                          <span style={{ color: "rgba(0,0,0,0.3)" }}>•</span>
-                          <span style={{ color: "#ef4444" }}>{failed} failed</span>
-                        </>
-                      )}
+              <div key={batchId} className="upload-row upload-row--card">
+                <div className="upload-row__main">
+                  {batchIcon}
+                  <div className="upload-row__text">
+                    <div className="upload-row__title">{label}</div>
+                    {/* The dot between two facts is drawn by the part it leads and
+                        clipped where a part starts a wrapped line, so no line of a
+                        narrow row starts or ends with one. */}
+                    <div className="upload-row__meta upload-row__meta--parts">
+                      <span className="upload-row__parts">
+                        {[
+                          { key: "done", text: `${done} completed` },
+                          model && { key: "model", text: model },
+                          failed > 0 && { key: "failed", text: `${failed} failed`, className: "upload-row__failed" },
+                          { key: "age", text: formatRelativeTime(timestamp) },
+                        ].filter((part): part is { key: string; text: string; className?: string } => Boolean(part)).map((part, i) => (
+                          <Fragment key={part.key}>
+                            {/* Flex drops the space, but it keeps the facts apart for a
+                                screen reader and for copied text. */}
+                            {i > 0 && " "}
+                            <span className={`upload-row__part${part.className ? ` ${part.className}` : ""}`}>{part.text}</span>
+                          </Fragment>
+                        ))}
+                      </span>
                     </div>
                   </div>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
-                  <button style={smallBtn} onClick={() => { track("upload_open_batch_details"); setDetailsBatchId(batchId); }}>View details</button>
-                  <button style={{ ...smallBtn, background: "#002d72", color: "#fff", borderColor: "#002d72" }} onClick={() => downloadBatch(uploads)}>Download</button>
-                  <RemoveBtn onClick={() => removeBatch(uploads)} />
+                <div className="upload-row__actions">
+                  <button type="button" className="upload-small-btn" aria-label={`View details for ${batchNames.get(batchId) ?? label}`} onClick={() => { track("upload_open_batch_details"); setDetailsBatchId(batchId); }}>View details</button>
+                  <button type="button" className="upload-small-btn" aria-label={`Download ${batchNames.get(batchId) ?? label}`} onClick={() => downloadBatch(uploads)}>Download</button>
+                  {removeButton(batchNames.get(batchId) ?? label, batchId, () => removeBatch(uploads))}
                 </div>
               </div>
             );
@@ -2612,13 +2731,6 @@ const UploadPage: React.FC = () => {
             setSelectedModel(id as typeof selectedModel);
           };
           const currentModelId = selectedModel === "" ? "None" : selectedModel;
-          const modelBadge = (text: string, color: string) => (
-            <span style={{
-              fontFamily: "'Space Grotesk', sans-serif", fontSize: "9px", fontWeight: 700,
-              letterSpacing: "0.08em", textTransform: "uppercase", color,
-              border: `1px solid ${color}`, borderRadius: "4px", padding: "2px 5px", flexShrink: 0,
-            }}>{text}</span>
-          );
           // "None" (view-only, no inference) is a real dropdown option but isn't
           // a model to compare against the other three, so it's left out of the
           // comparison grid.
@@ -2653,102 +2765,69 @@ const UploadPage: React.FC = () => {
           const modelCards = cardModels.map((m, index) => {
             const isCurrent = currentModelId === m.id;
             const locked = modelLocked(m.id);
+            const idBase = `upload-model-${m.id}`;
             return (
               <div
                 key={m.id}
                 ref={(el) => { modelCardRefs.current[index] = el; }}
                 role="radio"
                 aria-checked={isCurrent}
-                aria-label={`Select the ${m.label} model`}
+                aria-labelledby={`${idBase}-name`}
+                aria-describedby={`${idBase}-desc${locked ? ` ${idBase}-lock` : ""}`}
                 tabIndex={m.id === tabStopId ? 0 : -1}
+                className={`model-card${isCurrent ? " model-card--current" : ""}`}
                 onClick={() => pickModelFromCard(m.id)}
                 onKeyDown={(e) => onCardKeyDown(e, index)}
-                style={{
-                  background: "#fff",
-                  border: isCurrent ? "1.5px solid #002d72" : "1px solid rgba(0,0,0,0.08)",
-                  boxShadow: isCurrent ? "0 6px 24px rgba(0,45,114,0.12)" : "0 1px 2px rgba(0,0,0,0.04)",
-                  borderRadius: "18px", padding: "32px 28px",
-                  // subgrid: each row below (icon, name, badge, desc, button,
-                  // divider, stats, divider, bullets) shares its height with the
-                  // same row in the other cards, sized to the tallest one - so a
-                  // 3-line description in one card doesn't just push that card's
-                  // own button down, it grows the desc row for every card and
-                  // everything below stays aligned. The parent grid declares the
-                  // 9 row tracks; grid-row: span 9 hands them all to this card.
-                  display: "grid", gridTemplateRows: "subgrid", gridRow: "span 9", rowGap: 0,
-                  cursor: "pointer", textAlign: "center", minWidth: 0, height: "100%",
-                  transition: "border-color 0.15s, box-shadow 0.15s",
-                }}
               >
-                <div style={{
-                  width: "48px", height: "48px", borderRadius: "12px", flexShrink: 0,
-                  background: isCurrent ? "rgba(0,45,114,0.08)" : "rgba(0,0,0,0.05)",
-                  border: `1px solid ${isCurrent ? "rgba(0,45,114,0.18)" : "rgba(0,0,0,0.1)"}`,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  margin: "0 auto 20px",
-                }}>
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={isCurrent ? "#002d72" : "#111111"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <div className="model-card-icon" aria-hidden="true">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M9.5 2h5l.5 4.5 3.5 2-1 5-3 2.5-.5 4.5h-5l-.5-4.5-3-2.5-1-5 3.5-2z" />
                     <circle cx="12" cy="12" r="2.5" />
                   </svg>
                 </div>
 
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "18px", fontWeight: 700, color: "#111111", alignSelf: "start" }}>
+                <div id={`${idBase}-name`} className="model-card-name">
                   {m.label}
                 </div>
-                <div style={{ display: "flex", justifyContent: "center", alignItems: "start", gap: "6px", flexWrap: "wrap", marginTop: "8px" }}>
-                  {isCurrent && modelBadge("Selected", "#002d72")}
-                  {locked && modelBadge("Donate", "#8f6a00")}
+                <div className="model-card-badges">
+                  {isCurrent && <span className="model-card-badge">Selected</span>}
+                  {locked && <span id={`${idBase}-lock`} className="model-card-badge model-card-badge--lock">Donate</span>}
                 </div>
 
-                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "12px", color: "#6a6a6a", lineHeight: 1.6, marginTop: "14px", alignSelf: "start" }}>
+                <div id={`${idBase}-desc`} className="model-card-desc">
                   {m.desc}
                 </div>
 
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  style={{
-                    alignSelf: "start", marginTop: "24px", width: "100%", padding: "11px 16px", borderRadius: "999px",
-                    fontFamily: "'Space Grotesk', sans-serif", fontSize: "13px", fontWeight: 600,
-                    background: isCurrent ? "#002d72" : "#fff",
-                    color: isCurrent ? "#fff" : "#002d72",
-                    border: "1.5px solid #002d72", cursor: "pointer", pointerEvents: "none",
-                  }}
-                >
+                {/* Looks like a button, but the whole card is the control: a
+                    real button nested inside a radio would be a second,
+                    unreachable control. */}
+                <span className="model-card-cta" aria-hidden="true">
                   {isCurrent ? "Currently selected" : locked ? "Donate to unlock" : "Select this model"}
-                </button>
+                </span>
 
-                <div style={{ height: "1px", background: "rgba(0,0,0,0.08)", margin: "28px 0 0", alignSelf: "start", width: "100%" }} />
+                <div className="model-card-rule" />
 
-                <div style={{ alignSelf: "start", marginTop: "24px" }}>
+                <div className="model-card-facts">
                   {m.quickFacts && (
                     <div style={{ display: "flex", flexDirection: "column", gap: "22px" }}>
                       {m.quickFacts.map((f) => (
                         <div key={f.label}>
-                          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "21px", fontWeight: 700, color: "#111111" }}>
-                            {f.value}
-                          </div>
-                          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", color: "#8f8f8f", marginTop: "4px" }}>
-                            {f.label}
-                          </div>
+                          <div className="model-card-fact-value">{f.value}</div>
+                          <div className="model-card-fact-label">{f.label}</div>
                         </div>
                       ))}
                     </div>
                   )}
                 </div>
 
-                <div style={{ height: "1px", background: "rgba(0,0,0,0.08)", margin: "24px 0 0", alignSelf: "start", width: "100%" }} />
+                <div className="model-card-rule model-card-rule--lower" />
 
-                <div style={{ alignSelf: "start", marginTop: "20px" }}>
+                <div className="model-card-details">
                   {m.details && (
-                    <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "12px", textAlign: "left" }}>
+                    <ul>
                       {m.details.map((line, i) => (
-                        <li key={i} style={{
-                          fontFamily: "'JetBrains Mono', monospace", fontSize: "12px", color: "#6a6a6a",
-                          lineHeight: 1.5, paddingLeft: "14px", position: "relative",
-                        }}>
-                          <span style={{ position: "absolute", left: 0, color: "#002d72" }}>·</span>
+                        <li key={i}>
+                          <span aria-hidden="true">·</span>
                           {line}
                         </li>
                       ))}
@@ -2761,35 +2840,30 @@ const UploadPage: React.FC = () => {
 
           return (
             <>
-              <div style={{ marginTop: "32px" }}>
-                <SectionLabel>Choose a model</SectionLabel>
-                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "-8px", marginBottom: "20px" }}>
-                  Compare what each model does and click one to pick it - or use the Model dropdown above.
-                </div>
-                <div
-                  role="radiogroup"
-                  aria-label="Segmentation model"
-                  style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gridTemplateRows: "repeat(9, auto)", gap: "28px" }}
-                >
+              <section className="upload-section" aria-labelledby="upload-models-title">
+                <h2 id="upload-models-title" className="upload-section-title">Choose a model</h2>
+                <p className="upload-section-hint">
+                  Compare what each model does and click one to pick it, or use the Model dropdown above.
+                </p>
+                <div role="radiogroup" aria-labelledby="upload-models-title" className="model-cards">
                   {modelCards}
                 </div>
-              </div>
-
+              </section>
 
               {finished.length > 0 && (
-                <div style={{ marginTop: "32px" }}>
-                  <SectionLabel>Completed Uploads</SectionLabel>
-                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#8f8f8f", marginTop: "-8px", marginBottom: "12px" }}>
-                    Scans waiting for you to look at them - once viewed, they move to History.
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                <section className="upload-section" aria-labelledby="upload-completed-title">
+                  <h2 id="upload-completed-title" className="upload-section-title">Completed uploads</h2>
+                  <p className="upload-section-hint upload-section-hint--tight">
+                    Scans waiting for you to look at them. Once viewed, they move to History.
+                  </p>
+                  <div className="upload-rows">
                     {finished.map(g =>
                       g.kind === "single"
-                        ? <CompletedCard key={g.upload.sessionId} u={g.upload} />
-                        : <CompletedBatchBar key={g.batchId} batchId={g.batchId} label={g.label} uploads={g.uploads} />
+                        ? completedCard(g.upload)
+                        : completedBatchBar(g.batchId, g.label, g.uploads, g.timestamp)
                     )}
                   </div>
-                </div>
+                </section>
               )}
 
               {older.length > 0 && (
@@ -2816,6 +2890,7 @@ const UploadPage: React.FC = () => {
               label={label}
               uploads={uploads}
               onClose={() => setDetailsBatchId(null)}
+              restoreFocusRef={pageHeadingRef}
               onView={(u) => {
                 if (!u.viewed) setRecentUploads(markRecentUploadViewed(u.sessionId));
                 navigate(`/${u.isReconstruction ? "reconstruction" : "session"}/${u.sessionId}`);
@@ -2825,7 +2900,7 @@ const UploadPage: React.FC = () => {
             />
           );
         })()}
-      </div>
+      </main>
       <SiteFooter />
     </div>
   );

@@ -75,6 +75,25 @@ export const groupUploads = (list: RecentUpload[]): UploadGroup[] => {
 	return groups.sort((a, b) => b.timestamp - a.timestamp);
 };
 
+// A name for each batch that no other batch on the page shares, for the
+// buttons that act on a whole batch: two uploads can both be "3 scans", so the
+// label alone doesn't tell a screen-reader or voice-control user which View
+// details or Cancel all they are reaching. Adds when it started, and a count
+// when even that is the same.
+export const batchButtonNames = (groups: UploadGroup[]): Map<string, string> => {
+	const names = new Map<string, string>();
+	const seen = new Map<string, number>();
+	for (const g of groups) {
+		if (g.kind !== "batch") continue;
+		const started = new Date(Math.min(...g.uploads.map((u) => u.timestamp)));
+		const base = `${g.label} started ${started.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+		const n = (seen.get(base) ?? 0) + 1;
+		seen.set(base, n);
+		names.set(g.batchId, n === 1 ? base : `${base} (${n})`);
+	}
+	return names;
+};
+
 // A batch is "in flight" while any of its scans is still processing; it's
 // "done" once every scan has reached a terminal state.
 export const isGroupInFlight = (g: UploadGroup): boolean =>
@@ -194,6 +213,50 @@ export const friendlyScanName = (model: string, timestamp: number): string => {
 	return `${who} · ${date}`;
 };
 
+// Scans run the same day with the same model share a default name, so the file
+// each one came from is what tells the rows apart. Empty when the scan has no
+// recorded file, or when a rename already made the name the file's own.
+export const scanSourceName = (u: Pick<RecentUpload, "label" | "sourceName">): string =>
+	u.sourceName && u.sourceName !== u.label ? u.sourceName : "";
+
+// What a row's buttons call the scan. The label alone, unless another row in
+// `all` carries the same label, in which case the file name is added so a
+// screen reader can tell "Download ePAI · Sep 30, 2026" apart from its twin.
+export const scanAccessibleName = (
+	u: Pick<RecentUpload, "sessionId" | "label" | "sourceName"> & Partial<Pick<RecentUpload, "timestamp">>,
+	all: readonly (Pick<RecentUpload, "sessionId" | "label"> & Partial<Pick<RecentUpload, "timestamp" | "sourceName">>)[],
+): string => {
+	type Row = typeof all[number];
+	const twins = (x: Row) => all.some((o) => o.sessionId !== x.sessionId && o.label === x.label);
+	if (!twins(u)) return u.label;
+	// The file the scan came from, when one is on record.
+	const withSource = (x: Row) => {
+		const source = scanSourceName({ label: x.label, sourceName: x.sourceName });
+		return source ? `${x.label} (${source})` : x.label;
+	};
+	const base = withSource(u);
+	const sameBase = (x: Row) => x.label === u.label && withSource(x) === base;
+	if (all.filter(sameBase).every((o) => o.sessionId === u.sessionId)) return base;
+	// The same file run again the same day, or no file name on record (a run
+	// merged in from the server, or an older entry): the time it was started is
+	// what is left to tell it from its twin.
+	if (!u.timestamp) return base;
+	const timeOf = (ts: number) =>
+		new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+	const withTime = (x: Row) => {
+		const source = scanSourceName({ label: x.label, sourceName: x.sourceName });
+		return source ? `${x.label} (${source}, ${timeOf(x.timestamp!)})` : `${x.label} (${timeOf(x.timestamp!)})`;
+	};
+	const named = withTime(u);
+	// Twins started in the same minute still match: count them in session
+	// order, as batchButtonNames does for batches.
+	const same = all
+		.filter((o) => sameBase(o) && o.timestamp && withTime(o) === named)
+		.map((o) => o.sessionId)
+		.sort();
+	return same.length > 1 ? `${named} (${same.indexOf(u.sessionId) + 1})` : named;
+};
+
 export const formatRelativeTime = (ts: number): string => {
 	const mins = Math.floor((Date.now() - ts) / 60000);
 	if (mins < 1) return "Just now";
@@ -204,11 +267,11 @@ export const formatRelativeTime = (ts: number): string => {
 	return days === 1 ? "Yesterday" : `${days} days ago`;
 };
 
+// Status words are small text on the pale #f5f5f5 rows, so each colour keeps
+// at least 4.5:1 there (the old #8f8f8f, #ef4444 and #d97706 did not).
 export const recentStatusColor = (status: RecentUploadStatus): string =>
 	status === "Failed"
-		? "#ef4444"
+		? "#b91c1c"
 		: status === "Cancelled"
-			? "#d97706"
-			: status === "Processing"
-				? "#6a6a6a"
-				: "#8f8f8f";
+			? "#b45309"
+			: "#6a6a6a";

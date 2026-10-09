@@ -1,11 +1,9 @@
 /* ===== UploadPage.css =====
-   DEFERRED pre-brand surface: still monochrome + Space Grotesk while
-   in-flight PRs on this file land. Do not copy this vocabulary — new
-   styling uses the BodyMaps tokens (ink/paper/accent, IBM Plex); see
-   BRANDING.md at the repo root.
+   DEFERRED pre-brand surface: still monochrome while in-flight PRs on this
+   file land. Do not copy this vocabulary; new styling uses the BodyMaps
+   tokens (ink/paper/accent); see BRANDING.md at the repo root. Type is the
+   shared IBM Plex pair (--font-sans / --font-mono from styles/brand.css).
 */
-
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
 /* ── Page wrapper ── */
 .upload-page-wrapper {
@@ -13,9 +11,13 @@
   background: #ffffff;
 
   color: #111111;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   position: relative;
+  /* clip, not hidden: overflow-x:hidden makes this the scroll container, and
+     the sticky site header would stick to it instead of the viewport. hidden
+     stays only as the fallback for browsers without clip. */
   overflow-x: hidden;
+  overflow-x: clip;
   display: flex;
   flex-direction: column;
 }
@@ -61,7 +63,7 @@
 .upload-card {
   background: #f5f5f5;
   border: 1px solid rgba(0,0,0,.06);
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 28px 32px 32px;
   position: relative;
 }
@@ -69,7 +71,7 @@
 /* ── Drop zone ── */
 .dropzone {
   border: 1px dashed rgba(0,0,0,.15);
-  border-radius: 12px;
+  border-radius: 6px;
   background: rgba(0,0,0,.015);
   /* Fixed box. It is the SAME height whether it's empty, holding a file chip,
      or showing an in-flight run - content just centres inside it. Previously
@@ -96,9 +98,11 @@
 }
 /* An in-flight run (or one that just finished, still showing here) isn't
    something to "drop a file onto" - drop the dashed affordance so the box
-   reads as a status card, not an active picker. */
-.dropzone:has(.dropzone-inflight),
-.dropzone:has(.dropzone-completed) {
+   reads as a status card, not an active picker.
+   The click handler only ignores the box while no file is chosen, so once file
+   chips show the box is a picker again and keeps its dashed, clickable look. */
+.dropzone:has(.dropzone-inflight):not(:has(.file-chips)),
+.dropzone:has(.dropzone-completed):not(:has(.file-chips)) {
   border-style: solid;
   cursor: default;
 }
@@ -134,28 +138,29 @@
 .dropzone-text {
   font-size: 14px;
   font-weight: 500;
-  color: #8f8f8f;
-  margin-bottom: 4px;
-}
-.dropzone-sub {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
   color: #6a6a6a;
-  letter-spacing: 0.04em;
+  margin-bottom: 4px;
 }
 
 /* ── Dropzone buttons ── */
+.dropzone-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 10px;
+}
 .dropzone-btn {
   padding: 7px 16px;
   background: rgba(0,0,0,.06);
   border: 1px solid rgba(0,0,0,.12);
-  border-radius: 8px;
-  font-family: 'Space Grotesk', sans-serif;
+  border-radius: 5px;
+  font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 500;
   color: #111111;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.15s, border-color 0.15s;
 }
 .dropzone-btn:hover {
   background: rgba(0,0,0,.10);
@@ -180,7 +185,7 @@
   padding: 12px 14px;
   background: #ffffff;
   border: 1px solid rgba(0,0,0,.1);
-  border-radius: 10px;
+  border-radius: 6px;
   box-shadow: 0 1px 2px rgba(0,0,0,.04);
   transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
 }
@@ -190,7 +195,7 @@
   gap: 12px;
 }
 /* Real chunk-completion progress while a file is uploading in the
-   background - not a simulated sweep, the width tracks actual bytes sent. */
+   background - not a simulated sweep, the bar tracks actual bytes sent. */
 .file-chip-progress-track {
   width: 100%;
   height: 4px;
@@ -198,16 +203,19 @@
   border-radius: 2px;
   overflow: hidden;
 }
+/* Grows with transform rather than width, so each progress tick is a
+   compositor-only change instead of a layout pass. */
 .file-chip-progress-fill {
+  width: 100%;
   height: 100%;
   background: #002d72;
-  border-radius: 2px;
-  transition: width 0.2s ease;
+  transform-origin: left center;
+  transition: transform 0.2s ease;
 }
 .file-chip-icon {
   width: 32px;
   height: 32px;
-  border-radius: 7px;
+  border-radius: 5px;
   flex-shrink: 0;
   background: rgba(0,0,0,.05);
   border: 1px solid rgba(0,0,0,.1);
@@ -224,9 +232,9 @@
   flex: 1;
 }
 .file-chip-sub {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 10.5px;
-  color: #8f8f8f;
+  color: #6a6a6a;
   margin-top: 1px;
   letter-spacing: 0.02em;
 }
@@ -236,14 +244,14 @@
   border-radius: 50%;
   background: rgba(0,0,0,.06);
   border: none;
-  color: #8f8f8f;
+  color: #6a6a6a;
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s;
+  transition: background-color 0.15s, color 0.15s;
   padding: 0;
   font-family: inherit;
   flex-shrink: 0;
@@ -280,7 +288,7 @@
   color: #ef4444;
 }
 .file-chip--failed .file-chip-sub {
-  color: #ef4444;
+  color: #b91c1c;
 }
 
 /* Small spinning ring shown in the icon slot while a file is uploading in
@@ -300,6 +308,8 @@
 
 /* ── Pipeline row ── */
 .pipeline-row {
+  /* Shared by the dropdown buttons and the arrows between them. */
+  --pipeline-control-height: 42px;
   display: flex;
   align-items: flex-end;
   gap: 0;
@@ -323,28 +333,24 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
   color: #ffffff;
   flex-shrink: 0;
 }
 .pipeline-label {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
   color: #111111;
 }
 .pipeline-optional {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-weight: 400;
   font-style: italic;
   color: #6a6a6a;
-  letter-spacing: 0.02em;
-  text-transform: none;
 }
 
 /* Custom model dropdown */
@@ -354,16 +360,19 @@
 }
 .model-dropdown-btn {
   width: 100%;
+  box-sizing: border-box;
+  min-height: var(--pipeline-control-height);
   padding: 10px 14px;
   background: rgba(0,0,0,.04);
   border: 1px solid rgba(0,0,0,.08);
-  border-radius: 8px;
-  color: #8f8f8f;
-  font-family: 'Space Grotesk', sans-serif;
+  border-radius: 5px;
+  /* "None (skip)" is a real choice, not a placeholder: dark enough to read
+     (7:1 on this fill), a step lighter than a picked value. */
+  color: #4a4a4a;
+  font-family: var(--font-sans);
   font-size: 13px;
   cursor: pointer;
-  outline: none;
-  transition: all 0.15s;
+  transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -409,7 +418,7 @@
   min-width: 300px;
   background: #ffffff;
   border: 1px solid rgba(0,0,0,.10);
-  border-radius: 10px;
+  border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0,0,0,.12);
   z-index: 100;
   /* visible (not hidden) so the LesionSegmenter submenu can fly out past the edge */
@@ -477,7 +486,7 @@
   gap: 2px 8px;
 }
 .model-dropdown-item-name {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 500;
   color: #111111;
@@ -486,8 +495,8 @@
   color: #002d72;
 }
 .model-dropdown-item-desc {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   color: #6a6a6a;
 }
 .model-dropdown-check {
@@ -506,13 +515,12 @@
    clickable — the click opens the upgrade dialog instead of selecting it. */
 .model-dropdown-item.locked .model-dropdown-item-name,
 .model-dropdown-item.locked .model-dropdown-item-desc {
-  color: #b0b0b0;
+  color: #6a6a6a;
 }
 .model-dropdown-lock {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 9px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
   padding: 3px 7px;
   border-radius: 999px;
   background: rgba(0, 45, 114, 0.08);
@@ -532,7 +540,7 @@
   border: 0;
   background: transparent;
   color: #002d72;
-  font: 600 11px 'Space Grotesk', sans-serif;
+  font: 600 11px var(--font-sans);
   text-align: left;
   cursor: pointer;
 }
@@ -545,7 +553,7 @@
 .model-dropdown-access__form label,
 .model-dropdown-access__form small {
   color: #6a6a6a;
-  font: 10px 'Space Grotesk', sans-serif;
+  font: 10px var(--font-sans);
 }
 .model-dropdown-access__row {
   display: flex;
@@ -558,7 +566,7 @@
   border-radius: 6px;
   padding: 6px 8px;
   color: #111;
-  font: 11px 'JetBrains Mono', monospace;
+  font: 11px var(--font-mono);
 }
 .model-dropdown-access__row button {
   border: 0;
@@ -566,7 +574,7 @@
   padding: 6px 10px;
   background: #002d72;
   color: #fff;
-  font: 600 11px 'Space Grotesk', sans-serif;
+  font: 600 11px var(--font-sans);
   cursor: pointer;
 }
 .model-dropdown-access__row button:disabled {
@@ -576,24 +584,24 @@
 .model-dropdown-access__form p {
   margin: 0;
   color: #b42318;
-  font: 10px 'Space Grotesk', sans-serif;
+  font: 10px var(--font-sans);
 }
 
 /* ── Cancel button on Active cards ── */
 .active-cancel-btn {
   background: transparent;
   border: 1px solid rgba(0, 0, 0, 0.1);
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 6px 12px;
   color: #6a6a6a;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
 }
 .active-cancel-btn:hover {
   border-color: rgba(239, 68, 68, 0.4);
-  color: #ef4444;
+  color: #b91c1c;
   background: rgba(239, 68, 68, 0.05);
 }
 
@@ -603,26 +611,36 @@
   align-items: center;
   justify-content: center;
   padding: 0 10px;
-  padding-bottom: 4px; /* align with select bottom */
+  /* The row aligns to the bottom of the steps, so the arrow takes the
+     dropdown button's height and centres in it. */
+  height: var(--pipeline-control-height);
   color: #6a6a6a;
   font-size: 16px;
   flex-shrink: 0;
 }
 
-/* Run button */
+/* Run button. min-width holds it at one size whether it reads "View" or
+   "Run", so the dropdown columns beside it don't shift when the model
+   toggles between None and a real model. */
 .run-btn {
   flex-shrink: 0;
   margin-left: 12px;
-  padding: 10px 32px;
+  min-width: 100px;
+  /* Same height as the dropdown buttons: padding alone gave 41px against
+     their 42px, so the row's bottom-aligned button sat a pixel low. */
+  box-sizing: border-box;
+  min-height: var(--pipeline-control-height);
+  padding: 10px 24px;
+  text-align: center;
   background: #002d72;
   border: 1px solid #002d72;
-  border-radius: 8px;
+  border-radius: 5px;
   color: #ffffff;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background-color 0.2s, border-color 0.2s;
   letter-spacing: 0.02em;
 }
 .run-btn:hover:not(:disabled) {
@@ -645,7 +663,7 @@
   padding: 14px 16px;
   background: #ffffff;
   border: 1px solid rgba(22, 163, 74, .24);
-  border-radius: 10px;
+  border-radius: 6px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, .04);
   display: flex;
   align-items: center;
@@ -655,10 +673,8 @@
   cursor: default;
 }
 .result-title {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-family: var(--font-sans);
+  font-size: 13px;
   color: #166534;
   font-weight: 600;
   display: flex;
@@ -690,13 +706,13 @@
   padding: 9px 20px;
   background: rgba(0,0,0,.06);
   border: 1px solid rgba(0,0,0,.12);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #111111;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background-color 0.2s, border-color 0.2s;
 }
 .result-btn:hover {
   background: rgba(0,0,0,.1);
@@ -732,17 +748,47 @@
   padding: 10px 16px;
   background: rgba(0,0,0,.025);
   border: 1px solid rgba(0,0,0,.06);
-  border-radius: 8px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  color: #8f8f8f;
-  word-break: break-all;
+  border-radius: 5px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: #4a4a4a;
+  /* Break a long token (a filename, a session id) only where it must, not
+     every word mid-way. */
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
   line-height: 1.5;
+}
+/* A failure (an upload that did not go through) reads as one: red tint and
+   border like the failed file chip, with a mark ahead of the sentence. */
+.status-msg--error {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: rgba(239, 68, 68, .05);
+  border-color: rgba(239, 68, 68, .28);
+  color: #b91c1c;
+}
+.status-msg--error::before {
+  content: "!";
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: #b91c1c;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+.status-msg + .status-msg {
+  margin-top: 8px;
 }
 
 /* ── File chip internals ── */
 .file-chip-name {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 600;
   color: #111111;
@@ -754,18 +800,20 @@
   padding: 5px 12px;
   background: rgba(0, 45, 114, .1);
   border: 1px solid rgba(0, 45, 114, .2);
-  border-radius: 8px;
+  border-radius: 5px;
   color: #002d72;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   letter-spacing: 0.04em;
-  transition: all 0.15s;
+  transition: background-color 0.15s;
   flex-shrink: 0;
 }
 .file-chip-preview:hover {
   background: rgba(0, 45, 114, .18);
+  /* The global button:hover border (near black) would win over the base rule. */
+  border-color: rgba(0, 45, 114, .35);
 }
 .file-chip--active {
   border-color: rgba(0, 45, 114, .3);
@@ -773,8 +821,23 @@
 }
 
 /* Click-to-rename scan name (Completed Uploads) - underline on hover is the
-   only affordance that the text itself is clickable, no separate pencil icon. */
+   only affordance that the text itself is clickable, no separate pencil icon.
+   It is a real button (so the keyboard can reach it), stripped back to text. */
 .upload-rename-trigger {
+  display: block;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  font: inherit;
+  /* One line box for the title and the rename field (below), so starting a
+     rename neither grows the row nor moves the text. */
+  line-height: 21px;
+  color: inherit;
+  text-align: left;
+  cursor: text;
   text-decoration: underline;
   text-decoration-color: transparent;
   text-underline-offset: 3px;
@@ -783,16 +846,24 @@
 .upload-rename-trigger:hover {
   text-decoration-color: rgba(0, 0, 0, 0.3);
 }
+/* The name clips itself (not the button), so the phone tap area below is not
+   cut off by the button's own overflow. */
+.upload-rename-trigger__text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ── Pre-inference CT preview ── */
 .ct-preview-label {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: #8f8f8f;
+  color: #4a4a4a;
   margin: 16px 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ct-preview {
   position: relative;
@@ -803,7 +874,7 @@
   margin-bottom: 28px;
   background: #0a0b0d;
   border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 12px;
+  border-radius: 6px;
   overflow: hidden;
 }
 /* The NIfTI preview draws three Niivue tiles, laid out in one row on wide
@@ -827,7 +898,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: rgba(255, 255, 255, 0.5);
   pointer-events: none;
@@ -841,8 +912,8 @@
   min-height: 0;
   /* On the dark preview box, so a light grey (about 9:1 on #0a0b0d). */
   color: #b0b0b0;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
   text-align: center;
   padding: 0 16px;
 }
@@ -858,7 +929,7 @@
   gap: 10px;
   padding: 6px 10px;
   background: rgba(0, 0, 0, 0.45);
-  border-radius: 8px;
+  border-radius: 5px;
   backdrop-filter: blur(2px);
 }
 .dicom-preview-slider {
@@ -867,7 +938,7 @@
   cursor: pointer;
 }
 .dicom-preview-count {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: rgba(255, 255, 255, 0.75);
   white-space: nowrap;
@@ -892,11 +963,11 @@
 .upload-account-banner {
   margin-top: 24px;
   padding: 12px 16px;
-  border-radius: 12px;
+  border-radius: 6px;
   background: #f5f5f5;
   border: 1px solid rgba(0, 0, 0, 0.08);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
   line-height: 1.6;
   color: #6a6a6a;
   display: flex;
@@ -920,7 +991,7 @@
   background: none;
   border: none;
   padding: 4px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
   color: #6a6a6a;
   cursor: pointer;
@@ -931,12 +1002,11 @@
 
 /* ── Processing summary bar (all in-flight scans in one row) ── */
 .proc-bar {
-  margin-top: 32px;
   display: flex;
   align-items: center;
   gap: 18px;
   padding: 16px 20px;
-  border-radius: 12px;
+  border-radius: 6px;
   background: #f5f5f5;
   border: 1px solid rgba(0, 45, 114, 0.14);
 }
@@ -949,7 +1019,7 @@
 }
 .proc-wheel-pct {
   position: absolute;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 700;
   color: #002d72;
@@ -959,7 +1029,7 @@
   min-width: 0;
 }
 .proc-title {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   font-weight: 600;
   color: #111111;
@@ -968,7 +1038,7 @@
   gap: 8px;
 }
 .proc-counter {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 700;
   color: #002d72;
@@ -977,7 +1047,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: #6a6a6a;
   margin-top: 4px;
@@ -1004,7 +1074,7 @@
 /* "safe to close" hint, tucked onto the status line - lighter than the status
    beside it so it reads as an aside, not another piece of state. */
 .proc-close-note {
-  color: #9a9a9a;
+  color: #6a6a6a;
 }
 .proc-close-note--ready {
   color: #15803d;
@@ -1015,11 +1085,11 @@
 .proc-details-btn {
   flex-shrink: 0;
   padding: 6px 12px;
-  border-radius: 6px;
+  border-radius: 4px;
   background: transparent;
   border: 1px solid rgba(0, 0, 0, 0.12);
   color: #111111;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
@@ -1035,7 +1105,7 @@
   position: relative;
 }
 .model-submenu-arrow {
-  color: #8f8f8f;
+  color: #6a6a6a;
   flex-shrink: 0;
 }
 .model-submenu {
@@ -1045,7 +1115,7 @@
   min-width: 220px;
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.10);
-  border-radius: 10px;
+  border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   padding: 4px 0;
   z-index: 110;
@@ -1107,13 +1177,503 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 500;
   color: #111111;
 }
 .model-submenu-item.selected .model-submenu-label {
   color: #002d72;
+}
+
+/* ── Section headings under the upload card ("Choose a model", "Completed
+   uploads"): real headings, in sentence case. ── */
+.upload-section {
+  margin-top: 32px;
+}
+.upload-section-title {
+  margin: 0 0 6px;
+  padding-left: 4px;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #111111;
+}
+.upload-section-hint {
+  margin: 0 0 20px;
+  padding-left: 4px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: #6a6a6a;
+  /* Balance the last line so a hint never strands one word. */
+  text-wrap: pretty;
+}
+.upload-section-hint--tight {
+  margin-bottom: 12px;
+}
+
+/* ── One scan per row: in-flight cards in the drop zone and Completed
+   uploads below. The name side takes the room and truncates; the actions
+   stay on one line. On phones the row stacks (see max-width: 640px). ── */
+.upload-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.upload-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.upload-row--card {
+  box-sizing: border-box;
+  min-height: 72px;
+  padding: 14px 20px;
+  background: #f5f5f5;
+  border: 1px solid rgba(0, 0, 0, .06);
+  border-radius: 6px;
+}
+.upload-row--openable {
+  cursor: pointer;
+}
+.upload-row__main {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.upload-row__icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, .06);
+  border: 1px solid rgba(0, 0, 0, .12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.upload-row__icon--live {
+  width: 36px;
+  height: 36px;
+  background: rgba(0, 45, 114, .04);
+  border-color: rgba(0, 45, 114, .12);
+}
+.upload-row__dot {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #002d72;
+}
+.upload-row__text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.upload-row__title {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  color: #111111;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-row__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 6px;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #6a6a6a;
+}
+.upload-row__sep {
+  color: rgba(0, 0, 0, .3);
+}
+/* A single scan's source file name takes its own line at every width, so a long
+   name can never leave the next separator starting a line (or ending one); the
+   dot after it has nothing to join, so it goes. */
+.upload-row__source {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+.upload-row__source + .upload-row__sep {
+  display: none;
+}
+/* A batch row's facts. The dot between two is drawn by the part it leads,
+   inside padding the row pulls out to the left and the meta line clips, so a
+   part that starts a wrapped line has its dot cut off and no line starts or
+   ends with one. Same spacing as the separator spans on a single row. */
+.upload-row__meta--parts {
+  display: block;
+  overflow: hidden;
+}
+.upload-row__parts {
+  display: flex;
+  flex-wrap: wrap;
+  margin-left: -18px;
+}
+.upload-row__part {
+  position: relative;
+  min-width: 0;
+  padding-left: 18px;
+  white-space: nowrap;
+}
+.upload-row__part::before {
+  content: "\2022";
+  content: "\2022" / "";
+  position: absolute;
+  left: 0;
+  width: 18px;
+  text-align: center;
+  color: rgba(0, 0, 0, .3);
+}
+.upload-row__failed {
+  color: #b91c1c;
+}
+/* Same colour as the "Cancelled" status word in the batch dialog. */
+.upload-row__cancelled {
+  color: #b45309;
+}
+.upload-row__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.upload-row__status {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  color: #002d72;
+  white-space: nowrap;
+}
+.upload-row__status--quiet {
+  color: #6a6a6a;
+}
+.upload-row__eta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #6a6a6a;
+}
+.upload-proc-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  background: #f5f5f5;
+  border: 1px solid rgba(0, 45, 114, .14);
+  border-radius: 6px;
+}
+.upload-small-btn {
+  padding: 6px 12px;
+  border: 1px solid rgba(0, 0, 0, .1);
+  border-radius: 6px;
+  background: transparent;
+  color: #111111;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.upload-small-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, .05);
+  border-color: rgba(0, 0, 0, .2);
+}
+.upload-small-btn:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+.upload-remove-btn {
+  padding: 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #6a6a6a;
+  line-height: 0;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.upload-remove-btn:hover {
+  color: #dc2626;
+}
+/* The rename field floats over a slot exactly as tall as the title's 21px
+   line (the trigger's height), so swapping the title for the field never
+   changes the row height or the meta line's offset, whatever margins do. */
+.upload-rename-slot {
+  position: relative;
+  height: 21px;
+}
+.upload-rename-input {
+  position: absolute;
+  top: -3px;
+  left: -7px;
+  box-sizing: border-box;
+  width: calc(100% + 14px);
+  max-width: 260px;
+  /* The 21px line plus 3px above and below (2px padding, 1px border), so the
+     typed text sits exactly where the title did. */
+  height: 27px;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid rgba(0, 45, 114, .3);
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 21px;
+  color: #111111;
+}
+/* The meta line sits the same 5px under the title's line for the trigger and
+   the field's slot alike (the field overhangs its slot by 3px, leaving 2px). */
+.upload-rename-trigger + .upload-row__meta,
+.upload-rename-slot + .upload-row__meta {
+  margin-top: 5px;
+}
+/* The border carries the focus state, so no second outline on top of it. */
+.upload-rename-input:focus,
+.upload-rename-input:focus-visible {
+  outline: none;
+  border-color: #002d72;
+  box-shadow: 0 0 0 1px #002d72;
+}
+
+/* ── Model comparison cards ──
+   Three across whenever there is room for three (every tablet included), one
+   per row on phones: never the 2 + 1 split that left half a row empty.
+   Each card is a subgrid over the parent's 9 row tracks (icon, name, badge,
+   desc, button, divider, stats, divider, bullets), so the same row lines up
+   across the cards, sized to the tallest. */
+.model-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(9, auto);
+  gap: 28px;
+}
+.model-card {
+  display: grid;
+  grid-template-rows: subgrid;
+  grid-row: span 9;
+  row-gap: 0;
+  min-width: 0;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 32px 28px;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, .08);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
+}
+.model-card:hover {
+  border-color: rgba(0, 45, 114, .35);
+  box-shadow: 0 4px 16px rgba(0, 45, 114, .08);
+}
+.model-card:active {
+  background: #f7f9fc;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .06);
+}
+.model-card--current,
+.model-card--current:hover {
+  border: 1.5px solid #002d72;
+  box-shadow: 0 6px 24px rgba(0, 45, 114, .12);
+}
+.model-card-icon {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 20px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .05);
+  border: 1px solid rgba(0, 0, 0, .1);
+  color: #111111;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.model-card--current .model-card-icon {
+  background: rgba(0, 45, 114, .08);
+  border-color: rgba(0, 45, 114, .18);
+  color: #002d72;
+}
+.model-card-name {
+  align-self: start;
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 700;
+  color: #111111;
+}
+.model-card-badges {
+  display: flex;
+  justify-content: center;
+  align-items: start;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.model-card-badge {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: 1px solid #002d72;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 700;
+  color: #002d72;
+}
+.model-card-badge--lock {
+  border-color: #8f6a00;
+  color: #8f6a00;
+}
+.model-card-desc {
+  align-self: start;
+  margin-top: 14px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.6;
+  color: #6a6a6a;
+  text-wrap: pretty;
+}
+/* Looks like a button; the whole card is the control. */
+.model-card-cta {
+  align-self: start;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 24px;
+  padding: 11px 16px;
+  border: 1.5px solid #002d72;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #002d72;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background-color 0.15s;
+}
+.model-card:hover .model-card-cta {
+  background: rgba(0, 45, 114, .06);
+}
+.model-card--current .model-card-cta,
+.model-card--current:hover .model-card-cta {
+  background: #002d72;
+  color: #ffffff;
+}
+.model-card-rule {
+  align-self: start;
+  width: 100%;
+  height: 1px;
+  margin-top: 28px;
+  background: rgba(0, 0, 0, .08);
+}
+.model-card-rule--lower {
+  margin-top: 24px;
+}
+.model-card-facts {
+  align-self: start;
+  margin-top: 24px;
+}
+.model-card-fact-value {
+  font-family: var(--font-sans);
+  font-size: 21px;
+  font-weight: 700;
+  color: #111111;
+}
+.model-card-fact-label {
+  margin-top: 4px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: #6a6a6a;
+}
+.model-card-details {
+  align-self: start;
+  margin-top: 20px;
+}
+.model-card-details ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+}
+.model-card-details li {
+  position: relative;
+  padding-left: 14px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: #6a6a6a;
+  text-wrap: pretty;
+}
+.model-card-details li > span {
+  position: absolute;
+  left: 0;
+  color: #002d72;
+}
+/* Tablets keep three across; the longest single words ("LesionSegmenter",
+   "Plausibility") step down a size so they fit a third of a 641px page. */
+.model-card-name,
+.model-card-fact-value {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1000px) {
+  .model-cards {
+    gap: 16px;
+  }
+  .model-card {
+    padding: 24px 16px;
+  }
+  .model-card-name {
+    font-size: 16px;
+  }
+  .model-card-fact-value {
+    font-size: 18px;
+  }
+}
+
+/* ── Keyboard focus ──
+   A visible JHU-blue ring on every control on this page, offset so it reads
+   against the pale cards and around the blue Run button alike (the global
+   button rule's ring follows the text colour, which made it white on Run
+   and pale grey on the dropdowns). */
+.upload-page-wrapper .run-btn:focus-visible,
+.upload-page-wrapper .model-dropdown-btn:focus-visible,
+.upload-page-wrapper .dropzone-btn:focus-visible,
+.upload-page-wrapper .file-chip-preview:focus-visible,
+.upload-page-wrapper .file-chip-remove:focus-visible,
+.upload-page-wrapper .result-btn:focus-visible,
+.upload-page-wrapper .active-cancel-btn:focus-visible,
+.upload-page-wrapper .proc-details-btn:focus-visible,
+.upload-page-wrapper .upload-small-btn:focus-visible,
+.upload-page-wrapper .upload-remove-btn:focus-visible,
+.upload-page-wrapper .upload-rename-trigger:focus-visible,
+.upload-page-wrapper .upload-history-link:focus-visible,
+.upload-page-wrapper .upload-account-link:focus-visible,
+.upload-page-wrapper .model-dropdown-access__toggle:focus-visible,
+.upload-page-wrapper .model-dropdown-access__row button:focus-visible {
+  outline: 2px solid var(--focus-ring, #002d72);
+  outline-offset: 2px;
+}
+/* The ring hugs the scan name: the meta line starts 2px under it, and a ring
+   offset by 2px more reached into it. */
+.upload-page-wrapper .upload-rename-trigger:focus-visible {
+  outline-offset: 0;
+}
+.upload-page-wrapper .model-card:focus-visible {
+  outline: 2px solid var(--focus-ring, #002d72);
+  outline-offset: 3px;
 }
 
 /* Just above the phone layout (641 to 760px) three dropdowns, two arrows and
@@ -1175,11 +1735,74 @@
 }
 
 @media (max-width: 640px) {
+  /* The "safe to close" note is its own flex item, so when it wraps it starts
+     the next line; on a phone it always takes a row of its own, without the dot. */
+  .upload-row__meta .proc-close-note {
+    flex-basis: 100%;
+  }
+  .upload-row__meta .proc-close-note__sep {
+    display: none;
+  }
   /* Roughly square at this width, so Niivue's 2 x 2 grid keeps its tiles
      instead of dropping to a thin row. */
   .ct-preview--multiplanar {
     aspect-ratio: 1 / 1;
     min-height: 0;
     max-height: none;
+  }
+  .model-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* A scan row stacks: name and meta across the full width, then the status
+     on the left and its buttons on the right, instead of the fixed-width
+     actions squeezing the name to nothing. */
+  .upload-row {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+  .upload-row--card,
+  .upload-proc-card {
+    padding: 12px 14px;
+  }
+  .upload-row__main {
+    flex: 1 1 100%;
+    gap: 12px;
+  }
+  .upload-row__actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+  .upload-row__status {
+    margin-right: auto;
+  }
+  /* Touch targets: the row buttons and the trash icon are at least 32px to
+     press (the trash keeps its 14px glyph), and the scan name's hit area
+     grows without moving it (it is a pseudo-element, so the focus ring below
+     stays on the text). It is positioned so the meta line below (a later
+     sibling) cannot sit over the bottom of the enlarged area and take those
+     taps. */
+  .upload-small-btn {
+    min-height: 34px;
+  }
+  .upload-remove-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+  }
+  .upload-rename-trigger {
+    position: relative;
+    z-index: 1;
+    /* Visible, so the enlarged area below is not clipped (the name clips itself). */
+    overflow: visible;
+  }
+  .upload-rename-trigger::before {
+    content: "";
+    position: absolute;
+    inset: -6px 0;
   }
 }
