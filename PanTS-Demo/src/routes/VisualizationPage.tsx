@@ -39,7 +39,7 @@ import {
 import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
-import { useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 import AISidebar from "../components/AIAssistant/AISidebar";
 import { track } from "../helpers/analytics";
 import { buildViewerActions } from "../components/AIAssistant/assistantActions";
@@ -119,6 +119,8 @@ import {
     getOrganLabelOnClick,
     LENGTH_TOOL,
     MAGNIFY_TOOL,
+    MAX_ZOOM,
+    MIN_ZOOM,
     moveCornerstoneCrosshairToMm,
     PROBE_TOOL,
     removeRemoteMeasurement,
@@ -139,6 +141,7 @@ import {
     setFillOpacity,
     setOutlineOpacity,
     setPaneSliceIndex,
+    stepPaneSlice,
     setReferenceLinesEnabled,
     setVisibilities,
     setZoom,
@@ -156,8 +159,10 @@ import {
     upgradeCtVolume,
     upgradeSegmentationVolume,
     VOLUME_3D_PRESETS,
-    VOLUME_3D_PRESETS_MR,
     zoomToFit,
+    panesAtFit,
+    refitPanesUntilSettled,
+    repaintPaneAnnotations,
 	getPresentSegmentIndices,
 	subscribeToSegmentationLoaded,
     type CinePane,
@@ -180,7 +185,9 @@ import { setMaskBrushSize } from "../helpers/CornerstoneNifti2";
 import { useMorphPicker } from "../helpers/viewer/useMorphPicker";
 import { useToolbarFlyout } from "../helpers/viewer/useToolbarFlyout";
 import { useLassoTool } from "../helpers/viewer/useLassoTool";
+import { volume3DPresetsForModality } from "../helpers/volume3DPresets";
 import { useFocusedPane } from "../helpers/viewer/useFocusedPane";
+import { axialSliceBarKeyStep } from "../helpers/viewer/sliceBarKeys";
 import { useKeyboardShortcuts } from "../helpers/viewer/useKeyboardShortcuts";
 import { type MaskingArea } from "../components/segmentation/MaskingSelect";
 import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
@@ -506,6 +513,8 @@ const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
 // case" screen forever. Give a genuinely slow connection five full minutes
 // before exposing recovery controls; only an abandoned request should retry.
 const VIEWER_LOAD_TIMEOUT_MS = 300_000;
+// A layout change refits the panes until their sizes settle; this caps the passes.
+const LAYOUT_REFIT_MAX = 6;
 const VIEWER_RETRY_BASE_DELAY_MS = 2_000;
 const VIEWER_RETRY_MAX_DELAY_MS = 30_000;
 
@@ -1608,7 +1617,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// rendering of the CT itself (the only 3D option for local DICOM).
 	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(isLocal ? "volume" : "mesh");
 	const [volumePreset, setVolumePreset] = useState<string>(VOLUME_3D_PRESETS[0].name);
-	// CT presets by default; swapped for the MR set when a local DICOM turns out to be MR.
+	// CT presets by default; chosen again from the scan's modality on every load (MR gets its own set).
 	const [volume3DPresets, setVolume3DPresets] = useState<readonly { name: string; label: string }[]>(VOLUME_3D_PRESETS);
 	const [volume3DFailed, setVolume3DFailed] = useState(false);
 	const volume3DRef = useRef<HTMLDivElement>(null);
@@ -1688,6 +1697,14 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// Which pane gets the lion's share of the grid while in "mpr" view — no-op in the
 	// single-view / 3d-fullscreen modes, which already give one pane 100% of the stage.
 	const [layoutPreset, setLayoutPreset] = useState<LayoutPreset>("grid");
+	// True from a view or layout change until every pane has been refitted to its
+	// final cell, so the stage observer does not restore stale zooms in between.
+	const layoutRefitPendingRef = useRef(false);
+	// Set when Annotate opens or closes over panes the user never zoomed or panned:
+	// the ribbon and the class sheet change the stage size over several frames, so
+	// the stage observer refits those panes from scratch rather than putting back a
+	// relative zoom read against a fit that was still moving.
+	const annotateRefitRef = useRef(false);
 	const [activePreset, setActivePreset] = useState<string>("Soft Tissue");
 	const [_tooltip, setToolTip] = useState({
 		visible: false,
@@ -2556,6 +2573,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				return false;
 			}
 			disposeLoaded = result.dispose;
+			// CT transfer functions render MR as an opaque slab, so an MR scan gets
+			// Cornerstone's MR presets. Chosen on every load: this page is reused
+			// across routes, and a CT case opened after an MR scan needs the CT list back.
+			const presets = volume3DPresetsForModality(getCurrentVolumeModality());
+			setVolume3DPresets(presets);
+			setVolumePreset((prev) => (presets.some((p) => p.name === prev) ? prev : presets[0].name));
 			setRenderingEngine(result.renderingEngine);
 			setViewportIds(result.viewportIds);
 			setVolumeId(result.volumeId);
@@ -2648,12 +2671,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						setWindowWidth(result.initialVoi.windowWidth);
 						setWindowCenter(result.initialVoi.windowCenter);
 						setActivePreset("");
-					}
-					// Same idea for the 3D pane: CT transfer functions render MR as an
-					// opaque slab, so switch the preset set to Cornerstone's MR presets.
-					if (getCurrentVolumeModality() === "MR") {
-						setVolume3DPresets(VOLUME_3D_PRESETS_MR);
-						setVolumePreset(VOLUME_3D_PRESETS_MR[0].name);
 					}
 					acceptLoadedViewer(result);
 				} catch (e) {
@@ -2903,7 +2920,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	useEffect(() => {
 		if (!renderingEngine || !viewportIds.length || !volumeId) return;
 		const unsubscribe = subscribeToSliceChanges((pane, info) => {
-			setSliceInfo((prev) => (prev[pane]?.current === info.current && prev[pane]?.total === info.total
+			setSliceInfo((prev) => (prev[pane]?.current === info.current && prev[pane]?.total === info.total && prev[pane]?.outside === info.outside
 				? prev
 				: { ...prev, [pane]: info }));
 		});
@@ -2959,7 +2976,18 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		// Move the crosshair last, after a paint, so the viewports are laid out and the
 		// reference lines land on the intended focal point.
 		if (shared.crosshair) {
-			requestAnimationFrame(() => moveCornerstoneCrosshairToMm(shared.crosshair!));
+			// The Cornerstone move suppresses its change event, so sync the 3D crosshair
+			// and the position shared with collaborators explicitly.
+			// The layout refit resets every pane to the volume centre a few frames later, so
+			// hand the point to it when one is still running and move it here otherwise.
+			pendingCrosshairRestoreRef.current = shared.crosshair;
+			requestAnimationFrame(() => {
+				setCrosshairMm(shared.crosshair!);
+				if (!layoutRefitPendingRef.current && pendingCrosshairRestoreRef.current === shared.crosshair) {
+					pendingCrosshairRestoreRef.current = null;
+					moveCornerstoneCrosshairToMm(shared.crosshair!);
+				}
+			});
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [viewerReady, renderingEngine, viewportIds, volumeId]);
@@ -3077,6 +3105,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		}
 	}, []);
 
+	// The layout refit puts every pane back at the volume centre, so a crosshair restore
+	// that goes with a layout change waits here until the refit has finished.
+	const pendingCrosshairRestoreRef = useRef<[number, number, number] | null>(null);
+	// The crosshair a layout refit started from, put back once the refit has settled.
+	const layoutCrosshairKeepRef = useRef<[number, number, number] | null>(null);
+
 	const handleHideOrgans = useCallback((organNames: string[]) => {
 		setCheckState(prev => {
 			if (!preIsolateCheckStateRef.current) {
@@ -3105,7 +3139,28 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		// and bake in a wrong canvas size (panes ending up smaller than their cells).
 		let raf1 = 0;
 		let raf2 = 0;
+		let raf3 = 0;
+		let cancelled = false;
+		let refits = 0;
+		let lastSizes = "";
+		if (renderingEngine) layoutRefitPendingRef.current = true;
+		// resetCamera below re-centres every pane and the crosshair tool, so remember where
+		// the crosshair was before the first fit. A run that is cancelled mid-refit leaves
+		// the remembered position for the next run, which would otherwise read the centre.
+		if (renderingEngine && !layoutCrosshairKeepRef.current) {
+			layoutCrosshairKeepRef.current = pendingCrosshairRestoreRef.current ?? getCrosshairMm();
+		}
+		const paneSizes = () =>
+			renderingEngine
+				? viewportIds
+					.map((id) => {
+						const el = (renderingEngine.getViewport(id) as { element?: HTMLElement } | undefined)?.element;
+						return el ? `${el.clientWidth}x${el.clientHeight}` : "";
+					})
+					.join("|")
+				: "";
 		const apply = () => {
+			if (cancelled) return;
 			if (renderingEngine) {
 				renderingEngine.resize(true, false);
 				viewportIds.forEach((id) => {
@@ -3113,39 +3168,106 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					vp?.resetCamera?.();
 				});
 				renderingEngine.render();
+				// The crosshair, ROI outlines and measurement labels keep the canvas
+				// positions of the old fit until an annotation render redraws them.
+				repaintPaneAnnotations(viewportIds);
+				// The panes are back at fit, so the zoom slider and +/- must start from 1x.
+				setZoomLevel(1);
 			}
 			if (NV) NV.resizeListener();
+			// Resizing a canvas can itself move the grid tracks (a shrunk canvas frees the
+			// room it held), so the sizes the fit was computed for may not be the final
+			// ones. Fit again until the panes stop changing size; the sagittal pane used
+			// to keep the scale of its old, larger cell and crop at the right.
+			const sizes = paneSizes();
+			if (sizes !== lastSizes && refits < LAYOUT_REFIT_MAX) {
+				lastSizes = sizes;
+				refits += 1;
+				raf3 = requestAnimationFrame(apply);
+				return;
+			}
+			layoutRefitPendingRef.current = false;
+			const restore = pendingCrosshairRestoreRef.current ?? layoutCrosshairKeepRef.current;
+			pendingCrosshairRestoreRef.current = null;
+			layoutCrosshairKeepRef.current = null;
+			if (restore) {
+				moveCornerstoneCrosshairToMm(restore);
+				setCrosshairMm(restore);
+			}
 		};
 		raf1 = requestAnimationFrame(() => {
 			raf2 = requestAnimationFrame(apply);
 		});
 		return () => {
+			cancelled = true;
 			cancelAnimationFrame(raf1);
 			cancelAnimationFrame(raf2);
+			cancelAnimationFrame(raf3);
+			layoutRefitPendingRef.current = false;
 		};
-	}, [viewMode, layoutPreset, showAISidebar, renderingEngine, NV, viewportIds]);
+		// showAISidebar deliberately NOT a dependency: the sidebar toggle only
+		// changes the stage width, which the stage ResizeObserver below handles
+		// with keepCamera=true — re-fitting here would wipe the user's zoom/pan.
+	}, [viewMode, layoutPreset, renderingEngine, NV, viewportIds]);
 
 	// Apply zoom to the Cornerstone viewports whenever the toolbar slider changes.
-	// (Previously ZoomHandle owned this side effect; the slider now lives in the toolbar.)
 	useEffect(() => {
 		if (!renderingEngine || !viewportIds.length) return;
+		if (zoomLevel !== 1) annotateRefitRef.current = false;
 		setZoom(zoomLevel);
 	}, [zoomLevel, renderingEngine, viewportIds]);
 
-	// Keep the WebGL viewports fitted to the stage as it resizes — when the toolbar is
-	// shown/hidden (stage grows/shrinks), the toolbar wraps, or the window resizes.
-	// keepCamera=true preserves the user's zoom/pan (unlike the view-mode switch above,
-	// which deliberately re-fits each pane).
+	// Keep the WebGL viewports fitted to the stage as it resizes: a dock opening or
+	// closing, the toolbar wrapping, the window resizing. Each pane keeps its zoom
+	// relative to fit and the point it is centred on, so a narrower stage shows the
+	// same anatomy smaller instead of cropping it (unlike the view-mode switch above,
+	// which deliberately resets each pane).
 	useEffect(() => {
 		const el = stageRef.current;
 		if (!el || typeof ResizeObserver === "undefined") return;
+		let cancelSettle: (() => void) | undefined;
 		const ro = new ResizeObserver(() => {
-			renderingEngine?.resize(true, true);
+			// A layout or view change is refitting every pane from scratch (see above);
+			// putting the old zoom back on top of that would leave a pane cropped, so
+			// the passes wait for it instead of being dropped, and refit once it is
+			// done. A dock also moves the grid over more than one frame, and Cornerstone
+			// skips a resize while a render is queued, so keep refitting until the pane
+			// sizes stop changing rather than trusting the first pass.
+			if (renderingEngine) {
+				cancelSettle?.();
+				cancelSettle = refitPanesUntilSettled(renderingEngine, {
+					isBlocked: () => layoutRefitPendingRef.current,
+					resetToFit: () => annotateRefitRef.current,
+					// The grid has settled; a later resize keeps whatever zoom is there.
+					onSettled: () => {
+						annotateRefitRef.current = false;
+					},
+				});
+			}
 			NV?.resizeListener();
 		});
 		ro.observe(el);
-		return () => ro.disconnect();
+		// Once the user zooms or pans, the panes are theirs again.
+		const claimCamera = () => {
+			annotateRefitRef.current = false;
+		};
+		el.addEventListener("wheel", claimCamera, { capture: true, passive: true });
+		el.addEventListener("pointerdown", claimCamera, { capture: true, passive: true });
+		return () => {
+			ro.disconnect();
+			cancelSettle?.();
+			el.removeEventListener("wheel", claimCamera, { capture: true });
+			el.removeEventListener("pointerdown", claimCamera, { capture: true });
+		};
 	}, [renderingEngine, NV]);
+
+	// Annotate opening or closing resizes the stage; see annotateRefitRef.
+	const annotateRefitSeenRef = useRef(showAnnotationToolbar);
+	useEffect(() => {
+		if (annotateRefitSeenRef.current === showAnnotationToolbar) return;
+		annotateRefitSeenRef.current = showAnnotationToolbar;
+		annotateRefitRef.current = Boolean(renderingEngine) && panesAtFit(renderingEngine as never);
+	}, [showAnnotationToolbar, renderingEngine]);
 
 	const handlePresetClick = (preset: typeof CT_PRESETS[number]) => {
 		setActivePreset(preset.name);
@@ -3308,23 +3430,32 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 							<span>{participant.name}</span>
 						</div>
 					))}
-				{info && info.total > 1 && (
+				{info?.outside && <div className="vp-pane-unavailable" role="status">Slice unavailable</div>}
+				{info && !info.outside && info.total > 1 && (
 					<>
 						<input
 							type="range"
-							className="vp-slice-scrollbar"
+							className={`vp-slice-scrollbar${pane === "axial" ? " vp-slice-scrollbar--axial" : ""}`}
 							min={0}
 							max={info.total - 1}
 							step={1}
 							value={info.current}
 							onChange={(e) => setPaneSliceIndex(pane, Number(e.target.value))}
-							aria-label={`${pane} slice`}
+							onKeyDown={pane === "axial" ? (e) => {
+								const step = axialSliceBarKeyStep(e.key, info.total);
+								if (step === null) return;
+								e.preventDefault();
+								stepPaneSlice(pane, step);
+							} : undefined}
+							aria-label={`${pane.charAt(0).toUpperCase()}${pane.slice(1)} slice`}
+							aria-valuetext={`Slice ${info.current + 1} of ${info.total}`}
 						/>
 						<SliceJumpInput ref={sliceJumpWrapRef} pane={pane} info={info} />
 					</>
 				)}
 				<div className={`vp-window-readout${windowReadoutVisible ? " vp-window-readout--visible" : ""}`}>
-					W {Math.round(windowWidth)} · L {Math.round(windowCenter)}
+					<span className="vp-window-readout__w">W {Math.round(windowWidth)} ·</span>
+					<span className="vp-window-readout__l">L {Math.round(windowCenter)}</span>
 				</div>
 				{activeToolbarTool === "boxSegment" && boxSegment.pane === pane && boxSegment.liveBox && (() => {
 					const [start, end] = boxSegment.liveBox;
@@ -3789,10 +3920,11 @@ const aiAvailableOrgans = useMemo(() => {
 				["--vp-ai-width" as string]: `${aiWidth}px`,
 				// When the AI sidebar opens, shrink the app to the left of it so the
 				// CT views reflow beside the panel instead of being covered by it
-				// (the fixed sidebar occupies --vp-ai-width on the right). The
-				// showAISidebar resize effect re-fits the viewports to the new width.
+				// (the fixed sidebar occupies --vp-ai-width on the right). The width
+				// snaps rather than animating: every frame of a width transition
+				// resized all four WebGL viewports (a drawing-buffer reallocation and
+				// re-render each), so the stage ResizeObserver now refits them once.
 				width: showAISidebar ? "calc(100vw - var(--vp-ai-width, 400px))" : "100vw",
-				transition: "width 180ms ease",
 			} as React.CSSProperties}>
 			{liveRoom && (
 				<LiveRoomHeader
@@ -4027,7 +4159,7 @@ const aiAvailableOrgans = useMemo(() => {
 									<label className="vp-tb-slider" title="Zoom">
 										<span className="vp-tb-slider__label">Zoom</span>
 										<input
-											type="range" min="0.5" max="2" step="0.05" className="vp-range"
+											type="range" min={MIN_ZOOM} max={MAX_ZOOM} step="0.05" className="vp-range"
 											aria-label="Zoom"
 											value={zoomLevel}
 											onChange={(e) => setZoomLevel(Number(e.target.value))}
@@ -4595,8 +4727,15 @@ const aiAvailableOrgans = useMemo(() => {
 				{loading ? (
 					<div className="vp-loading">
 						<div className="vp-spinner" />
-						<div className="vp-loading__text">Preparing case {caseId}…</div>
-						{pantsCase && (dlDone || dlPct != null) && (
+						<div className="vp-loading__text">
+							{sessionId || isLocal ? "Preparing scan…" : <>Preparing case <span className="vp-loading__id">{caseId}</span>…</>}
+						</div>
+						{/* The overlay covers the toolbar, so a slow or stuck load needs its own way out.
+						    An uploaded or local scan is not a dataset case, so its way out is Upload. */}
+						{isLocal || sessionId
+							? <Link className="vp-loading__back" to="/upload">Back to upload</Link>
+							: <Link className="vp-loading__back" to="/dashboard">Back to dataset</Link>}
+						{(dlDone || dlPct != null) && (
 							<div className="vp-progress">
 								<div className="vp-progress__head">
 									<span className="vp-progress__label">
@@ -4609,7 +4748,7 @@ const aiAvailableOrgans = useMemo(() => {
 								<div className="vp-progress__track">
 									<div
 										className={`vp-progress__fill ${dlDone ? "is-finalizing" : ""}`}
-										style={dlDone ? undefined : { width: `${dlPct ?? 0}%` }}
+										style={dlDone ? undefined : { transform: `scaleX(${(dlPct ?? 0) / 100})` }}
 									/>
 								</div>
 							</div>
@@ -5326,7 +5465,7 @@ const aiAvailableOrgans = useMemo(() => {
 			{dicomError && (
 				<div className="vp-loading" role="alert">
 					<div className="flex flex-col items-center gap-4" style={{ maxWidth: 420, textAlign: "center" }}>
-						<div className="vp-loading__text">{dicomError}</div>
+						<div className="vp-loading__text vp-loading__text--message">{dicomError}</div>
 						{isLocal ? (
 							<button className="vp-btn" onClick={() => { window.location.href = "/upload"; }}>
 								Back to upload

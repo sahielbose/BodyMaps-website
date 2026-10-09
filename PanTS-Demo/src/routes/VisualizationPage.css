@@ -117,7 +117,10 @@
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
   gap: 2px;
-  background: #000;
+  /* The 2px gap shows this colour: a hairline seam between the panes, so the
+     crosshair of one view does not run into the next (each pane has an opaque
+     background of its own, see .vp-pane-wrap and .vp-pane--render). */
+  background: var(--vp-border-strong);
   position: absolute;
   inset: 0;
   width: 100%;
@@ -149,6 +152,9 @@
 .vp-pane-wrap {
   position: relative;
   overflow: hidden;
+  background: var(--vp-pane-bg, #000);
+  /* Lets the W/L readout shorten itself in a narrow pane, see .vp-window-readout. */
+  container: vp-pane / inline-size;
 }
 
 .vp-pane-wrap>div:first-child {
@@ -487,6 +493,37 @@
 .vp-vol3d {
   width: 100%;
   height: 100%;
+  background: var(--vp-pane-bg, #000);
+  /* The scan's bounding box would otherwise show as a bright rectangle with hard
+     cuts on a black pane. The render fades out at that box, on all four sides: the
+     viewer measures where the box falls in the canvas (--vp-vol3d-box-*, the fit
+     leaves it inset by the camera margin and the pane's aspect) and the fade runs
+     inward from there, measured again on every camera change. Until it has, or when
+     the box runs past the canvas, the same fade runs from the element edge. */
+  -webkit-mask-image:
+    linear-gradient(to right,
+      transparent var(--vp-vol3d-box-l, 0px),
+      #000 calc(var(--vp-vol3d-box-l, 0px) + var(--vp-vol3d-fade, 32px)),
+      #000 calc(100% - var(--vp-vol3d-box-r, 0px) - var(--vp-vol3d-fade, 32px)),
+      transparent calc(100% - var(--vp-vol3d-box-r, 0px))),
+    linear-gradient(to bottom,
+      transparent var(--vp-vol3d-box-t, 0px),
+      #000 calc(var(--vp-vol3d-box-t, 0px) + var(--vp-vol3d-fade, 32px)),
+      #000 calc(100% - var(--vp-vol3d-box-b, 0px) - var(--vp-vol3d-fade, 32px)),
+      transparent calc(100% - var(--vp-vol3d-box-b, 0px)));
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(to right,
+      transparent var(--vp-vol3d-box-l, 0px),
+      #000 calc(var(--vp-vol3d-box-l, 0px) + var(--vp-vol3d-fade, 32px)),
+      #000 calc(100% - var(--vp-vol3d-box-r, 0px) - var(--vp-vol3d-fade, 32px)),
+      transparent calc(100% - var(--vp-vol3d-box-r, 0px))),
+    linear-gradient(to bottom,
+      transparent var(--vp-vol3d-box-t, 0px),
+      #000 calc(var(--vp-vol3d-box-t, 0px) + var(--vp-vol3d-fade, 32px)),
+      #000 calc(100% - var(--vp-vol3d-box-b, 0px) - var(--vp-vol3d-fade, 32px)),
+      transparent calc(100% - var(--vp-vol3d-box-b, 0px)));
+  mask-composite: intersect;
 }
 
 /* 3D pane footer bar: Meshes/Volume mode toggle + volume presets. */
@@ -994,6 +1031,9 @@
 
 /* ---- Viewports: subtle accent ring + corner orientation label ---- */
 .vp-pane {
+  /* Room the corner label takes at the top of a pane; overlays that should leave
+     the label showing start below it. */
+  --vp-pane-label-h: 30px;
   /* Wheel inside a pane scrolls slices; never chain on to the page. */
   overscroll-behavior: contain;
   position: relative;
@@ -1003,18 +1043,24 @@
   transition: box-shadow 0.15s;
 }
 
+/* The label sits on the same dark plate as the slice counter so it reads over
+   bright anatomy and under a crosshair line; the accent tick marks its left edge. */
 .vp-pane::after {
   content: attr(data-label);
   position: absolute;
-  top: 10px;
-  left: 12px;
+  top: 8px;
+  left: 10px;
   font-family: var(--vp-mono);
   font-size: 10px;
   font-weight: 600;
+  line-height: 15px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.55);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(14, 15, 18, 0.85);
+  border: 1px solid var(--vp-border);
+  border-radius: 6px;
+  padding: 2px 7px 2px 10px;
   pointer-events: none;
   z-index: 5;
 }
@@ -1022,13 +1068,13 @@
 .vp-pane::before {
   content: "";
   position: absolute;
-  top: 13px;
-  left: 0;
+  top: 8px;
+  left: 10px;
   width: 3px;
-  height: 12px;
+  height: 21px;
   background: var(--pane-accent, transparent);
-  border-radius: 0 2px 2px 0;
-  z-index: 5;
+  border-radius: 6px 0 0 6px;
+  z-index: 6;
 }
 
 .vp-pane--axial {
@@ -1051,7 +1097,7 @@
    grid bleeding through while the mesh/volume view is still initializing. */
 .vp-pane--render,
 .vp-pane--render .canvas {
-  background: var(--vp-bg, #08090b);
+  background: var(--vp-pane-bg, #000);
 }
 
 /* "Hover to identify" active: a distinct cursor hints the pane now reports the
@@ -1071,14 +1117,16 @@
    it comes out negative (pushing the unrotated box's positioning past the pane's own
    right edge) because the box's *pre-rotation width* is the long track dimension, and
    half of that has to be cancelled out to bring the rotated bar back to the edge.
-   edgeGap(8) + track/2(3) - length/2(100, at the 200px cap) = -89px. */
+   right = edgeGap(8) + track/2(3) - length/2, which is -89px at the 200px cap. Below
+   the cap (a phone's 2x2 grid) the length is 55% of the pane, and `right` percentages
+   resolve against the pane's width just like `width`, so the offset follows the real
+   length; a fixed -89px pushed the bar out of panes under about 335px wide. */
 .vp-slice-scrollbar {
   position: absolute;
   top: 50%;
-  right: -89px;
+  right: calc(11px - min(55%, 200px) / 2);
   z-index: 6;
-  width: 55%;
-  max-width: 200px;
+  width: min(55%, 200px);
   height: 6px;
   transform: translateY(-50%) rotate(-90deg);
   transform-origin: center center;
@@ -1088,6 +1136,17 @@
   border-radius: 4px;
   outline: none;
   cursor: pointer;
+}
+
+/* Axial slice 0 is the top of the scan (the axial camera looks down -z and the index
+   grows along that normal), so in the sagittal and coronal panes the axial plane line
+   falls as the index rises. The other two panes rise with their index, which the -90deg
+   turn above matches. Turning the axial bar the other way puts slice 0 at the top, so
+   the thumb and the plane line travel together; the symmetric box keeps the offsets.
+   Up and Page Up are turned round with it in axialSliceBarKeyStep, so the thumb still
+   follows the key. */
+.vp-slice-scrollbar--axial {
+  transform: translateY(-50%) rotate(90deg);
 }
 
 /* Thumb is elongated along the (pre-rotation) track axis — after the -90deg rotation
@@ -1113,6 +1172,41 @@
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
 }
 
+/* Same keyboard ring as the other pane controls; the outline follows the
+   rotation, so it frames the vertical bar. */
+.vp-slice-scrollbar:focus-visible {
+  outline: 2px solid var(--vp-accent);
+  outline-offset: 4px;
+}
+
+/* A pane whose slice plane is not in the scan: nothing to draw, so a plain notice
+   covers the crosshair lines the pane still shows over the empty canvas. */
+.vp-pane-unavailable {
+  position: absolute;
+  inset: var(--vp-pane-label-h, 30px) 0 0 0;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--vp-pane-bg, #000);
+  color: var(--vp-text-dim);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+/* The slice counter and the W/L readout are twin chips in the bottom corners:
+   one height, and a plate opaque enough that a table line under it does not
+   show through the digits. The jump field that replaces the counter shares the
+   rule so clicking the counter does not resize the chip. */
+.vp-slice-caption,
+.vp-slice-jump-input,
+.vp-window-readout {
+  line-height: 1.5;
+  background: rgba(14, 15, 18, 0.92);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
 .vp-slice-caption {
   position: absolute;
   right: 10px;
@@ -1122,11 +1216,21 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.8);
-  background: rgba(14, 15, 18, 0.72);
   border: 1px solid var(--vp-border);
   border-radius: 6px;
   padding: 3px 7px;
-  pointer-events: none;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.vp-slice-caption:hover {
+  color: #ffffff;
+  border-color: var(--vp-border-strong);
+}
+
+.vp-slice-caption:focus-visible {
+  outline: 2px solid var(--vp-accent);
+  outline-offset: 2px;
 }
 
 .vp-slice-jump-input {
@@ -1140,7 +1244,6 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.92);
-  background: rgba(14, 15, 18, 0.85);
   border: 1px solid var(--vp-accent, #6ea8fe);
   border-radius: 6px;
   padding: 3px 6px;
@@ -1165,13 +1268,46 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.8);
-  background: rgba(14, 15, 18, 0.72);
   border: 1px solid var(--vp-border);
   border-radius: 6px;
   padding: 3px 7px;
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.25s ease;
+  /* Never reaches the slice counter on the right (10 + up to 75 wide + 6 gap + 10). */
+  box-sizing: border-box;
+  max-width: calc(100% - 104px);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  /* When the chip is short of room the width gives way first, so the level stays whole. */
+  display: flex;
+  column-gap: 0.6ch;
+}
+
+.vp-window-readout__w {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vp-window-readout__l {
+  flex: none;
+}
+
+/* Under about 210px the full "W 501 · L 600" no longer clears the counter, so the
+   readout keeps the level; in the 125px side tiles it stacks above the counter row. */
+@container vp-pane (max-width: 210px) {
+  .vp-window-readout__w {
+    display: none;
+  }
+}
+
+@container vp-pane (max-width: 150px) {
+  .vp-window-readout {
+    bottom: 38px;
+    max-width: calc(100% - 20px);
+  }
 }
 
 .vp-window-readout--visible {
@@ -1183,13 +1319,19 @@
 .vp-loading {
   position: fixed;
   inset: 0;
-  z-index: 45;
-  /* above the empty viewports, below the gear/home chrome (z-50) */
+  /* Above the topbar and floating gear (both z-55): this class doubles as the
+     fatal dicomError screen, and no toolbar control should stay clickable over
+     a viewer that has no volume. The error screen carries its own Retry/Back
+     buttons. Full-screen modals (200) and the annotate-HD overlay (900) still win. */
+  z-index: 60;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 40px;
+  /* Side gutter so a long load-failure message never runs to the screen edges. */
+  padding: 0 16px;
+  box-sizing: border-box;
   background: var(--vp-bg, #08090b);
   font-family: var(--vp-font);
 }
@@ -1215,6 +1357,41 @@
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--vp-text-dim, rgba(255, 255, 255, 0.5));
+}
+
+/* Ids are case sensitive, so the caption shows them as they are written. */
+.vp-loading__id {
+  text-transform: none;
+  letter-spacing: 0.04em;
+}
+
+/* Full sentences (the load-failure screen) read as ordinary text, not as the
+   spaced-out caps of the loading caption. */
+.vp-loading__text--message {
+  font-family: var(--vp-font);
+  font-size: 15px;
+  line-height: 1.5;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--vp-text, rgba(255, 255, 255, 0.92));
+}
+
+/* Way out of a slow or stuck load: the overlay covers the whole toolbar. */
+.vp-loading__back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  font-family: var(--vp-font);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--vp-text-dim);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.vp-loading__back:hover {
+  color: var(--vp-text);
 }
 
 /* Measured-ETA progress bar shown under the loading spinner while a case's volume
@@ -1257,15 +1434,19 @@
   overflow: hidden;
 }
 
+/* Full width, scaled down to the downloaded fraction (set inline), so the
+   bar grows with a transform instead of animating its layout width. */
 .vp-progress__fill {
+  width: 100%;
   height: 100%;
   border-radius: 99px;
   background: var(--vp-accent, #6ea8fe);
-  transition: width 0.3s ease;
+  transform-origin: left center;
+  transition: transform 0.3s ease;
 }
 
 .vp-progress__fill.is-finalizing {
-  width: 100%;
+  transform: none;
   animation: vp-pulse 1s ease-in-out infinite;
 }
 

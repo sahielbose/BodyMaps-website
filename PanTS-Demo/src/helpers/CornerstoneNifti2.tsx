@@ -14,6 +14,7 @@ import { rollbackVolumeUpgrade } from "./viewer/volumeUpgrade";
 import { addLabelmapActors } from "./viewer/labelmapActors";
 import { addVolumeLabelmap } from "./viewer/addVolumeLabelmap";
 import { applyOrganVisibility } from "./viewer/organVisibility";
+import { applyVolume3DBlend, VOLUME_3D_PRESETS, VOLUME_3D_PRESETS_MR } from "./volume3DPresets";
 type viewportIdTypes = 'CT_NIFTI_AXIAL' | 'CT_NIFTI_SAGITTAL' | 'CT_NIFTI_CORONAL';
 
 const {
@@ -1592,12 +1593,25 @@ type MprViewport = {
   scroll(delta?: number): void;
   getNumberOfSlices(): number;
   getSliceIndex(): number;
-  getCamera(): { focalPoint?: Point3; viewPlaneNormal?: Point3 };
+  getCamera(): { focalPoint?: Point3; viewPlaneNormal?: Point3; flipHorizontal?: boolean; flipVertical?: boolean };
   flip(flipDirection: { flipHorizontal?: boolean; flipVertical?: boolean }): void;
   getRotation(): number;
   setRotation(rotation: number): void;
+  // Optional so a viewport without them (a test double) just skips keeping the zoom.
+  getZoom?(): number;
+  setZoom?(zoom: number): void;
   worldToCanvas(world: Point3): Point2;
   render(): void;
+  // Needed by the refit after a 90 degree rotation. Optional so a viewport
+  // without it (a test double) just skips the refit.
+  resetCamera?(options?: {
+    resetPan?: boolean;
+    resetZoom?: boolean;
+    resetToCenter?: boolean;
+    resetRotation?: boolean;
+    resetOrientation?: boolean;
+    suppressEvents?: boolean;
+  }): void;
 };
 
 function _getMprViewport(pane: CinePane): MprViewport | undefined {
@@ -1656,6 +1670,42 @@ export function flipPaneHorizontal(pane: CinePane): void {
   }
 }
 
+/** The camera reset behind a refit that keeps the user's slice, rotation and flips
+ *  (see _refitPaneToRotation for why each default is switched off). */
+export function refitCameraKeepingView(viewport: {
+  resetCamera?: MprViewport["resetCamera"];
+  getCamera?: () => { flipHorizontal?: boolean; flipVertical?: boolean };
+  flip?: MprViewport["flip"];
+}): void {
+  if (!viewport.resetCamera) return;
+  const { flipHorizontal, flipVertical } = viewport.getCamera?.() ?? {};
+  viewport.resetCamera({
+    resetPan: true,
+    resetZoom: true,
+    resetToCenter: false,
+    resetRotation: false,
+    resetOrientation: false,
+    suppressEvents: true,
+  });
+  if (flipHorizontal) viewport.flip?.({ flipHorizontal: true });
+  if (flipVertical) viewport.flip?.({ flipVertical: true });
+}
+
+// The camera's fit is tied to the pane's height, so a pane that is wider than it
+// is tall shows the image cropped top and bottom after a quarter turn, until the
+// fit is recomputed. resetCamera's fit already accounts for the current viewUp
+// (the rotation), so re-running it refits the turned image. Three of its
+// defaults would throw away the user's view, so they are switched off: the
+// rotation and orientation are kept, and the focal point is not moved to the
+// volume's middle (which would jump the pane to the middle slice). It does
+// clear the flips, so those are put back. It also resets the user's pan and
+// zoom on every rotate. The camera-reset event is suppressed, because the
+// crosshairs tool answers it by resetting every pane (rotation included) and
+// recentring the slices, which would undo the rotate.
+function _refitPaneToRotation(viewport: MprViewport): void {
+  refitCameraKeepingView(viewport);
+}
+
 // Rotates 90° clockwise from wherever the pane currently sits (cumulative — four
 // clicks return to the start). NOTE: cornerstone's rotation-angle sign convention
 // relative to "on-screen clockwise" isn't independently confirmed here — if a
@@ -1667,6 +1717,15 @@ export function rotatePane90Clockwise(pane: CinePane): void {
   try {
     const next = (viewport.getRotation() + 90) % 360;
     viewport.setRotation(next);
+    try {
+      // The refit drops this pane to fit zoom; put back the zoom it had, so the zoom
+      // readout stays true and the other panes are left alone.
+      const zoom = viewport.getZoom?.();
+      _refitPaneToRotation(viewport);
+      if (zoom !== undefined && zoom !== 1) viewport.setZoom?.(zoom);
+    } catch (e) {
+      console.warn(`Refit after rotate failed for pane "${pane}":`, e);
+    }
     // Unlike flip(), setRotation() only triggers a CAMERA_MODIFIED event — it
     // never calls render() itself, so without this the rotation wouldn't show
     // until some unrelated interaction happened to re-render the pane.
@@ -1680,7 +1739,62 @@ export function rotatePane90Clockwise(pane: CinePane): void {
 // Slice tracking — drives the per-pane "245/519" caption + drag scrollbar.
 // ---------------------------------------------------------------------------
 
-export type SliceInfo = { current: number; total: number };
+/** `outside` is only ever set to true: the pane's slice plane misses the scan, so the
+ *  canvas has nothing to show and the counter would describe a slice that is not there. */
+export type SliceInfo = { current: number; total: number; outside?: boolean };
+
+/** Whether the plane through `focalPoint` with normal `normal` misses an axis-aligned
+ *  box (vtk bounds: xmin, xmax, ymin, ymax, zmin, zmax, of the voxel centres) by more
+ *  than `slack`. Anything not finite reads as "not outside", since an unreadable camera is no proof
+ *  that the slice is missing. */
+export function planeMissesBounds(
+  bounds: ArrayLike<number>,
+  focalPoint: ArrayLike<number>,
+  normal: ArrayLike<number>,
+  slack: number,
+): boolean {
+  const all = [...Array.from(bounds), ...Array.from(focalPoint), ...Array.from(normal)];
+  if (bounds.length < 6 || focalPoint.length < 3 || normal.length < 3 || !all.every(Number.isFinite)) return false;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const x of [bounds[0], bounds[1]]) {
+    for (const y of [bounds[2], bounds[3]]) {
+      for (const z of [bounds[4], bounds[5]]) {
+        const d = x * normal[0] + y * normal[1] + z * normal[2];
+        min = Math.min(min, d);
+        max = Math.max(max, d);
+      }
+    }
+  }
+  const at = focalPoint[0] * normal[0] + focalPoint[1] * normal[1] + focalPoint[2] * normal[2];
+  return at < min - slack || at > max + slack;
+}
+
+type PlaneVolume = { imageData?: { getBounds?: () => ArrayLike<number> }; spacing?: ArrayLike<number> };
+
+// Whether a pane's slice plane misses `volume` (a slice index clamps at the last slice,
+// so the counter alone cannot tell). Unknown reads as false.
+function _paneSliceOutsideVolume(viewport: MprViewport, volume: PlaneVolume | undefined): boolean {
+  try {
+    const bounds = volume?.imageData?.getBounds?.();
+    const { focalPoint, viewPlaneNormal } = viewport.getCamera();
+    if (!bounds || !focalPoint || !viewPlaneNormal) return false;
+    const spacing = Math.max(...(Array.from(volume?.spacing ?? [1]) as number[]));
+    const voxel = Number.isFinite(spacing) ? spacing : 1;
+    return planeMissesBounds(bounds, focalPoint, viewPlaneNormal, voxel);
+  } catch {
+    return false;
+  }
+}
+
+function _currentCtVolume(): PlaneVolume | undefined {
+  return (_currentCtVolumeId ? cache.getVolume(_currentCtVolumeId) : undefined) as PlaneVolume | undefined;
+}
+
+/** Points the slice tracking at a volume without a rendered viewer. Tests only. */
+export function _setCurrentCtVolumeIdForTests(id: string | null): void {
+  _currentCtVolumeId = id;
+}
 
 // Jumps a pane directly to an arbitrary slice (the scrollbar drag target), rather than
 // the +1/-1 steps cine/wheel-scroll use. scroll(delta) clamps to the valid range, so an
@@ -1690,6 +1804,13 @@ export function setPaneSliceIndex(pane: CinePane, index: number): void {
   if (!viewport) return;
   const delta = index - viewport.getSliceIndex();
   if (delta !== 0) viewport.scroll(delta);
+}
+
+// Steps a pane from the slice it is on now, not from the index the page last rendered,
+// so a held key keeps moving between renders. scroll() clamps at both ends.
+export function stepPaneSlice(pane: CinePane, delta: number): void {
+  const viewport = _getMprViewport(pane);
+  if (viewport && delta !== 0) viewport.scroll(delta);
 }
 
 export function worldToPaneCanvas(
@@ -1768,7 +1889,8 @@ export function getVolumeSliceIndexForPane(pane: CinePane): number | null {
   }
 }
 // Fires `cb` once immediately per pane (so the caller has an initial reading) and again
-// on every CAMERA_MODIFIED where the slice index actually changed — pan/zoom/rotate also
+// on every CAMERA_MODIFIED where the slice index (or whether the plane is still inside
+// the scan) actually changed. Pan/zoom/rotate also
 // fire that event, so each pane's last-seen index is compared to avoid spamming the
 // caller (and the React state it likely feeds) on every unrelated camera tweak. Returns
 // an unsubscribe function; call it before the volume/tool group is torn down (case
@@ -1779,13 +1901,22 @@ export function subscribeToSliceChanges(cb: (pane: CinePane, info: SliceInfo) =>
   for (const pane of panes) {
     const viewport = _getMprViewport(pane);
     if (!viewport) continue;
+    const read = (current: number, outside: boolean): SliceInfo =>
+      outside
+        ? { current, total: viewport.getNumberOfSlices(), outside }
+        : { current, total: viewport.getNumberOfSlices() };
     let lastIndex = viewport.getSliceIndex();
-    cb(pane, { current: lastIndex, total: viewport.getNumberOfSlices() });
+    let lastOutside = _paneSliceOutsideVolume(viewport, _currentCtVolume());
+    cb(pane, read(lastIndex, lastOutside));
     const handler = () => {
       const current = viewport.getSliceIndex();
-      if (current === lastIndex) return;
+      // The index clamps at the last slice, so moving further off the scan does not
+      // change it; the plane leaving or re-entering the scan still has to be reported.
+      const outside = _paneSliceOutsideVolume(viewport, _currentCtVolume());
+      if (current === lastIndex && outside === lastOutside) return;
       lastIndex = current;
-      cb(pane, { current, total: viewport.getNumberOfSlices() });
+      lastOutside = outside;
+      cb(pane, read(current, outside));
     };
     viewport.element.addEventListener(Enums.Events.CAMERA_MODIFIED, handler);
     cleanups.push(() => viewport.element.removeEventListener(Enums.Events.CAMERA_MODIFIED, handler));
@@ -1924,11 +2055,38 @@ export function subscribeToMprViewChanges(cb: (view: SharedMprView) => void): ()
 
 // ---------------------------------------------------------------------------
 // Viewport screenshots — used by the reading session (auto key images) and the
-// toolbar snapshot button. Annotations/reference lines live on an SVG overlay,
-// not the WebGL-backed canvas, so each shot composites canvas + rasterized SVG.
+// toolbar snapshot button. Annotations live on an SVG overlay, not the WebGL-backed
+// canvas, so each shot composites canvas + rasterized SVG. The crosshair and reference
+// lines are navigation aids and are left out, so all three panes come out alike.
 // ---------------------------------------------------------------------------
 
 export type ViewportImage = { name: string; dataUrl: string };
+
+// The crosshair and reference-line nodes in a pane's overlay. Cornerstone keeps a cache of
+// the nodes it draws per viewport, keyed by the owning annotation's UID.
+function navigationOverlayNodes(viewportId: string): Set<Element> {
+  const nodes = new Set<Element>();
+  const drawn = cornerstoneTools.state.svgNodeCache[`${viewportId}:${renderingEngineId}`] as
+    | Record<string, { domRef?: Element }>
+    | undefined;
+  for (const [key, entry] of Object.entries(drawn ?? {})) {
+    const toolName = annotation.state.getAnnotation(key.split("::")[0])?.metadata?.toolName;
+    if (entry.domRef && toolName && (toolName === CrosshairsTool.toolName || toolName.startsWith(ReferenceLinesTool.toolName))) {
+      nodes.add(entry.domRef);
+    }
+  }
+  return nodes;
+}
+
+// A copy of the overlay for rasterizing, without the nodes in `omit`.
+export function cloneOverlayWithout(svg: SVGElement, omit: Set<Element>): SVGElement {
+  const clone = svg.cloneNode(true) as SVGElement;
+  const copies = clone.querySelectorAll("*");
+  svg.querySelectorAll("*").forEach((source, index) => {
+    if (omit.has(source)) copies[index]?.remove();
+  });
+  return clone;
+}
 
 export async function captureViewportImages(): Promise<ViewportImage[]> {
   const engine = getRenderingEngine(renderingEngineId);
@@ -1945,7 +2103,10 @@ export async function captureViewportImages(): Promise<ViewportImage[]> {
       const canvas: HTMLCanvasElement | undefined = viewport?.canvas;
       const element: HTMLElement | undefined = viewport?.element;
       // offsetParent is null for display:none panes (single-view modes) — skip them.
+      // The 3D layout hides the slice panes with visibility:hidden, which leaves
+      // offsetParent set, so check the computed visibility too.
       if (!canvas || !canvas.width || !element || element.offsetParent === null) continue;
+      if (getComputedStyle(element).visibility === "hidden") continue;
       const composite = document.createElement("canvas");
       composite.width = canvas.width;
       composite.height = canvas.height;
@@ -1956,7 +2117,7 @@ export async function captureViewportImages(): Promise<ViewportImage[]> {
       ctx.drawImage(canvas, 0, 0);
       const svg = element.querySelector("svg");
       if (svg) {
-        const clone = svg.cloneNode(true) as SVGElement;
+        const clone = cloneOverlayWithout(svg, navigationOverlayNodes(viewportId));
         clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
         // The overlay is sized in CSS pixels; give the clone explicit dimensions so
         // the rasterizer knows them, then scale to the canvas's device pixels.
@@ -2329,25 +2490,9 @@ function _parseNiftiUint8Mask(buf: ArrayBuffer): { dims: [number, number, number
 // by a trackball camera. Works with or without a segmentation (local DICOM).
 // ---------------------------------------------------------------------------
 
-// Curated subset of Cornerstone's VTK presets that read well on CT.
-export const VOLUME_3D_PRESETS = [
-  { name: "CT-Bone", label: "Bone" },
-  { name: "CT-AAA", label: "Angio" },
-  { name: "CT-Chest-Contrast-Enhanced", label: "Chest" },
-  { name: "CT-Lung", label: "Lung" },
-  { name: "CT-Soft-Tissue", label: "Soft tissue" },
-  { name: "CT-MIP", label: "MIP" },
-] as const;
-
-// MR intensities aren't Hounsfield units, so the CT transfer functions above
-// render MR as an opaque slab. Cornerstone ships MR presets — the viewer offers
-// these instead when the loaded volume is MR (local DICOM can be any modality).
-export const VOLUME_3D_PRESETS_MR = [
-  { name: "MR-Default", label: "Default" },
-  { name: "MR-Angio", label: "Angio" },
-  { name: "MR-MIP", label: "MIP" },
-  { name: "MR-T2-Brain", label: "T2 Brain" },
-] as const;
+// The preset lists live in volume3DPresets.ts (testable without Cornerstone); they
+// are re-exported here because the viewer and its test mocks import them from here.
+export { VOLUME_3D_PRESETS, VOLUME_3D_PRESETS_MR };
 
 // Modality of the volume the viewer is showing (DICOM metadata; NIfTI dataset
 // cases have no Modality and return undefined — they're CT by construction).
@@ -2448,6 +2593,7 @@ function _throwIfVolume3DOperationStale(
 
 function _cleanupVolume3DOperation(operationGeneration: number, copyId: string | null) {
   if (_volume3DEngineOwnerGeneration === operationGeneration) {
+    _stopVolume3DBoxWatch();
     try {
       ToolGroupManager.destroyToolGroup(volume3DToolGroupId);
     } catch {
@@ -2477,6 +2623,7 @@ export function applyVolume3DPreset(presetName: string) {
   try {
     const viewport = engine.getViewport(volume3DViewportId) as any;
     viewport?.setProperties?.({ preset: presetName });
+    applyVolume3DBlend(viewport, presetName, Enums.BlendModes);
     viewport?.render?.();
   } catch {
     /* 3D view not enabled */
@@ -2495,6 +2642,198 @@ function _waitForLayout(element: HTMLElement): Promise<boolean> {
     };
     check();
   });
+}
+
+// The 3D pane is laid out twice: once as a grid tile when Volume is picked, and
+// again when the view goes to 3D and the pane takes the whole stage. The engine is
+// framed once in enableVolume3D, so without this the ray-cast render stays sized and
+// centred for the tile and sits in a band with hard edges. Watch the pane box and
+// refit the dedicated engine whenever it really changes size. This only touches the
+// 3D engine, never the MPR one.
+let _volume3DBoxWatch: { observer: ResizeObserver; cancel: () => void } | null = null;
+
+function _stopVolume3DBoxWatch() {
+  _volume3DBoxWatch?.cancel();
+  _volume3DBoxWatch?.observer.disconnect();
+  _volume3DBoxWatch = null;
+}
+
+// Give the camera a little room around the torso so it is not cropped flush.
+const VOLUME_3D_FRAME_MARGIN = 0.92;
+
+// The camera the last fit left, so a later box change can tell whether the user has
+// rotated or zoomed the render since.
+let _volume3DFittedCamera: string | null = null;
+
+function _volume3DCameraKey(viewport: any): string | null {
+  const camera = viewport?.getCamera?.();
+  if (!camera) return null;
+  const round = (v: unknown) => (Array.isArray(v) ? v.map((n: number) => Number(n.toFixed(4))) : v);
+  return JSON.stringify([camera.position, camera.focalPoint, camera.viewUp, camera.parallelScale].map(round));
+}
+
+// The CSS mask on the pane (.vp-vol3d) fades the render out at the scan's projected
+// bounding box, not at the element edge: the camera margin and the pane's aspect leave
+// the box inset by a different amount on each side, so a fixed edge fade missed it.
+// The insets are the box's distance from each canvas edge; the fade runs inward from
+// there. Whatever the box does not cover fades at the element edge instead.
+const VOLUME_3D_FADE_VARS = [
+  "--vp-vol3d-box-l",
+  "--vp-vol3d-box-r",
+  "--vp-vol3d-box-t",
+  "--vp-vol3d-box-b",
+  "--vp-vol3d-fade",
+] as const;
+
+export function volume3DFadeGeometry(
+  corners: ReadonlyArray<readonly [number, number]>,
+  width: number,
+  height: number
+): Record<(typeof VOLUME_3D_FADE_VARS)[number], string> | null {
+  if (!corners.length || !(width > 0) || !(height > 0)) return null;
+  const xs = corners.map((c) => c[0]);
+  const ys = corners.map((c) => c[1]);
+  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+  const left = clamp(Math.min(...xs), 0, width);
+  const right = clamp(width - Math.max(...xs), 0, width);
+  const top = clamp(Math.min(...ys), 0, height);
+  const bottom = clamp(height - Math.max(...ys), 0, height);
+  const boxWidth = width - left - right;
+  const boxHeight = height - top - bottom;
+  if (!(boxWidth > 0) || !(boxHeight > 0)) return null;
+  const shortSide = Math.min(boxWidth, boxHeight);
+  // A tenth of the box, kept soft on a small tile and from swallowing a large one.
+  const fade = Math.min(shortSide / 2, clamp(shortSide * 0.1, 12, 48));
+  const px = (v: number) => `${Number(v.toFixed(1))}px`;
+  return {
+    "--vp-vol3d-box-l": px(left),
+    "--vp-vol3d-box-r": px(right),
+    "--vp-vol3d-box-t": px(top),
+    "--vp-vol3d-box-b": px(bottom),
+    "--vp-vol3d-fade": px(fade),
+  };
+}
+
+function _clearVolume3DFade(viewport: any) {
+  const style = (viewport?.element as HTMLElement | undefined)?.style;
+  if (style) for (const name of VOLUME_3D_FADE_VARS) style.removeProperty(name);
+}
+
+function _syncVolume3DFade(viewport: any) {
+  const style = (viewport?.element as HTMLElement | undefined)?.style;
+  if (!style) return;
+  try {
+    const b = viewport.getBounds?.() as number[] | undefined;
+    const canvas = viewport.canvas as HTMLCanvasElement | undefined;
+    if (!b || b.length < 6 || !canvas) return _clearVolume3DFade(viewport);
+    const corners: [number, number][] = [];
+    for (const x of [b[0], b[1]])
+      for (const y of [b[2], b[3]])
+        for (const z of [b[4], b[5]]) {
+          const [cx, cy] = viewport.worldToCanvas([x, y, z]);
+          if (Number.isFinite(cx) && Number.isFinite(cy)) corners.push([cx, cy]);
+        }
+    const fade = volume3DFadeGeometry(corners, canvas.clientWidth, canvas.clientHeight);
+    if (!fade) return _clearVolume3DFade(viewport);
+    // Camera events arrive on every frame of a turn, so only touch what moved.
+    for (const name of VOLUME_3D_FADE_VARS) {
+      if (style.getPropertyValue(name) !== fade[name]) style.setProperty(name, fade[name]);
+    }
+  } catch {
+    _clearVolume3DFade(viewport);
+  }
+}
+
+// `keepUserView` is for box changes after the first framing (a dock or sidebar opening,
+// a window drag): once the user has turned or zoomed the render, only the canvas is
+// resized and their view is kept, as the MPR panes keep theirs.
+function _fitVolume3DToBox(keepUserView = false) {
+  const engine = getRenderingEngine(volume3DEngineId) as RenderingEngine | undefined;
+  if (!engine) return;
+  const current = engine.getViewport(volume3DViewportId) as any;
+  if (keepUserView && current && _volume3DFittedCamera !== null && _volume3DCameraKey(current) !== _volume3DFittedCamera) {
+    engine.resize(true, true);
+    _syncVolume3DFade(current);
+    current.render();
+    return;
+  }
+  engine.resize(true, false);
+  const viewport = engine.getViewport(volume3DViewportId) as any;
+  if (!viewport) return;
+  viewport.resetCamera();
+  // A parallel camera zooms through its scale; a perspective one (the default here)
+  // has to dolly back from the focal point instead.
+  const camera = viewport.getCamera?.();
+  if (camera?.parallelProjection) {
+    viewport.setZoom?.(VOLUME_3D_FRAME_MARGIN);
+  } else if (camera?.position && camera?.focalPoint) {
+    const position = camera.position.map(
+      (p: number, i: number) => camera.focalPoint[i] + (p - camera.focalPoint[i]) / VOLUME_3D_FRAME_MARGIN
+    );
+    viewport.setCamera({ position });
+  }
+  _volume3DFittedCamera = _volume3DCameraKey(viewport);
+  _syncVolume3DFade(viewport);
+  viewport.render();
+}
+
+function _watchVolume3DBox(element: HTMLElement) {
+  _stopVolume3DBoxWatch();
+  if (typeof ResizeObserver === "undefined") return;
+  let lastWidth = element.offsetWidth;
+  let lastHeight = element.offsetHeight;
+  let frame = 0;
+  let cancelled = false;
+  // Cornerstone drops a resize while a render is queued, so keep refitting until
+  // the canvas has caught up with the box instead of trusting the first pass.
+  const refit = (triesLeft: number) => {
+    if (cancelled) return;
+    try {
+      _fitVolume3DToBox(true);
+      const engine = getRenderingEngine(volume3DEngineId) as RenderingEngine | undefined;
+      const canvas = (engine?.getViewport(volume3DViewportId) as any)?.canvas as HTMLCanvasElement | undefined;
+      const dpr = window.devicePixelRatio || 1;
+      const settled =
+        !canvas ||
+        (canvas.width === Math.round(canvas.clientWidth * dpr) &&
+          canvas.height === Math.round(canvas.clientHeight * dpr));
+      if (!settled && triesLeft > 0) frame = requestAnimationFrame(() => refit(triesLeft - 1));
+    } catch {
+      /* engine torn down mid-refit */
+    }
+  };
+  const observer = new ResizeObserver(() => {
+    const width = element.offsetWidth;
+    const height = element.offsetHeight;
+    if (width === 0 || height === 0) return;
+    if (width === lastWidth && height === lastHeight) return;
+    lastWidth = width;
+    lastHeight = height;
+    cancelAnimationFrame(frame);
+    refit(10);
+  });
+  observer.observe(element);
+  // Any camera change moves the box on the canvas: a turn or zoom by the user, and
+  // Cornerstone's own trackball tool, which resets the camera and puts the zoom back
+  // whenever the element resizes (including once, a few seconds after the pane opens).
+  // Measuring the box again each time keeps the fade on it; clearing on a change left
+  // every render on the element-edge fade soon after it opened.
+  const onCameraModified = () => {
+    if (cancelled) return;
+    const viewport = (getRenderingEngine(volume3DEngineId) as RenderingEngine | undefined)?.getViewport(
+      volume3DViewportId
+    ) as any;
+    if (viewport) _syncVolume3DFade(viewport);
+  };
+  element.addEventListener(Enums.Events.CAMERA_MODIFIED, onCameraModified);
+  _volume3DBoxWatch = {
+    observer,
+    cancel: () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+      element.removeEventListener(Enums.Events.CAMERA_MODIFIED, onCameraModified);
+    },
+  };
 }
 
 export async function enableVolume3D(
@@ -2534,7 +2873,7 @@ export async function enableVolume3D(
       element,
       defaultOptions: {
         orientation: Enums.OrientationAxis.CORONAL,
-        background: [0.03, 0.035, 0.043],
+        background: [0, 0, 0],
       },
     });
     const viewport = engine.getViewport(volume3DViewportId) as any;
@@ -2543,11 +2882,12 @@ export async function enableVolume3D(
     await viewport.setVolumes([{ volumeId: copyId }]);
     assertCurrent();
     viewport.setProperties({ preset: presetName });
+    // A fresh actor starts in composite; MIP needs its blend set again on reopen.
+    applyVolume3DBlend(viewport, presetName, Enums.BlendModes);
     _lastVolume3DPreset = presetName;
     // Match the on-screen canvas to the (now laid-out) element before framing.
-    engine.resize(true, false);
-    viewport.resetCamera();
-    viewport.render();
+    _fitVolume3DToBox();
+    _watchVolume3DBox(element);
 
     // If no volume actor attached, ray casting will just show black — report
     // failure so the UI can fall back to a message instead of a blank pane.
@@ -2587,6 +2927,7 @@ export async function enableVolume3D(
 
 export function disableVolume3D() {
   _volume3DOperations.invalidate();
+  _stopVolume3DBoxWatch();
   try {
     ToolGroupManager.destroyToolGroup(volume3DToolGroupId);
   } catch {
@@ -2629,20 +2970,33 @@ export function setZoom(zoomValue: number){
       }
     })
 }
+// The zoom range. Shared with the Adjust flyout's zoom slider (VisualizationPage)
+// and the +/- keys so the slider, the readout and the panes can never disagree:
+// a narrower slider pegged its thumb while the readout kept counting, and the
+// keys used to carry on zooming the pane past a limit the readout had stopped at.
+export const MIN_ZOOM = 0.2;
+export const MAX_ZOOM = 8;
+
+/** Zooms one pane by `zoomFactor` around a canvas point, within MIN_ZOOM and
+ *  MAX_ZOOM, and returns the pane's zoom afterwards (undefined if there is no
+ *  such pane). */
 export function zoomToCursor(
   viewportId: string,
   canvasPos: [number, number],
   zoomFactor: number
-) {
+): number | undefined {
   const engine = getRenderingEngine(renderingEngineId);
   if (!engine) return;
   const viewport = engine.getViewport(viewportId) as any;
   if (!viewport) return;
 
+  const currentZoom = viewport.getZoom();
+  const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentZoom * zoomFactor));
+  if (nextZoom === currentZoom) return currentZoom;
+
   const worldPosBefore = viewport.canvasToWorld(canvasPos);
 
-  const currentZoom = viewport.getZoom();
-  viewport.setZoom(currentZoom * zoomFactor);
+  viewport.setZoom(nextZoom);
 
   const worldPosAfter = viewport.canvasToWorld(canvasPos);
 
@@ -2668,6 +3022,7 @@ export function zoomToCursor(
   });
 
   viewport.render();
+  return nextZoom;
 }
 export function zoomToFit() {
   const engine = getRenderingEngine(renderingEngineId);
@@ -2681,6 +3036,191 @@ export function zoomToFit() {
         viewport.render();
       }
     })
+  repaintPaneAnnotations([viewportId1, viewportId2, viewportId3]);
+}
+
+/** Redraws the annotation (SVG) layer of the given panes: crosshairs, ROI
+ *  outlines, measurement lines and labels. Their canvas geometry is derived from
+ *  world coordinates only on an annotation render, so it is stale after any
+ *  camera change that is not one (a resize, a reset, a refit). */
+export function repaintPaneAnnotations(viewportIds: string[]): void {
+  if (!viewportIds.length) return;
+  try {
+    cornerstoneTools.utilities.triggerAnnotationRenderForViewportIds(viewportIds);
+  } catch {
+    /* annotation state or viewports not initialized yet */
+  }
+}
+
+export type ResizeEngine = {
+  resize: (immediate?: boolean, keepCamera?: boolean) => void;
+  render?: () => void;
+  getViewports?: () => unknown[];
+};
+
+type ZoomableViewport = {
+  id: string;
+  element?: HTMLElement;
+  getZoom: () => number;
+  setZoom: (value: number) => void;
+  getPan?: () => number[];
+  resetCamera?: MprViewport["resetCamera"];
+  getCamera?: () => { parallelScale?: number; flipHorizontal?: boolean; flipVertical?: boolean };
+  flip?: MprViewport["flip"];
+};
+
+/** Whether every sized pane is still at its fitted camera (zoom 1x, no pan), i.e.
+ *  the user has not zoomed or panned it. */
+export function panesAtFit(engine: Pick<ResizeEngine, "getViewports">): boolean {
+  const viewports = ((engine.getViewports?.() ?? []) as ZoomableViewport[]).filter(
+    (vp) => typeof vp?.getZoom === "function"
+  );
+  if (!viewports.length) return false;
+  try {
+    return viewports.every((vp) => {
+      if (vp.element && (vp.element.clientWidth === 0 || vp.element.clientHeight === 0)) return true;
+      if (Math.abs(vp.getZoom() - 1) > 0.01) return false;
+      const pan = vp.getPan?.();
+      return !pan || pan.every((v) => !Number.isFinite(v) || Math.abs(v) < 1);
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** Resize the MPR canvases to their elements' new size (a dock opened, the
+ *  window changed) and re-fit each pane to it. A plain resize(true, true)
+ *  keeps the camera's parallelScale, which is tied to the pane's HEIGHT, so a
+ *  narrower pane crops the anatomy at the sides while the zoom readout still
+ *  says 1.0x. Here each pane keeps its zoom RELATIVE TO FIT and the world point
+ *  it is centred on: the resize re-derives the fit camera for the new size
+ *  (Cornerstone stores it as the initial camera), and setting the old relative
+ *  zoom against that puts the image back where the user left it, just scaled
+ *  to the new box. Panes with no size (hidden in a single-view layout) are
+ *  left alone. Returns whether any pane had to be put back, which the caller
+ *  reads as "the fit was still moving". With `resetToFit` the panes are re-fitted
+ *  from scratch (camera reset) instead of getting their old relative zoom back:
+ *  for a pane the user never zoomed or panned, whose "old zoom" can only be a
+ *  reading taken against a fit that was still moving. */
+export function resizeKeepingFit(
+  engine: ResizeEngine,
+  options: { resetToFit?: boolean } = {}
+): boolean {
+  const viewports = ((engine.getViewports?.() ?? []) as ZoomableViewport[]).filter(
+    (vp) => typeof vp?.getZoom === "function" && typeof vp?.setZoom === "function"
+  );
+  // The scale that makes the volume fit the pane: the camera scale times the zoom
+  // relative to fit. It only changes when the pane's own shape changed, which is
+  // what a resize has to answer for, however close the zoom readout stays.
+  const fitScaleOf = (vp: ZoomableViewport, zoom: number): number | undefined => {
+    try {
+      const scale = vp.getCamera?.()?.parallelScale;
+      return typeof scale === "number" && Number.isFinite(scale) ? scale * zoom : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const before = new Map<string, { zoom: number; fit?: number }>();
+  for (const vp of viewports) {
+    try {
+      const z = vp.getZoom();
+      if (Number.isFinite(z) && z > 0) before.set(vp.id, { zoom: z, fit: fitScaleOf(vp, z) });
+    } catch {
+      /* viewport not ready yet */
+    }
+  }
+  engine.resize(true, true);
+  let refitted = false;
+  let reset = false;
+  for (const vp of viewports) {
+    const was = before.get(vp.id);
+    if (was === undefined) continue;
+    if (vp.element && (vp.element.clientWidth === 0 || vp.element.clientHeight === 0)) continue;
+    try {
+      const now = vp.getZoom();
+      const fit = fitScaleOf(vp, now);
+      const fitMoved = was.fit !== undefined && fit !== undefined && Math.abs(fit - was.fit) > was.fit * 1e-6;
+      const changed = fitMoved || Math.abs(now - was.zoom) > was.zoom * 1e-6;
+      if (options.resetToFit && typeof vp.resetCamera === "function") {
+        refitCameraKeepingView(vp);
+        reset = true;
+        if (changed) refitted = true;
+      } else if (changed) {
+        vp.setZoom(was.zoom);
+        refitted = true;
+      }
+    } catch {
+      /* viewport torn down mid-resize */
+    }
+  }
+  if (refitted || reset) engine.render?.();
+  // The SVG layer only repaints on an annotation render, and a resize or refit
+  // moves every shape's canvas position (crosshair, ROI outline, distance line)
+  // and the automatically placed statistics boxes, so always run one.
+  repaintPaneAnnotations(viewports.map((vp) => vp.id));
+  return refitted;
+}
+
+/** Keep the panes fitted while their cells are still changing size. Cornerstone
+ *  drops a resize while a render frame is queued (its own render after the last
+ *  refit queues one, and so does the stats or measurements list filling in), and
+ *  a dock also moves the grid tracks over more than one frame, so a single
+ *  resizeKeepingFit can miss the final size and leave a pane that flipped from
+ *  height-limited to width-limited (the coronal one) cropped at the sides.
+ *  This refits now, then once a frame until the pane sizes and the fit have
+ *  stopped moving. `isBlocked` holds the passes back while something else is
+ *  refitting every pane from scratch (a layout change), whose reset a put-back
+ *  zoom would undo. Returns a function that cancels the loop. */
+export function refitPanesUntilSettled(
+  engine: ResizeEngine & { _animationFrameSet?: boolean },
+  options: {
+    isBlocked?: () => boolean;
+    /** Asked on every pass: refit from scratch instead of restoring the old zoom. */
+    resetToFit?: () => boolean;
+    /** Called once the passes have stopped, unless the loop was cancelled. */
+    onSettled?: () => void;
+    quietFrames?: number;
+    maxPasses?: number;
+    maxFrames?: number;
+  } = {}
+): () => void {
+  const { isBlocked, resetToFit, onSettled, quietFrames = 2, maxPasses = 12, maxFrames = 90 } = options;
+  const paneSizes = () =>
+    ((engine.getViewports?.() ?? []) as { element?: HTMLElement }[])
+      .map((vp) => (vp.element ? `${vp.element.clientWidth}x${vp.element.clientHeight}` : ""))
+      .join("|");
+  let cancelled = false;
+  let handle = 0;
+  let frames = 0;
+  let passes = 0;
+  let quiet = 0;
+  let lastSizes = "";
+  const step = () => {
+    if (cancelled) return;
+    frames += 1;
+    if (isBlocked?.()) {
+      quiet = 0;
+    } else {
+      passes += 1;
+      // A resize dropped for the queued frame changes nothing, which would read as
+      // settled, so a pass made while one is queued never counts as quiet.
+      const dropped = engine._animationFrameSet === true;
+      const moved = resizeKeepingFit(engine, { resetToFit: resetToFit?.() });
+      const sizes = paneSizes();
+      quiet = !dropped && !moved && sizes === lastSizes ? quiet + 1 : 0;
+      lastSizes = sizes;
+    }
+    if (quiet >= quietFrames || passes >= maxPasses || frames >= maxFrames) {
+      onSettled?.();
+      return;
+    }
+    handle = requestAnimationFrame(step);
+  };
+  step();
+  return () => {
+    cancelled = true;
+    cancelAnimationFrame(handle);
+  };
 }
 
 export function centerOnCursor(){

@@ -27,7 +27,8 @@ vi.mock("../helpers/CornerstoneNifti2", async (importOriginal) => {
 		// The page destructures { renderingEngine, viewportIds, volumeId } off the result,
 		// so resolve that shape (not undefined) to avoid a post-test unhandled rejection.
 		renderVisualization: vi.fn().mockResolvedValue({
-			renderingEngine: {},
+			// The layout effect resizes and re-renders the engine a frame later.
+			renderingEngine: { resize: vi.fn(), getViewport: vi.fn(), render: vi.fn() },
 			viewportIds: [],
 			volumeId: "test-volume",
 			// Called when a test unmounts the viewer before this load settles.

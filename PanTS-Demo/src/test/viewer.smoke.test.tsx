@@ -300,7 +300,8 @@ describe("viewer smoke test", () => {
 			render: vi.fn(),
 		};
 		vi.mocked(renderVisualization).mockResolvedValueOnce({
-			renderingEngine: { render: vi.fn(), getViewport: () => viewport },
+			// resize: the pane refit calls it on a later frame, after the test may have ended.
+			renderingEngine: { resize: vi.fn(), render: vi.fn(), getViewport: () => viewport },
 			viewportIds: ["viewport-1"],
 			volumeId: "ct-volume",
 			dispose: vi.fn(),
