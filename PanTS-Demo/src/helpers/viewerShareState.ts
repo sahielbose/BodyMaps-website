@@ -17,6 +17,9 @@ export type ViewerShareState = {
 	hd?: boolean; // full-resolution flag (mirrors the existing ?hd=1)
 };
 
+// Every query key encodeViewerState can write, so a caller can clear them before writing fresh ones.
+export const VIEWER_STATE_PARAMS = ["view", "ww", "wc", "op", "hide", "c", "hd"] as const;
+
 const round = (n: number, dp = 1) => {
 	const f = 10 ** dp;
 	return Math.round(n * f) / f;

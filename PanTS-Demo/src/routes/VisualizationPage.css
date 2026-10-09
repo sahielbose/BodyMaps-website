@@ -745,24 +745,6 @@
   font-weight: 500;
 }
 
-/* HD button while the full-res volume streams in the background. */
-.vp-tool--busy {
-  border-color: rgba(110, 168, 254, 0.55);
-  animation: vp-hd-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes vp-hd-pulse {
-
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgba(110, 168, 254, 0.3);
-  }
-
-  50% {
-    box-shadow: 0 0 0 6px rgba(110, 168, 254, 0);
-  }
-}
-
 /* The mode is the loud pill; the preset inside it is a quieter tint. */
 .vp-3dbar__btn--preset.is-active {
   background: rgba(255, 255, 255, 0.18);
@@ -1217,6 +1199,26 @@
   color: var(--vp-text);
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, opacity 0.25s ease;
+}
+
+/* HD and Annotate buttons while the full-res volume streams in the
+   background. After .vp-tool, whose border shorthand would otherwise win
+   the tie and keep the plain border; hover and active still override it. */
+.vp-tool--busy {
+  border-color: rgba(110, 168, 254, 0.55);
+  animation: vp-hd-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes vp-hd-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(110, 168, 254, 0.3);
+  }
+
+  50% {
+    box-shadow: 0 0 0 6px rgba(110, 168, 254, 0);
+  }
 }
 
 .vp-tool:hover {

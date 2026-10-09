@@ -40,8 +40,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, type MouseEve
 import { createPortal } from "react-dom";
 import { buildMaskFilter } from "../helpers/CornerstoneNifti2";
 import { Link, useLocation, useParams } from "react-router-dom";
+import MessagePage from "../components/MessagePage";
 import PanelHeader from "../components/PanelHeader";
 import TriggerLabel from "../components/TriggerLabel";
+import { useAuth } from "../contexts/authContext";
 import AISidebar from "../components/AIAssistant/AISidebar";
 import { track } from "../helpers/analytics";
 import { formatCaseMetaValue } from "../helpers/demographics";
@@ -53,6 +55,7 @@ import OrganCheckbox from "../components/OrganCheckbox";
 import PercentileBar from "../components/PercentileBar";
 import SessionHUD from "../components/ReadingSession/SessionHUD";
 import SessionSummary from "../components/ReadingSession/SessionSummary";
+import { dropStaleGuardEntry, guardLeaving, leavePageTo, pageNav } from "../helpers/leaveGuard";
 import ReportScreen, { prefetchReportData } from "../components/ReportScreen/ReportScreen";
 import SliceJumpInput from "../components/SliceJumpInput";
 import { SoloChallengeDock, SoloChallengeHeader } from "../education/SoloChallengeChrome";
@@ -201,7 +204,7 @@ import { useFocusedPane } from "../helpers/viewer/useFocusedPane";
 import { axialSliceBarKeyStep } from "../helpers/viewer/sliceBarKeys";
 import { useKeyboardShortcuts } from "../helpers/viewer/useKeyboardShortcuts";
 import { type MaskingArea } from "../components/segmentation/MaskingSelect";
-import { getLocalDicomFiles, loadLocalDicomSeries } from "../helpers/dicomLocal";
+import { getLocalDicomFiles, loadLocalDicomSeries, localDicomSeriesLabel, localDicomSeriesNotice, NoDicomSeriesError } from "../helpers/dicomLocal";
 import { loadLocalNiftiAsRawBlobUrl } from "../helpers/localNifti";
 import {
     loadOrganNorms,
@@ -224,9 +227,10 @@ import {
 import { toolDisplayName, type ReportMeasurement } from "../helpers/sessionReport";
 import { measurementToolDetail, measurementToolName } from "../helpers/measurementTools";
 import { ClearMeasurementsFlyoutItem } from "../components/MeasurementPanel/ClearMeasurementsConfirm";
+import { datasetSegmentationUrl } from "../helpers/segmentationSource";
 import {getPanTSId } from "../helpers/utils";
 import { classInSentence, filenameToName } from "../helpers/utils.name";
-import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
+import { decodeViewerState, encodeViewerState, VIEWER_STATE_PARAMS } from "../helpers/viewerShareState";
 import { scrollRowToActive } from "../helpers/scrollRowToActive";
 import { meshCheckStateFor, meshesHeldBack } from "../helpers/meshVisibility";
 import { LiveRoomDock, LiveRoomHeader } from "../liveRooms/LiveRoomChrome";
@@ -238,6 +242,7 @@ import { splitClassBookkeeping } from "../helpers/splitClassBookkeeping";
 import "./VisualizationPage.css";
 import LiveWireOverlay from "../components/viewer/LiveWireOverlay";
 import { markEscapeUsed } from "../helpers/viewer/escapeUsed";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 type ViewMode = "mpr" | "axial" | "sagittal" | "coronal" | "3d";
 
@@ -561,7 +566,19 @@ function isRetryableViewerLoadError(error: unknown): boolean {
 	if (error instanceof DOMException && error.name === "AbortError") return false;
 	if (error instanceof TypeError) return true;
 	const message = error instanceof Error ? error.message : String(error ?? "");
-	return /network|fetch|connection|timeout|timed out|err_|unexpected end|status (408|429|5\d\d)/i.test(message);
+	return /network|fetch|connection|timeout|timed out|err_|unexpected end|status:? ?(408|429|5\d\d)/i.test(message);
+}
+
+// What a reader sees for a failed load. A raw "HTTP error! status: 404" from the
+// loader means nothing to them, so a definite refusal gets a sentence of its own.
+function viewerLoadErrorMessage(error: unknown, isUpload = false): string | null {
+	const message = error instanceof Error ? error.message : String(error ?? "");
+	if (/status:? ?(401|403|404)/i.test(message)) {
+		return isUpload
+			? "This scan could not be opened. Go back to Upload and run it again."
+			: "This scan is not available. Check the case number, or pick a case from the dataset.";
+	}
+	return null;
 }
 
 function waitForViewerRetry(delayMs: number, signal: AbortSignal): Promise<void> {
@@ -641,17 +658,57 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const quizPracticeMaskUrl = quizPractice?.maskUrl;
 	const pantsCase = liveRoom?.metadata.case_id ?? soloChallenge?.challenge.case_id ?? quizPractice?.pack.case_id ?? params.caseId;
 	const isCvCase = String(pantsCase ?? "").toUpperCase().startsWith("CV");
-	const sessionId = liveRoom || soloChallenge || quizPractice ? undefined : params.sessionId;
+	// /reconstruction/:reconstructionId carries the id of the uploaded scan's session.
+	const sessionId = liveRoom || soloChallenge || quizPractice ? undefined : params.sessionId ?? params.reconstructionId;
+	// A reconstruction (OpenVAE) run has a rebuilt CT and no organ segmentation.
+	const isReconstruction = Boolean(sessionId) && !params.sessionId && Boolean(params.reconstructionId);
 	// Local DICOM mode (/dicom): a folder of .dcm files picked on the Upload page,
 	// viewed entirely in-browser. No backend case, so no segmentation layer.
 	const routerLocation = useLocation();
-	const isDicom = !liveRoom && !soloChallenge && !quizPractice && routerLocation.pathname === "/dicom";
+	// The router ignores a trailing slash and the casing, so /dicom/ and /DICOM reach this page too.
+	const localPath = routerLocation.pathname.replace(/\/+$/, "").toLowerCase();
+	const isDicom = !liveRoom && !soloChallenge && !quizPractice && localPath === "/dicom";
 	// Local NIfTI (/local-nifti): a single .nii/.nii.gz picked on the Upload page, viewed
 	// in-browser with no backend case. `isLocal` = either in-browser mode; both are
 	// seg-less, so they share the same "hide segmentation UI, default to 3D volume" behavior.
-	const isLocalNifti = !liveRoom && !soloChallenge && !quizPractice && routerLocation.pathname === "/local-nifti";
+	const isLocalNifti = !liveRoom && !soloChallenge && !quizPractice && localPath === "/local-nifti";
 	const isLocal = isDicom || isLocalNifti;
+	// Scans with no organ segmentation (local files, reconstructions, and CancerVerse
+	// cases, which are CT only) hide the organ UI.
+	const noSeg = isLocal || isReconstruction || isCvCase;
 	const [dicomError, setDicomError] = useState<string | null>(null);
+	// What names the opened local DICOM series (its description), shown in the toolbar after "Local DICOM".
+	const [dicomSeriesDescription, setDicomSeriesDescription] = useState("");
+	// The scan's session is missing, or belongs to someone else: the server
+	// answers 401/403/404, and no amount of retrying changes that.
+	const [sessionError, setSessionError] = useState(false);
+	// The case id is not in the dataset: neither the lab's server nor the
+	// public mirror has its volume, so the loader would only ever spin.
+	const [caseError, setCaseError] = useState(false);
+	// Who is signed in, for the "scan isn't available" page: the answer to the
+	// probe below depends on the account, and signing in through the header
+	// popup on that page changes the account without changing the route.
+	// `undefined` while the first check of the session cookie is still out.
+	const { user: authUser, loading: authLoading, promptAuth } = useAuth();
+	const authUserId = authLoading ? undefined : authUser?.id ?? null;
+	// Bumped to run the probe again. It is not simply keyed to the account,
+	// because the account settling after the page opened would then reload a
+	// scan that is already showing.
+	const [probeAttempt, setProbeAttempt] = useState(0);
+	// The account the refusal was given to, once the account is known.
+	const refusedAs = useRef<string | null | undefined>(undefined);
+	useEffect(() => {
+		if (!sessionError) {
+			refusedAs.current = undefined;
+			return;
+		}
+		if (authUserId === undefined) return;
+		if (refusedAs.current === undefined) {
+			refusedAs.current = authUserId;
+		} else if (refusedAs.current !== authUserId) {
+			setProbeAttempt((n) => n + 1);
+		}
+	}, [sessionError, authUserId]);
 
 
 	// Where to load the volumes from. Per the maintainer's rule, dataset cases load
@@ -659,15 +716,20 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// for big full-body scans than streaming the .nii.gz from HuggingFace). We probe
 	// the local file and only fall back to the public HuggingFace mirror when it isn't
 	// present (e.g. a dev checkout without the image data), so the viewer never breaks.
-	const caseId = isLocalNifti ? "Local NIfTI" : isDicom ? "Local DICOM" : pantsCase ?? sessionId ?? "1";
+	const caseId = isLocalNifti ? "Local NIfTI" : isDicom ? "Local DICOM" : pantsCase ?? sessionId ?? "";
 	// Catalog classes edited on this page (see editedCatalogOrgans). Refreshed by hand after
 	// live-room mask patches, which do not fire a local edit event.
 	const { ids: editedCatalogIds, refresh: refreshEditedCatalog } = useEditedCatalogIds(caseId, segmentation_categories.length);
+	const toolbarCaseLabel = isDicom && dicomSeriesDescription ? `${caseId}: ${dicomSeriesDescription}` : caseId;
 	const [ctUrl, setCtUrl] = useState<string | null>(null);
 	const [segUrl, setSegUrl] = useState<string | null>(null);
 	// Whether the local volumes exist (enables the HD toggle). Dataset cases default to
 	// the low-res copy for fast loading; ?hd=1 in the URL requests full resolution.
 	const [localAvailable, setLocalAvailable] = useState(false);
+	// True once the probe found the lab server without this volume and the viewer
+	// is reading the public mirror instead. Mirror files are full resolution and
+	// have no ?res=low variant, so there is no HD upgrade to wait for.
+	const [mirrorServed, setMirrorServed] = useState(false);
 	const isHd = liveRoom
 		? liveRoom.metadata.resolution === "full"
 		: typeof window !== "undefined" && new URLSearchParams(window.location.search).get("hd") === "1";
@@ -703,30 +765,66 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			// sources so no interaction can continue against the previous medical data.
 			setCtUrl(null);
 			setSegUrl(null);
+			setSessionError(false);
+			setCaseError(false);
 			if (sessionId) {
-				setCtUrl(`${API_BASE}/api/session-ct/${sessionId}`);
-				setSegUrl(`${API_BASE}/api/session-segmentation/${sessionId}`);
+				// The volume loader never reports an HTTP status, so a session the
+				// reader cannot open would spin forever. Ask first; only a definite
+				// refusal counts (a network failure still falls through to the
+				// loader, which retries).
+				const ctPath = isReconstruction ? "session-reconstruction" : "session-ct";
+				const refused = await fetch(`${API_BASE}/api/${ctPath}/${sessionId}`, { method: "HEAD", credentials: "include" })
+					.then((r) => r.status === 401 || r.status === 403 || r.status === 404)
+					.catch(() => false);
+				if (cancelled) return;
+				if (refused) {
+					setSessionError(true);
+					return;
+				}
+				setCtUrl(`${API_BASE}/api/${ctPath}/${sessionId}`);
+				setSegUrl(isReconstruction ? null : `${API_BASE}/api/session-segmentation/${sessionId}`);
 				return;
 			}
-			const id = pantsCase ?? "1";
+			if (!pantsCase) return;
+			const id = pantsCase;
 			const isCvCase = String(id).toUpperCase().startsWith("CV");
 			// getPanTSId produces a garbage value for CV ids, but it's only used in the HF
 			// fallback URLs which are never reached for CV (CT is always on the JHU server).
 			const p = isCvCase ? "" : getPanTSId(id);
 			const localCt = `${API_BASE}/api/get-main-nifti/${id}.nii.gz`;
-			const localSeg = `${API_BASE}/api/get-segmentations/${id}.nii.gz`;
 			const challengeSeg = soloChallengeMaskUrl ?? null;
 			const hfCt = `https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/image_only/${p}/ct.nii.gz?download=true`;
-			const hfSeg = `https://huggingface.co/datasets/BodyMaps/iPanTSMini/resolve/main/mask_only/${p}/combined_labels.nii.gz?download=true`;
 			// HEAD probe: fast, doesn't download the volume; 404/500 → use HF fallback.
-			const localOk = await fetch(localCt, { method: "HEAD" }).then((r) => r.ok).catch(() => false);
+			// status 0 = the request itself failed (network, cold backend).
+			const localStatus = await fetch(localCt, { method: "HEAD" }).then((r) => r.status).catch(() => 0);
 			if (cancelled) return;
+			const localOk = localStatus >= 200 && localStatus < 300;
+			if (!localOk) {
+				// The volume loader never reports an HTTP status either, so a case id that
+				// exists nowhere would spin until the five-minute deadline. Only a definite
+				// answer counts: the lab's server saying 404 for a CV id, whose
+				// CT lives nowhere else, or the mirror saying 404 for the rest. A 500, a cold
+				// backend or a network failure still falls through to the loader, which retries.
+				const missing = isCvCase
+					? localStatus === 404
+					: await fetch(hfCt, { method: "HEAD" }).then((r) => r.status === 404).catch(() => false);
+				if (cancelled) return;
+				if (missing) {
+					setCaseError(true);
+					return;
+				}
+			}
 			setLocalAvailable(localOk);
+			// Only a case the viewer actually reads from the mirror counts as full resolution;
+			// a CancerVerse case always loads from the lab server at the low preview.
+			setMirrorServed(!localOk && !isCvCase);
 			// Keep the categorical mask at full resolution even while the CT uses its fast
 			// preview. Cornerstone aligns both volumes in world space; downsampling labels
 			// creates avoidable stair-stepping and loses small structures.
 			const resParam = isHd ? "" : "?res=low";
-			setCtUrl(localOk ? `${localCt}${resParam}` : hfCt);
+			// A CancerVerse CT lives only on the lab server (the mirror URL above has no
+			// case folder), so even a 5xx or a failed probe goes to the loader, which retries.
+			setCtUrl(localOk || isCvCase ? `${localCt}${resParam}` : hfCt);
 			// CancerVerse cases have no masks yet — /api/get-segmentations returns
 			// {"masks_available": false} (JSON, HTTP 200) which hangs the nifti loader.
 			// Skip the seg URL entirely so the viewer opens CT-only without hanging.
@@ -739,21 +837,65 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			} else if (isCvCase) {
 				setSegUrl(null);
 			} else {
-				setSegUrl(localOk ? `${localSeg}${resParam}` : hfSeg);
+				// Always the backend, even when the CT comes from the mirror: it converts the
+				// dataset's organ numbering to the viewer's and reads the mirror itself when
+				// it has no local copy. A mirror CT keeps a full-resolution mask, as before.
+				setSegUrl(datasetSegmentationUrl(id, { low: localOk && !isHd }));
 			}
 		};
 		resolveSources();
 		return () => { cancelled = true; };
-	}, [pantsCase, sessionId, isHd, isLocal, isLiveRoom, isQuizPractice, isSoloChallenge, liveRoomMaskUrl, quizPracticeMaskUrl, soloChallengeMaskUrl]);
+	}, [pantsCase, sessionId, isReconstruction, probeAttempt, isHd, isLocal, isLiveRoom, isQuizPractice, isSoloChallenge, liveRoomMaskUrl, quizPracticeMaskUrl, soloChallengeMaskUrl]);
+
+	// The query that reproduces the current view (shared by Share and the HD reload).
+	const buildViewerShareParams = (hd: boolean) => {
+		// While "show only target mask" isolates an annotation target, the hidden
+		// organs come from that isolation, not from the reader. The reload or the
+		// shared link has no target, so writing them would leave one organ showing.
+		const isolating = isolationTargetKey != null && showOnlyTargetMask;
+		const hidden = isolating ? [] : checkState.reduce<number[]>((acc, visible, id) => {
+			if (id > 0 && !visible) acc.push(id);
+			return acc;
+		}, []);
+		return encodeViewerState({
+			view: viewMode,
+			ww: windowWidth,
+			wc: windowCenter,
+			opacity: opacityValue,
+			hidden,
+			crosshair: getCrosshairMm() ?? undefined,
+			hd,
+		});
+	};
 
 	// Flip between low-res and full-res by reloading the route — a fresh mount cleanly
 	// re-inits the Cornerstone/NiiVue contexts (re-running them in place is fragile).
 	const toggleHd = () => {
+		// Edits and measurements live only in this page's memory, so the reload
+		// would erase them: ask first.
+		const askedFirst = maskHistory.canUndo || classDeletedRef.current || getMeasurementSummaries().length > 0;
+		if (askedFirst) {
+			if (!window.confirm("Switching resolution reloads the scan and discards your edits and measurements. Continue?")) return;
+		}
+		// Carry what is on screen, not what the opened link said: the window, view,
+		// crosshair and hidden organs are written the way Share writes them, over any
+		// other query parameters the page was opened with.
 		const params = new URLSearchParams(window.location.search);
-		if (isHd) params.delete("hd");
-		else params.set("hd", "1");
+		if (shareStateAppliedRef.current && pendingCrosshairRestoreRef.current === null) {
+			for (const key of VIEWER_STATE_PARAMS) params.delete(key);
+			for (const [key, value] of buildViewerShareParams(!isHd)) params.set(key, value);
+		} else if (isHd) {
+			// The opened link's view has not been applied yet (the viewer is still loading, or
+			// the crosshair is still moving into place), so the live state is still the
+			// defaults: keep what the link said and only flip the resolution.
+			params.delete("hd");
+		} else {
+			params.set("hd", "1");
+		}
 		const qs = params.toString();
-		window.location.href = `${window.location.pathname}${qs ? `?${qs}` : ""}`;
+		// An unsaved reading session makes the browser ask too; once this question is
+		// answered, it should not ask again.
+		leavePageTo(`${window.location.pathname}${qs ? `?${qs}` : ""}`, askedFirst);
 	};
 	
 
@@ -917,8 +1059,13 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		sync();
 		const ro = new ResizeObserver(sync);
 		ro.observe(el);
-		return () => ro.disconnect();
-	}, []);
+		return () => {
+			ro.disconnect();
+			root.style.removeProperty("--vp-topbar-h");
+		};
+		// The toolbar unmounts behind the unavailable-scan and load-error pages and
+		// a new one mounts when they clear, so bind again to the new element.
+	}, [sessionError, caseError]);
 	const stageRef = useRef<HTMLDivElement>(null);
 	const [showOrganDetails, setShowOrganDetails] = useState(false);
 	const [loading, setLoading] = useState(true);
@@ -1151,6 +1298,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		// The dialog says this can't be undone. Left on the history, Undo would put the
 		// voxels back under a class with no row, colour or name.
 		resetMaskEditHistory();
+		classDeletedRef.current = true;
+		setClassDeleted(true);
 	}
 	removeCustomSegmentLabel(id);
 	setCheckBoxData((prev) => prev.filter((s) => s.id !== id));
@@ -1537,6 +1686,15 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// the keydown listener (macOS sends no keyup for Z while Cmd is held), since the
 	// shortcut hook calls undo and redo itself.
 	const [maskHistory, setMaskHistory] = useState({ canUndo: false, canRedo: false });
+	// Deleting a class empties the undo history, but the deletion itself is still an
+	// unsaved edit that a resolution switch would lose.
+	const classDeletedRef = useRef(false);
+	// The same fact as a state, so the leave guard installs while a deletion is unsaved.
+	const [classDeleted, setClassDeleted] = useState(false);
+	useEffect(() => {
+		classDeletedRef.current = false;
+		setClassDeleted(false);
+	}, [caseId, liveRoomMaskUrl, quizPracticeMaskUrl, soloChallengeMaskUrl]);
 	const maskHistoryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const refreshMaskHistory = useCallback(() => {
 		if (maskHistoryTimerRef.current) clearTimeout(maskHistoryTimerRef.current);
@@ -1635,6 +1793,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// also drive that state, and clicking HD manually should NOT pop the
 	// annotation toolbar open when it finishes.
 	const [annotateHdLoading, setAnnotateHdLoading] = useState(false);
+	const [annotateHdError, setAnnotateHdError] = useState(false);
 
 	// Click/box-to-segment (interactive prompt tools). `res` MUST match the
 	// grid the live segmentation volume is actually on right now — same
@@ -1654,7 +1813,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// missed — same object, same model context), matching how the official
 	// Slicer plugin behaves. Two instances would each hold their own token
 	// and silently start a new object on every tool switch.
-	const fullRes = isHd || enhance.state === "done";
+	const fullRes = isHd || enhance.state === "done" || mirrorServed;
 	const promptToolArmed =
 		activeToolbarTool === "pointSegment" ||
 		activeToolbarTool === "boxSegment" ||
@@ -1710,6 +1869,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const crosshairShown = crosshairModeShown(crosshairModeState);
 
 	const enhanceStartedRef = useRef(false);
+	// Lets the HD-loading overlay's Cancel button abort the in-flight enhance.
+	const enhanceAbortRef = useRef<AbortController | null>(null);
+	// Set by Cancel, so the abort it causes is told apart from a timeout or a failed download.
+	const enhanceCancelledRef = useRef(false);
 	// Live mirrors so the async swap re-applies the *current* window/visibility, not
 	// the values captured when the stream started.
 	const windowRef = useRef({ w: windowWidth, c: windowCenter });
@@ -1753,7 +1916,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	}, [showOnlyTargetMask, isolationTargetKey]);
 	// 3D pane rendering mode: organ meshes (dataset cases) or shaded GPU volume
 	// rendering of the CT itself (the only 3D option for local DICOM).
-	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(isLocal ? "volume" : "mesh");
+	const [threeDMode, setThreeDMode] = useState<"mesh" | "volume">(noSeg ? "volume" : "mesh");
 	const [volumePreset, setVolumePreset] = useState<string>(VOLUME_3D_PRESETS[0].name);
 	// CT presets by default; chosen again from the scan's modality on every load (MR gets its own set).
 	const [volume3DPresets, setVolume3DPresets] = useState<readonly { name: string; label: string }[]>(VOLUME_3D_PRESETS);
@@ -1891,28 +2054,33 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// On by default: hovering an organ names it without having to find and
 	// enable the tool first. The View menu item still toggles it off.
 	const [hoverIdentifyEnabled, setHoverIdentifyEnabled] = useState(true);
+	// Naming an organ needs a label volume, which local scans and reconstructions never have.
+	const hoverIdentifyOn = hoverIdentifyEnabled && !noSeg && !answerHidden;
 
 	// The viewer fills the window itself and every pane handles its own wheel
 	// (slice scroll), so the page must never scroll underneath it. Without this,
 	// a wheel tick the pane doesn't consume (end of the stack, over the 3D pane,
 	// a toolbar) scrolls the whole window and the layout visibly jumps.
+	// Only <html> is clipped, which is enough to stop the page scrolling: dialogs
+	// (useDialogFocus) lock and restore body overflow themselves, and one opened
+	// here would otherwise save the viewer's "hidden" and put it back on the next
+	// page after a Back.
+	// The unavailable-scan and load-error pages scroll like any page, so the lock
+	// is only held while the viewer itself is on screen.
 	useEffect(() => {
+		if (sessionError || caseError) return;
 		const html = document.documentElement;
-		const body = document.body;
 		const prev = {
 			htmlOverflow: html.style.overflow,
-			bodyOverflow: body.style.overflow,
 			htmlOverscroll: html.style.overscrollBehavior,
 		};
 		html.style.overflow = "hidden";
-		body.style.overflow = "hidden";
 		html.style.overscrollBehavior = "none";
 		return () => {
 			html.style.overflow = prev.htmlOverflow;
-			body.style.overflow = prev.bodyOverflow;
 			html.style.overscrollBehavior = prev.htmlOverscroll;
 		};
-	}, []);
+	}, [sessionError, caseError]);
 	const [hoverOrganTip, setHoverOrganTip] = useState({
 		visible: false,
 		x: 0,
@@ -2202,6 +2370,31 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			sessionRef.current = null;
 		};
 	}, []);
+
+	// A recording, or a finished one whose summary is still open, is thrown away when the
+	// viewer unmounts, so closing the tab, following a link or pressing Back asks first.
+	const hasUnsavedSession = readingSession !== null || sessionResult !== null;
+	// Mask edits and measurements live only in this page's memory and nothing here saves
+	// them, so they are lost the same way: the question toggleHd asks before it reloads.
+	// A live room keeps them as they are made, and a submitted solo challenge has already
+	// sent its answer, so leaving those loses nothing. Quiz practice has nothing to lose
+	// either: the learner draws nothing, and the reveal adds the reference measurement itself.
+	// A solo attempt in progress keeps its measurement in the session store and restores it.
+	const editsKeptElsewhere = isLiveRoom || isQuizPractice || Boolean(soloChallenge?.result);
+	const hasUnsavedEdits =
+		!editsKeptElsewhere && (maskHistory.canUndo || classDeleted || (hasMeasurements && !isSoloChallenge));
+	useEffect(() => {
+		// A reload the reader agreed to leaves the guard's spare entry under this load.
+		dropStaleGuardEntry();
+	}, []);
+	useEffect(() => {
+		if (!hasUnsavedSession && !hasUnsavedEdits) return;
+		return guardLeaving(
+			hasUnsavedSession
+				? "Leave this scan? Your reading session has not been saved and will be lost."
+				: "Leave this scan? Your edits and measurements have not been saved and will be lost."
+		);
+	}, [hasUnsavedSession, hasUnsavedEdits]);
 
 	// Completed measurements land in the session timeline and auto-capture a key image
 	// (on the next frame, after the annotation has painted onto the SVG overlay).
@@ -2698,19 +2891,47 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// ---- Progressive resolution: background full-res stream + in-place swap --------
 
 	const runEnhance = async () => {
-		if (!pantsCase || !viewerReady || enhanceStartedRef.current) return;
+		if (!pantsCase) {
+			// Session/no-case volumes have no HD variant to fetch — fail loudly so
+			// the annotateHdLoading watcher can clear itself instead of idling.
+			setEnhance({ state: "failed", pct: null });
+			return;
+		}
+		if (!viewerReady || enhanceStartedRef.current) return;
 		enhanceStartedRef.current = true;
+		enhanceCancelledRef.current = false;
 		setEnhance({ state: "streaming", pct: 0 });
-		// The HD stream is the only download in flight, so any progress event is ours.
+		// Abortable with a deadline: the nifti loader's in-flight requests can
+		// stall without rejecting (same failure mode the initial load works
+		// around), so the awaits below race against this signal rather than
+		// trusting the loader to settle.
+		const enhanceAbort = new AbortController();
+		enhanceAbortRef.current = enhanceAbort;
+		const deadline = window.setTimeout(() => enhanceAbort.abort(), VIEWER_LOAD_TIMEOUT_MS);
+		// The HD streams are the only downloads in flight, but there are TWO of
+		// them in sequence (CT, then the segmentation rebuild below), and this
+		// subscription stays live across both. Scale each stream into its own
+		// band so the indicator is monotonic instead of counting to ~100% and
+		// jumping back down when the mask starts streaming.
+		let enhancePhase: "ct" | "seg" = "ct";
 		const unsubscribe = subscribeToVolumeProgress((loaded, total) => {
 			if (total > 0) {
-				setEnhance({ state: "streaming", pct: Math.min(100, Math.round((loaded / total) * 100)) });
+				const frac = Math.min(1, loaded / total);
+				const pct = enhancePhase === "ct" ? Math.round(frac * 90) : 90 + Math.round(frac * 10);
+				setEnhance({ state: "streaming", pct });
 			}
 		});
+		const upgrade = upgradeCtVolume(`${API_BASE}/api/get-main-nifti/${pantsCase}.nii.gz`, enhanceAbort.signal);
+		let segUpgrade: Promise<boolean> | null = null;
 		try {
-			const newVolumeId = await upgradeCtVolume(`${API_BASE}/api/get-main-nifti/${pantsCase}.nii.gz`);
+			const newVolumeId = await awaitViewerLoadOrAbort(
+				upgrade,
+				enhanceAbort.signal,
+				() => {}
+			);
 			if (!viewerReadyRef.current) return;
 			if (!newVolumeId) {
+				enhanceStartedRef.current = false;
 				setEnhance({ state: "failed", pct: null });
 				return;
 			}
@@ -2726,21 +2947,50 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			// hdReady in the Annotate button) until this completes, since painting
 			// mid-swap would hit the same mismatch this is meant to fix.
 			if (segUrl) {
-				const segOk = await upgradeSegmentationVolume(`${API_BASE}/api/get-segmentations/${pantsCase}.nii.gz`);
+				enhancePhase = "seg";
+				segUpgrade = upgradeSegmentationVolume(datasetSegmentationUrl(pantsCase), enhanceAbort.signal);
+				const segOk = await awaitViewerLoadOrAbort(
+					segUpgrade,
+					enhanceAbort.signal,
+					() => {}
+				);
 				if (!segOk) {
 					// CT upgraded but mask didn't — don't claim "done" (which the
 					// Annotate button treats as a green light) while the mask is
-					// still misaligned. Report failed so the button stays disabled
-					// and hdReady falls back to isHd if/when the case is reloaded.
+					// still misaligned. Report failed (and re-arm the started
+					// guard) so the user can retry instead of the button dying.
+					enhanceStartedRef.current = false;
+					// A rebuild that failed part way may already have re-added every organ.
+					setVisibilities(visibilityById(checkBoxDataRef.current, checkStateRef.current));
 					setEnhance({ state: "failed", pct: null });
 					return;
 				}
 			}
+			// Rebuilding the labelmap above re-adds every segment as visible, so put the
+			// reader's hidden organs back before the panes are shown as done.
+			setVisibilities(visibilityById(checkBoxDataRef.current, checkStateRef.current));
 			setEnhance({ state: "done", pct: 100 });
 			sessionRef.current?.log("session", "Enhanced to full resolution");
 		} catch {
-			setEnhance({ state: "failed", pct: null });
+			enhanceStartedRef.current = false;
+			// A cancel or deadline can land after the swap began: once the upgrade has put
+			// the previous volume back, re-apply the window and organ visibility it reset.
+			void upgrade.then(() => {
+				if (!viewerReadyRef.current) return;
+				handleWindowChange(windowRef.current.w, windowRef.current.c);
+				setVisibilities(visibilityById(checkBoxDataRef.current, checkStateRef.current));
+			}, () => {});
+			// The mask rebuild may still finish in the background after a cancel or deadline,
+			// and it re-adds every organ as visible.
+			void segUpgrade?.then(() => {
+				if (!viewerReadyRef.current) return;
+				setVisibilities(visibilityById(checkBoxDataRef.current, checkStateRef.current));
+			}, () => {});
+			// A deliberate cancel is not a failure: the HD button goes back to offering the upgrade.
+			setEnhance(enhanceCancelledRef.current ? { state: "idle", pct: null } : { state: "failed", pct: null });
 		} finally {
+			window.clearTimeout(deadline);
+			enhanceAbortRef.current = null;
 			unsubscribe();
 		}
 	};
@@ -2810,6 +3060,17 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		let cancelled = false;
 		const controller = new AbortController();
 		let disposeLoaded: (() => void) | undefined;
+		// A local DICOM folder's parsed files stay cached until the viewer that used them goes.
+		let releaseLocalDicom: (() => void) | undefined;
+		// A local NIfTI is handed to Cornerstone as a blob: URL over the whole
+		// decompressed file. The URL keeps that blob alive until it is revoked,
+		// so it goes with the viewer that used it (and at once if this run was
+		// cancelled before using it), or every reopen pinned another copy.
+		let localNiftiUrl: string | null = null;
+		const revokeLocalNiftiUrl = () => {
+			if (localNiftiUrl) URL.revokeObjectURL(localNiftiUrl);
+			localNiftiUrl = null;
+		};
 		let loadTimedOut = false;
 		let loadDeadline: number | undefined;
 		viewerReadyRef.current = false;
@@ -2857,16 +3118,18 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				loadDeadline = undefined;
 			}
 		};
+		// The loader's own wording (an HTTP status, a decoder message) stays in the console.
+		const loadFailedMessage = sessionId
+			? "This scan could not be loaded. Try again, or upload it again."
+			: "This case could not be loaded. Try again, or pick another case.";
 		const reportLoadError = (error: unknown, fallback: string) => {
 			if (cancelled) return;
 			if (error instanceof DOMException && error.name === "AbortError" && !loadTimedOut) return;
 			console.error(error);
 			setDicomError(
 				loadTimedOut
-					? "This scan has not finished after five minutes. You can retry this case."
-					: error instanceof Error && error.message
-						? error.message
-						: fallback
+					? `This scan has not finished after five minutes. ${sessionId ? "You can try again." : "You can retry this case."}`
+					: viewerLoadErrorMessage(error, Boolean(sessionId)) ?? fallback
 			);
 			setLoading(false);
 		};
@@ -2875,7 +3138,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			// 32-organ catalog for them; checkBoxData should only ever contain segments
 			// the user actually creates (via createNewAnnotationClass), so hasAnySegments
 			// reflects reality instead of always being true.
-			if (!isLocal) {
+			if (!noSeg) {
 				const checkBoxData = segmentation_categories.map((filename, i) => ({
 					label: filenameToName(filename),
 					id: i + 1,
@@ -2903,23 +3166,36 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				if (!axial_ref.current || !sagittal_ref.current || !coronal_ref.current) return;
 				const files = getLocalDicomFiles();
 				if (!files.length) {
-					// Deep link or reload without files in memory — go pick a folder.
-					window.location.href = "/upload";
+					// Deep link or reload without files in memory — go pick a folder. Replace this
+					// dead entry so Back from Upload does not land here and redirect again.
+					pageNav.replace(appRootRelativeUrl("/upload"));
 					return;
 				}
 				try {
-					const { imageIds } = await loadLocalDicomSeries(files);
-					if (cancelled) return;
-					const result = await renderVisualization(
-						axial_ref.current,
-						sagittal_ref.current,
-						coronal_ref.current,
-						cmap,
-						"",
-						undefined,
-						setLoading,
-						{ ctImageIds: imageIds, resourceKey: "local-dicom", signal: controller.signal }
+					// Same deadline as a local NIfTI or a dataset case.
+					startLoadDeadline();
+					const localSeries = await loadLocalDicomSeries(files, controller.signal);
+					const { imageIds, release } = localSeries;
+					releaseLocalDicom = release;
+					if (cancelled) {
+						release();
+						return;
+					}
+					const result = await awaitViewerLoadOrAbort(
+						renderVisualization(
+							axial_ref.current,
+							sagittal_ref.current,
+							coronal_ref.current,
+							cmap,
+							"",
+							undefined,
+							setLoading,
+							{ ctImageIds: imageIds, resourceKey: "local-dicom", signal: controller.signal }
+						),
+						controller.signal,
+						(late) => late.dispose()
 					);
+					clearLoadDeadline();
 					if (cancelled) return void result.dispose();
 					// Non-CT DICOM (MR/PET/…) needs its own window, not the CT presets —
 					// seed the sliders from the scan's VOI so the initial-window effect
@@ -2929,10 +3205,25 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 						setWindowCenter(result.initialVoi.windowCenter);
 					}
 					acceptLoadedViewer(result);
+					// A folder with a scout or a second reconstruction opens only the largest
+					// series; say which one is showing so the study is not taken as fully loaded. The notice
+					// fades, so the toolbar keeps the cue.
+					setDicomSeriesDescription(localDicomSeriesLabel(localSeries));
+					const seriesNotice = localDicomSeriesNotice(localSeries);
+					if (seriesNotice) showToolNotice(seriesNotice);
 				} catch (e) {
-					if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
+					clearLoadDeadline();
+					if (cancelled || (e instanceof DOMException && e.name === "AbortError" && !loadTimedOut)) return;
 					console.error(e);
-					setDicomError(e instanceof Error ? e.message : "Failed to load the DICOM series.");
+					// "No DICOM image series found" is already written for the reader; the
+					// loader's own errors are about its internals.
+					setDicomError(
+						loadTimedOut
+							? "This scan has not finished after five minutes. You can choose the folder again."
+							: e instanceof NoDicomSeriesError
+								? e.message
+								: "This folder couldn't be opened. It may not be a single complete DICOM series."
+					);
 					setLoading(false);
 				}
 				return;
@@ -2955,32 +3246,51 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					setLoading(false);
 					return;
 				}
+				localNiftiUrl = rawUrl;
 				// StrictMode double-invokes this effect in dev: if this run was already
 				// cleaned up, bail BEFORE renderVisualization — otherwise this (stale) run
 				// would destroy the live run's rendering engine mid-load ("this.destroy()
 				// has been called"). renderVisualization shares one global engine.
-				if (cancelled) return;
+				if (cancelled) {
+					revokeLocalNiftiUrl();
+					return;
+				}
 				if (!rawUrl) {
-					// Deep link or reload without a file in memory — go pick one.
-					window.location.href = "/upload";
+					// Deep link or reload without a file in memory — go pick one. Replace this
+					// dead entry so Back from Upload does not land here and redirect again.
+					pageNav.replace(appRootRelativeUrl("/upload"));
 					return;
 				}
 				try {
-					const result = await renderVisualization(
-						axial_ref.current,
-						sagittal_ref.current,
-						coronal_ref.current,
-						cmap,
-						rawUrl,
-						undefined,
-						setLoading,
-						{ resourceKey: "local-nifti", signal: controller.signal }
+					// Same deadline as a dataset case: a file the loader never finishes reading
+					// must not hold the overlay up for good.
+					startLoadDeadline();
+					const result = await awaitViewerLoadOrAbort(
+						renderVisualization(
+							axial_ref.current,
+							sagittal_ref.current,
+							coronal_ref.current,
+							cmap,
+							rawUrl,
+							undefined,
+							setLoading,
+							{ resourceKey: "local-nifti", signal: controller.signal }
+						),
+						controller.signal,
+						(late) => late.dispose()
 					);
+					clearLoadDeadline();
 					acceptLoadedViewer(result);
 				} catch (e) {
-					if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
+					clearLoadDeadline();
+					if (cancelled || (e instanceof DOMException && e.name === "AbortError" && !loadTimedOut)) return;
 					console.error(e);
-					setDicomError(e instanceof Error ? e.message : "Failed to load the NIfTI file.");
+					// The loader's own errors are about its internals; say what a reader can act on.
+					setDicomError(
+						loadTimedOut
+							? "This scan has not finished after five minutes. You can choose the file again."
+							: "This file couldn't be read. It may be damaged or not a NIfTI scan."
+					);
 					setLoading(false);
 				}
 				return;
@@ -2990,7 +3300,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				!ctUrl ||
 				// Solo quiz modes are CT-only until submission unlocks their reveal masks.
 				// Requiring that hidden mask here leaves the viewer loading forever.
-				(!segUrl && !isCvCase && !isQuizPractice && !isSoloChallenge) ||
+				(!segUrl && !isCvCase && !isQuizPractice && !isSoloChallenge && !isReconstruction) ||
 				!axial_ref.current ||
 				!sagittal_ref.current ||
 				!coronal_ref.current ||
@@ -3032,7 +3342,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 							remainingMs <= 0
 						) {
 							clearLoadDeadline();
-							reportLoadError(e, "Failed to load the viewer.");
+							reportLoadError(e, loadFailedMessage);
 							break;
 						}
 
@@ -3046,14 +3356,14 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 							await waitForViewerRetry(retryDelay, controller.signal);
 						} catch (retryError) {
 							clearLoadDeadline();
-							reportLoadError(retryError, "Failed to load the viewer.");
+							reportLoadError(retryError, loadFailedMessage);
 							break;
 						}
 					}
 				}
 			} catch (e) {
 				clearLoadDeadline();
-				reportLoadError(e, "Failed to load the viewer.");
+				reportLoadError(e, loadFailedMessage);
 			}
 
 			// const { nv, cmapCopy } = await create3DVolume(
@@ -3079,6 +3389,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			viewerReadyRef.current = false;
 			controller.abort();
 			disposeLoaded?.();
+			releaseLocalDicom?.();
+			revokeLocalNiftiUrl();
 		};
 		// refs have stable identity, so they aren't real deps; the loads key off
 		// ctUrl/segUrl/labelColorMap.
@@ -3250,19 +3562,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 	// Build a shareable URL that reproduces the current view, and copy it to the clipboard.
 	const handleShare = async () => {
-		const hidden = checkState.reduce<number[]>((acc, visible, id) => {
-			if (id > 0 && !visible) acc.push(id);
-			return acc;
-		}, []);
-		const params = encodeViewerState({
-			view: viewMode,
-			ww: windowWidth,
-			wc: windowCenter,
-			opacity: opacityValue,
-			hidden,
-			crosshair: getCrosshairMm() ?? undefined,
-			hd: isHd,
-		});
+		const params = buildViewerShareParams(isHd);
 		const qs = params.toString();
 		const url = `${window.location.origin}${window.location.pathname}${qs ? `?${qs}` : ""}`;
 		try {
@@ -3286,7 +3586,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 	// Group-level "something inside is active" flags, so each collapsed toolbar dropdown
 	// still visually reflects its contents' state without having to be open.
-	const viewGroupActive = hoverIdentifyEnabled || referenceLinesOn;
+	const viewGroupActive = hoverIdentifyOn || referenceLinesOn;
 	const panelsGroupActive = showOrganDetails || showStats || showMetadata || showMeasurePanel;
 	// A dock's own close button unmounts (or hides) with the dock, which would drop
 	// focus to <body>. Closing from inside a dock hands focus back to the Panels
@@ -3959,8 +4259,18 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			setShowAnnotationToolbar(true);
 		} else if (enhance.state === "failed") {
 			setAnnotateHdLoading(false);
+			setAnnotateHdError(true);
 		}
 	}, [enhance.state, annotateHdLoading]);
+
+	// A manual HD click that fails has no overlay or error card of its own (the
+	// Annotate path above shows one), so say so once when the state turns failed.
+	useEffect(() => {
+		if (enhance.state !== "failed" || annotateHdLoading) return;
+		showToolNotice("Full resolution could not be loaded. Click HD to reload the case in full resolution.");
+		// annotateHdLoading is read only to skip the Annotate path, which has its own message.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [enhance.state, showToolNotice]);
 
 	// The Annotate button is never disabled for "HD not loaded yet" —
 	// clicking it always does something. If HD is already ready, it just
@@ -3972,14 +4282,41 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// segmentation volume exists would edit a mask on the wrong grid.
 	const handleAnnotateClick = () => {
 		if (collaborationDisabled) return;
-		const hdReadyNow = isHd || enhance.state === "done";
+		// Session/no-case volumes are served at full resolution already (the
+		// session CT endpoint has no low-res variant), so there is no HD upgrade
+		// to run — treat them as HD and just toggle the toolbar.
+		const hdReadyNow = isHd || enhance.state === "done" || !pantsCase || mirrorServed;
 		if (hdReadyNow) {
 			handleToggleAnnotationToolbar();
 			return;
 		}
+		setAnnotateHdError(false);
 		setAnnotateHdLoading(true);
-		if (enhance.state === "idle") void runEnhance();
+		// "failed" is retryable: runEnhance re-arms its own started guard on
+		// every failure path, so a fresh click here starts a fresh attempt.
+		if (enhance.state === "idle" || enhance.state === "failed") void runEnhance();
 	};
+
+	const cancelAnnotateHd = () => {
+		enhanceCancelledRef.current = true;
+		enhanceAbortRef.current?.abort();
+		setAnnotateHdLoading(false);
+	};
+	// The HD-loading overlay covers the viewer, so it takes the keyboard too:
+	// focus moves to its Cancel button and stays in the overlay, Escape
+	// cancels, and focus goes back to Annotate when it closes.
+	const hdOverlayRef = useRef<HTMLDivElement>(null);
+	const hdCancelRef = useRef<HTMLButtonElement>(null);
+	useDialogFocus(annotateHdLoading, hdOverlayRef, {
+		initialFocus: hdCancelRef,
+		onEscape: cancelAnnotateHd,
+		lockScroll: false,
+	});
+
+	// The load-failure screen covers the viewer like a dialog, so it takes the keyboard too:
+	// focus lands on its first recovery button and Tab stays there.
+	const loadErrorRef = useRef<HTMLDivElement>(null);
+	useDialogFocus(Boolean(dicomError), loadErrorRef, { lockScroll: false });
 
 	const handleToggleAnnotationToolbar = () => {
 		const opening = !showAnnotationToolbar;
@@ -4235,7 +4572,7 @@ const aiAvailableOrgans = useMemo(() => {
 				plane: pane,
 			});
 		}
-		if (!hoverIdentifyEnabled) return;
+		if (!hoverIdentifyOn) return;
 		const idx = getOrganLabelAtPoint(pane, e.clientX, e.clientY);
 		if (!idx) {
 			setHoverOrganTip((t) => (t.visible ? { ...t, visible: false } : t));
@@ -4268,14 +4605,62 @@ const aiAvailableOrgans = useMemo(() => {
 	};
 
 	const navBack = () => {
-		window.location.href = liveRoom
-			? appRootRelativeUrl(`/case/${liveRoom.metadata.case_id}`)
-			: soloChallenge
-				? `/case/${soloChallenge.challenge.case_id}`
-				: quizPractice
-					? `/case/${quizPractice.pack.case_id}`
-					: "/dashboard";
+		leavePageTo(
+			appRootRelativeUrl(
+				liveRoom
+					? `/case/${liveRoom.metadata.case_id}`
+					: soloChallenge
+						? `/case/${soloChallenge.challenge.case_id}`
+						: quizPractice
+							? `/case/${quizPractice.pack.case_id}`
+							: isLocal || sessionId
+								? "/upload"
+								: "/dashboard"
+			)
+		);
 	};
+	// Named for where it goes: a room, challenge or practice pack returns to its
+	// case, an uploaded or local scan to Upload (it is not in the dataset), everything
+	// else to the Dataset page (whose route is /dashboard).
+	const navBackLabel = liveRoom || soloChallenge || quizPractice
+		? "Back to case"
+		: isLocal || sessionId
+			? "Back to upload"
+			: "Back to dataset";
+	// All hooks are above this point, so this is the one place to swap the whole
+	// viewer for the site's own dead-end page.
+	if (caseError) {
+		return (
+			<MessagePage
+				eyebrow="Case"
+				title="This case isn't available"
+				actions={[
+					{ label: "Browse the dataset", to: "/dashboard" },
+					{ label: "Retry", onClick: () => setProbeAttempt((n) => n + 1) },
+				]}
+				alert
+			>
+				<p>Case {caseId} is not in the dataset, or its scan has been removed. Check the number in the link, or pick a case from the dataset.</p>
+			</MessagePage>
+		);
+	}
+	if (sessionError) {
+		return (
+			<MessagePage
+				eyebrow="Session"
+				title="This scan isn't available"
+				actions={[
+					{ label: "Browse the dataset", to: "/dashboard" },
+					// The popup opens over this page, so signing in lands back on
+					// the scan (the effect above probes again) instead of on /upload.
+					...(authUserId === null ? [{ label: "Sign in", onClick: () => promptAuth("signin") }] : []),
+				]}
+				alert
+			>
+				<p>The link may be incomplete, the scan may belong to another account, or it may have been removed. Sign in with the account that uploaded it, or ask the person who shared it for a new link.</p>
+			</MessagePage>
+		);
+	}
 	// const PREVIEW_IDS = [1, 17, 30, 35, 121];
 
 	// if (PREVIEW_IDS.filter((id) => id === Number(pantsCase)).length === 0) {
@@ -4329,8 +4714,8 @@ const aiAvailableOrgans = useMemo(() => {
 			>
 				<button
 					className="vp-iconbtn"
-					title="Back to dashboard"
-					aria-label="Back to dashboard"
+					title={navBackLabel}
+					aria-label={navBackLabel}
 					onClick={() => navBack()}
 					>
 						<IconHome size={20} color="white" />
@@ -4342,7 +4727,7 @@ const aiAvailableOrgans = useMemo(() => {
 					    show + edit the same friendly name the Upload page shows -- both
 					    read/write recentUploads, so renaming here updates it there too. */}
 					<div className="vp-tb-id">
-						<span className="vp-tb-id__eyebrow">{sessionId ? "Session" : "Case"}</span>
+						<span className="vp-tb-id__eyebrow">{isLocal ? "Local scan" : sessionId ? "Session" : "Case"}</span>
 						{renamingScan ? (
 							<input
 								autoFocus
@@ -4368,7 +4753,7 @@ const aiAvailableOrgans = useMemo(() => {
 							/>
 						) : (
 							<span className="vp-tb-id__val-row">
-								<span className="vp-tb-id__val" title={sessionId && scanLabel ? scanLabel : caseId}>{sessionId && scanLabel ? scanLabel : caseId}</span>
+								<span className="vp-tb-id__val" title={sessionId && scanLabel ? scanLabel : toolbarCaseLabel}>{sessionId && scanLabel ? scanLabel : toolbarCaseLabel}</span>
 								{sessionId && scanLabel && (
 									<button
 										type="button"
@@ -4492,7 +4877,7 @@ const aiAvailableOrgans = useMemo(() => {
 									className="vp-flyout vp-flyout--adjust"
 									{...adjustFlyout.panelProps("Adjust")}
 								>
-									{!isLocal && (
+									{!noSeg && (
 										<>
 											<label className="vp-tb-slider" title="Mask fill opacity">
 												<span className="vp-tb-slider__label">Fill</span>
@@ -4675,19 +5060,21 @@ const aiAvailableOrgans = useMemo(() => {
 															className="vp-flyout"
 															{...viewFlyout.panelProps("View options")}
 														>
-															<button
-																className={`vp-flyout__item ${hoverIdentifyEnabled ? "is-active" : ""}`}
-																aria-pressed={hoverIdentifyEnabled}
-																title="Name the organ under the cursor"
-																onClick={() => {
-																	setHoverIdentifyEnabled((v) => !v);
-																	setHoverOrganTip((t) => (t.visible ? { ...t, visible: false } : t));
-																	viewFlyout.close();
-																}}
-															>
-																<IconScanEye size={18} />
-																<span>Hover identify</span>
-															</button>
+															{!noSeg && !answerHidden && (
+																<button
+																	className={`vp-flyout__item ${hoverIdentifyEnabled ? "is-active" : ""}`}
+																	aria-pressed={hoverIdentifyEnabled}
+																	title="Name the organ under the cursor"
+																	onClick={() => {
+																		setHoverIdentifyEnabled((v) => !v);
+																		setHoverOrganTip((t) => (t.visible ? { ...t, visible: false } : t));
+																		viewFlyout.close();
+																	}}
+																>
+																	<IconScanEye size={18} />
+																	<span>Hover identify</span>
+																</button>
+															)}
 															<button
 																className={`vp-flyout__item ${referenceLinesOn ? "is-active" : ""}`}
 																aria-pressed={referenceLinesOn}
@@ -4813,7 +5200,7 @@ const aiAvailableOrgans = useMemo(() => {
 												</button>
 											</div>
 											
-											{!isLocal && !soloChallenge && liveRoom?.metadata.mode !== "quiz" && (() => {
+											{!noSeg && !soloChallenge && liveRoom?.metadata.mode !== "quiz" && (() => {
 												// Annotating on the low-res stream would edit a mask that
 												// doesn't line up with the eventual full-res volume — but
 												// the button itself is never disabled for that reason
@@ -4821,7 +5208,8 @@ const aiAvailableOrgans = useMemo(() => {
 												// off the HD upgrade immediately and shows a full-screen
 												// loading overlay; the toolbar only opens once that
 												// finishes (see handleAnnotateClick / annotateHdLoading).
-													const hdReady = isHd || enhance.state === "done";
+													// Session/no-case volumes have no HD variant — see handleAnnotateClick.
+													const hdReady = isHd || enhance.state === "done" || !pantsCase || mirrorServed;
 													const annotationDisabled = collaborationDisabled;
 												return (
 													<button
@@ -4890,7 +5278,7 @@ const aiAvailableOrgans = useMemo(() => {
 																			: "Record reading session"}
 																</span>
 															</button>
-															{!isLocal && (
+															{!isLocal && !sessionId && (
 																<button
 																	className="vp-flyout__item"
 																	onClick={() => {
@@ -4925,7 +5313,7 @@ const aiAvailableOrgans = useMemo(() => {
 															className="vp-flyout"
 															{...panelsFlyout.panelProps("Panels")}
 														>
-															{!isLocal && !answerHidden && (
+															{!noSeg && !answerHidden && (
 																<button
 																	className={`vp-flyout__item ${showOrganDetails ? "is-active" : ""}`}
 																	aria-pressed={showOrganDetails}
@@ -4945,7 +5333,7 @@ const aiAvailableOrgans = useMemo(() => {
 																	<span>Organs</span>
 																</button>
 															)}
-															{!isLocal && !answerHidden && (
+															{!noSeg && !answerHidden && (
 																<button
 																	className={`vp-flyout__item ${showStats ? "is-active" : ""}`}
 																	aria-pressed={showStats}
@@ -4958,7 +5346,7 @@ const aiAvailableOrgans = useMemo(() => {
 																	<span>Organ stats</span>
 																</button>
 															)}
-															{!isLocal && !answerHidden && (
+															{Boolean(pantsCase) && !isLocal && !isReconstruction && !answerHidden && (
 																<button
 																	className={`vp-flyout__item ${showMetadata ? "is-active" : ""}`}
 																	aria-pressed={showMetadata}
@@ -4996,7 +5384,7 @@ const aiAvailableOrgans = useMemo(() => {
 
 											{/* Report and Download stay standalone and separate (not grouped with
 											    each other) — distinct export actions users reach for independently. */}
-											{!isLocal && !soloChallenge && !quizPractice && !liveRoom && (
+											{!isLocal && !isCvCase && !sessionId && !soloChallenge && !quizPractice && !liveRoom && (
 												<button
 													className="vp-tool"
 													onClick={() => {
@@ -5017,12 +5405,17 @@ const aiAvailableOrgans = useMemo(() => {
 												<button
 													className={`vp-tool ${isHd || enhance.state === "done" ? "vp-tool--active" : ""} ${enhance.state === "streaming" ? "vp-tool--busy" : ""}`}
 													onClick={() => {
-														closeAnnotationToolbarIfOpen();
 														// Full-res streams in automatically and swaps in place; the button
 														// is the status + manual trigger, with reload as the failure path.
+														// The reload paths ask before touching anything (a cancelled confirm
+														// must leave the ribbon and target class alone); the in-place
+														// upgrade closes the ribbon first.
 														if (isHd) toggleHd();
-														else if (enhance.state === "idle") void runEnhance();
-														else if (enhance.state === "failed") toggleHd();
+														else if (enhance.state === "idle") {
+															closeAnnotationToolbarIfOpen();
+															void runEnhance();
+														} else if (enhance.state === "failed") toggleHd();
+														else closeAnnotationToolbarIfOpen();
 													}}
 													aria-label={
 														enhance.state === "streaming"
@@ -5051,7 +5444,7 @@ const aiAvailableOrgans = useMemo(() => {
 													</span>
 												</button>
 											)}
-											{!isLocal && !soloChallenge && !answerHidden && (
+											{!noSeg && !soloChallenge && !answerHidden && (
 												<button
 													type="button"
 													className={`vp-tool ${showAISidebar ? "vp-tool--active" : ""}`}
@@ -5108,7 +5501,7 @@ const aiAvailableOrgans = useMemo(() => {
 				<h1 className="sr-only">
 					{isLocal ? caseId : sessionId && scanLabel ? scanLabel : `${sessionId ? "Session" : "Case"} ${caseId}`}
 				</h1>
-				{!isLocal && !soloChallenge && !answerHidden && (
+				{!noSeg && !soloChallenge && !answerHidden && (
 					<OrganCheckbox
 						setCheckState={setCheckState}
 						checkState={checkState}
@@ -5176,7 +5569,7 @@ const aiAvailableOrgans = useMemo(() => {
 						style={{ ...panelStyle("axial"), ...paneGridStyle("axial") }}
 						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("axial")(e); }}>
 						<div
-							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${promptSegment.dragArmed ? " vp-pane--prompt-drag" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
+							className={`axial ${loading ? "" : "vp-pane vp-pane--axial"}${hoverIdentifyOn ? " vp-pane--hover-identify" : ""}${promptSegment.dragArmed ? " vp-pane--prompt-drag" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 							data-label="Axial"
 							ref={axial_ref}
 							onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("axial")(e); }}
@@ -5263,7 +5656,7 @@ const aiAvailableOrgans = useMemo(() => {
 						style={{ ...panelStyle("sagittal"), ...paneGridStyle("sagittal") }}
 						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("sagittal")(e); }}>
 					<div
-						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${promptSegment.dragArmed ? " vp-pane--prompt-drag" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
+						className={`sagittal ${loading ? "" : "vp-pane vp-pane--sagittal"}${hoverIdentifyOn ? " vp-pane--hover-identify" : ""}${promptSegment.dragArmed ? " vp-pane--prompt-drag" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Sagittal"
 						ref={sagittal_ref}
 						onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("sagittal")(e); }}
@@ -5351,7 +5744,7 @@ const aiAvailableOrgans = useMemo(() => {
 						style={{ ...panelStyle("coronal"), ...paneGridStyle("coronal") }}
 						onMouseUp={(e) => { smartFill.handleMouseUp(); promptSegment.handleMouseUp("coronal")(e); }}>
 					<div
-						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyEnabled ? " vp-pane--hover-identify" : ""}${promptSegment.dragArmed ? " vp-pane--prompt-drag" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
+						className={`coronal ${loading ? "" : "vp-pane vp-pane--coronal"}${hoverIdentifyOn ? " vp-pane--hover-identify" : ""}${promptSegment.dragArmed ? " vp-pane--prompt-drag" : ""}${editMode === "smartfill" || morphPicker.picking ? " vp-pane--edit-cursor" : ""}`}
 						data-label="Coronal"
 						ref={coronal_ref}
 						onClick={(e) => { handleMouseClick(e); promptSegment.handleClick("coronal")(e); }}
@@ -5456,9 +5849,9 @@ const aiAvailableOrgans = useMemo(() => {
 										</div>
 									)}
 								</div>
-							) : isLocal ? (
+							) : noSeg ? (
 								// Meshes come from the case's segmentation on the server — a local
-								// DICOM scan has none.
+								// scan or a reconstruction has none.
 								<div className="vp-3d-empty">
 									No organ meshes for this scan
 									<span>(switch to Volume rendering below)</span>
@@ -5476,7 +5869,7 @@ const aiAvailableOrgans = useMemo(() => {
 						</div>
 						{!loading && (
 							<div className="vp-3dbar" role="group" aria-label="3D rendering">
-								{!isLocal && (
+								{!noSeg && (
 									<button
 										// While the meshes are held back the pill is a dimmed label, not a
 										// selected one: a disabled white fill would read as a grey disc.
@@ -5488,7 +5881,7 @@ const aiAvailableOrgans = useMemo(() => {
 										Meshes
 									</button>
 								)}
-								{isLocal ? (
+								{noSeg ? (
 									// Nothing to switch to, so it reads as a label and not a selected pill.
 									<span className="vp-3dbar__label">Volume</span>
 								) : (
@@ -5816,11 +6209,37 @@ const aiAvailableOrgans = useMemo(() => {
 				never a window where the ribbon is up but painting would hit
 				the still-low-res segmentation grid. */}
 			{annotateHdLoading && (
-				<div className="vp-annotate-hd-overlay" role="status" aria-live="polite">
+				<div
+					ref={hdOverlayRef}
+					className="vp-annotate-hd-overlay"
+					role="dialog"
+					aria-modal="true"
+					aria-label="Loading HD resolution"
+				>
 					<div className="vp-annotate-hd-overlay__spinner" aria-hidden="true" />
-					<div className="vp-annotate-hd-overlay__label">
-						Loading HD resolution{enhance.state === "streaming" && enhance.pct != null ? ` — ${enhance.pct}%` : "…"}
+					<div className="vp-annotate-hd-overlay__label" role="status" aria-live="polite">
+						Loading HD resolution{enhance.state === "streaming" && enhance.pct != null ? `: ${enhance.pct}%` : "…"}
 					</div>
+					<button
+						ref={hdCancelRef}
+						type="button"
+						className="vp-annotate-hd-overlay__cancel"
+						aria-label="Cancel HD loading"
+						onClick={cancelAnnotateHd}
+						style={{
+							marginTop: 14,
+							padding: "7px 16px",
+							borderRadius: 5,
+							border: "1px solid rgba(255,255,255,0.35)",
+							background: "transparent",
+							color: "rgba(255,255,255,0.85)",
+							fontFamily: "inherit",
+							fontSize: 13,
+							cursor: "pointer",
+						}}
+					>
+						Cancel
+					</button>
 				</div>
 			)}
 			{toolNotice && (
@@ -5851,6 +6270,48 @@ const aiAvailableOrgans = useMemo(() => {
 					{toolNotice}
 				</div>
 			)}
+			{annotateHdError && !annotateHdLoading && (
+				<div
+					className="vp-annotate-hd-error"
+					role="alert"
+					style={{
+						position: "fixed",
+						bottom: 24,
+						left: "50%",
+						transform: "translateX(-50%)",
+						width: "max-content",
+						maxWidth: "calc(100vw - 32px)",
+						zIndex: 950,
+						background: "rgba(12,14,18,0.94)",
+						border: "1px solid rgba(255,255,255,0.16)",
+						borderRadius: 6,
+						padding: "10px 14px",
+						color: "rgba(255,255,255,0.9)",
+						fontSize: 13.5,
+						display: "flex",
+						alignItems: "center",
+						gap: 12,
+					}}
+				>
+					<span>HD load failed. Click Annotate to try again.</span>
+					<button
+						type="button"
+						aria-label="Dismiss"
+						onClick={() => setAnnotateHdError(false)}
+						style={{
+							background: "transparent",
+							border: "none",
+							color: "rgba(255,255,255,0.6)",
+							cursor: "pointer",
+							fontSize: 15,
+							lineHeight: 1,
+							padding: 2,
+						}}
+					>
+						×
+					</button>
+				</div>
+			)}
 			<AnnotationToolbar
 				open={showAnnotationToolbar}
 				// So the ribbon can draw its little pointer arrow back up to
@@ -5874,8 +6335,9 @@ const aiAvailableOrgans = useMemo(() => {
 				popupRef={annotationPopupRef}
 				sliceJumpRef={sliceJumpWrapRef}
 				// The model reads the CT from the dataset by case id; an uploaded
-				// scan's session view has none to give it.
-				modelToolsAvailable={pantsCase != null}
+				// scan's session view has none to give it, and neither does a case
+				// the viewer had to load from the public mirror.
+				modelToolsAvailable={pantsCase != null && !mirrorServed}
 			/>
 			{/* Point/box-segment APPLYING/SUCCESS/ERROR overlay. Reuses the exact
 			    same centered GuidedStepModal (blurred backdrop + "Got it") that
@@ -5945,19 +6407,28 @@ const aiAvailableOrgans = useMemo(() => {
 			/>
 			{/* A failed or stalled volume must never leave a reader on a black screen. */}
 			{dicomError && (
-				<div className="vp-loading" role="alert">
+				<div className="vp-loading" role="alert" ref={loadErrorRef}>
 					<div className="flex flex-col items-center gap-4" style={{ maxWidth: 420, textAlign: "center" }}>
 						<div className="vp-loading__text vp-loading__text--message">{dicomError}</div>
 						{isLocal ? (
-							<button className="vp-btn" onClick={() => { window.location.href = "/upload"; }}>
+							<button className="vp-btn" onClick={() => { leavePageTo(appRootRelativeUrl("/upload")); }}>
 								Back to upload
 							</button>
+						) : sessionId ? (
+							<div className="flex gap-3">
+								<button className="vp-btn" onClick={() => { window.location.reload(); }}>
+									Retry
+								</button>
+								<button className="vp-btn" onClick={() => { leavePageTo(appRootRelativeUrl("/upload")); }}>
+									Back to upload
+								</button>
+							</div>
 						) : (
 							<div className="flex gap-3">
 								<button className="vp-btn" onClick={() => { window.location.reload(); }}>
 									Retry case
 								</button>
-								<button className="vp-btn" onClick={() => { window.location.href = "/dashboard"; }}>
+								<button className="vp-btn" onClick={() => { leavePageTo(appRootRelativeUrl("/dashboard")); }}>
 									Back to dataset
 								</button>
 							</div>

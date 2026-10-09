@@ -1741,12 +1741,15 @@ export function startCine(pane: CinePane, fps = 12): boolean {
   try {
     const viewport = _getMprViewport(pane);
     if (!viewport) return false;
-    const numSlices = viewport.getNumberOfSlices();
-    if (!numSlices || numSlices < 2) return false;
+    const startSlices = viewport.getNumberOfSlices();
+    if (!startSlices || startSlices < 2) return false;
     const clampedFps = Math.max(1, Math.min(100, fps));
     _cineIntervalId = window.setInterval(() => {
       // Loop back to the first slice once past the last — viewport.scroll clamps
       // rather than wraps, so a step past the end needs an explicit jump to 0.
+      // The count is read live: the HD upgrade swaps a longer volume into the
+      // same viewport while the clip is playing.
+      const numSlices = viewport.getNumberOfSlices();
       const current = viewport.getSliceIndex();
       viewport.scroll(current >= numSlices - 1 ? -current : 1);
     }, 1000 / clampedFps);
@@ -2288,12 +2291,30 @@ async function _rebuildSegmentationRepresentations() {
   }
 }
 
+/** Put each pane back on its saved camera; a pane that is gone keeps the reset camera. */
+function _restoreCameras(engine: { getViewport: (id: string) => any }, cameras: Map<string, unknown>) {
+  for (const viewportId of MPR_VIEWPORT_IDS) {
+    const camera = cameras.get(viewportId);
+    if (!camera) continue;
+    try {
+      engine.getViewport(viewportId).setCamera(camera as never);
+    } catch {
+      /* keep the reset camera */
+    }
+  }
+}
+
+let _hdUpgradeSeq = 0;
+
 /**
  * Load the given full-res CT and swap it into every viewport in place.
  * Returns the new volumeId, or null on failure (caller keeps the current
  * volume — nothing is torn down until the new one is fully loaded).
+ * An aborted `signal` (the reader cancelled, or the deadline passed) stops the
+ * upgrade before the swap, so a download that finishes late never replaces the
+ * volume under a viewer that has already moved on.
  */
-export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | null> {
+export async function upgradeCtVolume(fullResCtUrl: string, signal?: AbortSignal): Promise<string | null> {
   const engine = currentRenderingEngine;
   const context = _activeViewerContext;
   if (!engine || !context || context.disposed) return null;
@@ -2301,19 +2322,22 @@ export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | nu
   const imageIds: string[] = [];
   let newVolumeId: string | null = null;
   let swappedToNewVolume = false;
+  const cameras = new Map<string, unknown>();
   try {
     imageIds.push(...await createNiftiImageIdsAndCacheMetadata({ url: fullResCtUrl }));
-    newVolumeId = `bodymaps-ct-${context.key}-g${context.generation}-hd`;
+    // One id per attempt, so a cancelled attempt that is still winding down can
+    // never release the volume a retry is loading.
+    newVolumeId = `bodymaps-ct-${context.key}-g${context.generation}-hd${++_hdUpgradeSeq}`;
     context.volumeIds.add(newVolumeId);
     _claimVolumeImages(context, newVolumeId, imageIds);
-    _throwIfViewerLoadStale(context);
+    _throwIfViewerLoadStale(context, signal);
     const volume = await volumeLoader.createAndCacheVolume(newVolumeId, { imageIds });
-    _throwIfViewerLoadStale(context);
+    _tagNiftiVolumeAsCt(volume);
+    _throwIfViewerLoadStale(context, signal);
     await volume.load();
-    _throwIfViewerLoadStale(context);
+    _throwIfViewerLoadStale(context, signal);
 
     // Preserve each pane's camera so the swap is visually seamless.
-    const cameras = new Map<string, unknown>();
     for (const viewportId of MPR_VIEWPORT_IDS) {
       try {
         cameras.set(viewportId, engine.getViewport(viewportId).getCamera());
@@ -2323,18 +2347,10 @@ export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | nu
     }
     await setVolumesForViewports(engine, [{ volumeId: newVolumeId }], MPR_VIEWPORT_IDS);
     swappedToNewVolume = true;
-    _throwIfViewerLoadStale(context);
-    for (const viewportId of MPR_VIEWPORT_IDS) {
-      const camera = cameras.get(viewportId);
-      if (!camera) continue;
-      try {
-        engine.getViewport(viewportId).setCamera(camera as never);
-      } catch {
-        /* keep the reset camera */
-      }
-    }
+    _throwIfViewerLoadStale(context, signal);
+    _restoreCameras(engine, cameras);
     await _rebuildSegmentationRepresentations();
-    _throwIfViewerLoadStale(context);
+    _throwIfViewerLoadStale(context, signal);
 
     // The shaded 3D volume view renders its own private copy of the CT (never the
     // shared volume — see _volume3DCopyId), so there is nothing to re-target here.
@@ -2353,6 +2369,16 @@ export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | nu
         previousVolumeId,
         restorePreviousVolume: async (volumeId) => {
           await setVolumesForViewports(engine, [{ volumeId }], MPR_VIEWPORT_IDS);
+          // A cancel can land on a live viewer, and setVolumes replaced every volume
+          // actor again: bring the masks and each pane's camera back as the swap did.
+          if (!context.disposed) {
+            _restoreCameras(engine, cameras);
+            try {
+              await _rebuildSegmentationRepresentations();
+            } catch (err) {
+              console.warn("Could not rebuild the masks after cancelling the full-res upgrade.", err);
+            }
+          }
           engine.renderViewports([...MPR_VIEWPORT_IDS]);
         },
         releaseNewVolume: () => _releaseContextVolume(context, newVolumeId!),
@@ -2386,15 +2412,26 @@ export async function upgradeCtVolume(fullResCtUrl: string): Promise<string | nu
  * here.)
  *
  * Returns true on success; false leaves the existing (low-res) labelmap in
- * place — caller should keep annotation disabled in that case.
+ * place — caller should keep annotation disabled in that case. Dropping the
+ * cached volume destroys its image data, so it cannot simply be put back: when
+ * the full-res load fails after the drop, the low-res labelmap is rebuilt from
+ * its own image ids (still in the image cache) and the masks are re-applied.
  */
-export async function upgradeSegmentationVolume(fullResSegUrl: string): Promise<boolean> {
-  if (!cache.getVolume(segmentationId)) return false;
+export async function upgradeSegmentationVolume(fullResSegUrl: string, signal?: AbortSignal): Promise<boolean> {
+  const previousVolume = cache.getVolume(segmentationId) as { imageIds?: string[] } | undefined;
+  if (!previousVolume) return false;
+  const context = _activeViewerContext;
+  const previousImageIds = [...(previousVolume.imageIds ?? [])];
+  let droppedPreviousVolume = false;
   try {
     const segmentationImageIds = await createNiftiImageIdsAndCacheMetadata({ url: fullResSegUrl });
     if (!segmentationImageIds.length) return false;
+    // Last point where stopping leaves the low-res labelmap whole: the next line
+    // drops it.
+    if (signal?.aborted) return false;
 
     cache.removeVolumeLoadObject(segmentationId);
+    droppedPreviousVolume = true;
     const newVolume = await volumeLoader.createAndCacheVolume(segmentationId, {
       imageIds: segmentationImageIds,
     });
@@ -2404,6 +2441,17 @@ export async function upgradeSegmentationVolume(fullResSegUrl: string): Promise<
     return true;
   } catch (e) {
     console.warn("Full-res segmentation upgrade failed; keeping the low-res labelmap.", e);
+    if (droppedPreviousVolume && previousImageIds.length && context && !context.disposed && _activeViewerContext === context) {
+      try {
+        // A half-loaded full-res volume may be cached under the same id.
+        if (cache.getVolume(segmentationId)) _removeCachedVolume(segmentationId);
+        const restored = await volumeLoader.createAndCacheVolume(segmentationId, { imageIds: previousImageIds });
+        await restored.load();
+        await _rebuildSegmentationRepresentations();
+      } catch (restoreError) {
+        console.warn("Could not restore the low-res labelmap after the full-res upgrade failed.", restoreError);
+      }
+    }
     return false;
   }
 }
