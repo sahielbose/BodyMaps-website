@@ -1,6 +1,7 @@
 import {
   IconArrowsShuffle,
   IconBookmark,
+  IconBookmarkFilled,
   IconDatabase,
 } from "@tabler/icons-react";
 import type { SavedCase } from "../../../../helpers/savedCases";
@@ -23,24 +24,31 @@ export default function LibraryHeader({
 }: Props) {
   return (
     <div className={styles.sectionHeader}>
-      <span>Browse Library</span>
-      <div className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2">
-        <button className={styles.actionBtn} onClick={onBrowseAll}>
-          <IconDatabase size={14} />
+      <h1 className={styles.title}>Browse the library</h1>
+      <div className={styles.actions}>
+        <button type="button" className={styles.actionBtn} onClick={onBrowseAll}>
+          <IconDatabase size={14} aria-hidden="true" />
           Browse all
         </button>
-        <button className={styles.actionBtn} onClick={onShuffle}>
-          <IconArrowsShuffle size={14} />
-          Shuffle Cases
+        <button type="button" className={styles.actionBtn} onClick={onShuffle}>
+          <IconArrowsShuffle size={14} aria-hidden="true" />
+          Shuffle cases
         </button>
+        {/* A toggle: the label is the same in both states (only the count
+            changes with the list), so the row never reflows when it flips.
+            The open state is the pressed style and a filled bookmark. */}
         <button
+          type="button"
           className={`${styles.actionBtn} ${showSaved ? styles.actionBtnActive : ""}`}
+          aria-pressed={showSaved}
           onClick={() => setShowSaved((v) => !v)}
         >
-          <IconBookmark size={14} />
-          {showSaved
-            ? "Back to browse"
-            : `Saved${savedCases.length ? ` (${savedCases.length})` : ""}`}
+          {showSaved ? (
+            <IconBookmarkFilled size={14} aria-hidden="true" />
+          ) : (
+            <IconBookmark size={14} aria-hidden="true" />
+          )}
+          Saved{savedCases.length ? ` (${savedCases.length})` : ""}
         </button>
       </div>
     </div>

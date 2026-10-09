@@ -7,20 +7,34 @@
 }
 
 .resultsText {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 12px;
-  color: rgba(0, 0, 0, 0.55);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--muted);
 }
 
 .clearBtn {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 12px;
-  color: rgba(0, 0, 0, 0.45);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--muted);
   background: transparent;
   border: none;
   cursor: pointer;
-  padding: 0;
+  /* 32px target; the negative margin keeps the text on the row's right edge. */
+  min-height: 32px;
+  padding: 0 4px;
+  margin-right: -4px;
+}
+.clearBtn:hover {
+  color: var(--ink);
+}
+.clearBtn:focus-visible {
+  outline: 2px solid #002d72;
+  outline-offset: 2px;
+}
+
+@media (max-width: 767px) {
+  .clearBtn { min-height: 40px; }
 }

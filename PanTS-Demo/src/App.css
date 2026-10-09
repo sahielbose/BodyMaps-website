@@ -88,36 +88,258 @@
   -webkit-backdrop-filter: blur(20px);
 }
 
+/* Dataset case card (components/Preview.tsx).
+   No backdrop-filter: sixteen blurred cards made scrolling and hover sweeps
+   drop frames, and over the plain page the blur showed nothing. Hover and
+   keyboard focus animate only transform and opacity; the darker border and
+   shadow live on ::before and fade in. The case ID link stretches over the
+   whole card with ::after, and the save and compare buttons sit above it.
+   Keyboard focus reveals what hover reveals. It keys on :focus-visible
+   rather than :focus-within, which would also fire after a mouse click on a
+   button and leave that card lit after the pointer has moved on. */
 .bm-card {
+  position: relative;
+  /* Keeps the link overlay's and buttons' z-indexes inside the card. */
+  isolation: isolate;
+  border-radius: 12px;
   background: rgba(0, 0, 0, 0.022);
   border: 1px solid rgba(0, 0, 0, 0.07);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  transition: border-color 0.25s, box-shadow 0.25s, transform 0.25s;
+  transition: transform 0.25s;
 }
 
-.bm-card:hover {
-  border-color: rgba(0, 0, 0, 0.22);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06),
-              0 8px 32px rgba(0, 0, 0, 0.06),
-              0 2px 8px rgba(0, 0, 0, 0.4);
+.bm-card::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: inherit;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05),
+              0 8px 32px rgba(0, 0, 0, 0.10),
+              0 2px 12px rgba(0, 0, 0, 0.10);
+  opacity: 0;
+  transition: opacity 0.25s;
+  pointer-events: none;
+}
+
+/* The card the pointer is on lifts and lights up. Fine pointers only: a touch
+   screen leaves :hover on the last thing tapped (Save, Compare), which would
+   keep that one card raised, shadowed and zoomed until the next tap elsewhere.
+   z-index lifts the hovered card's shadow over its neighbours. */
+@media (hover: hover) and (pointer: fine) {
+  .bm-card:hover {
+    z-index: 1;
+    transform: translateY(-2px);
+  }
+  .bm-card:hover::before,
+  .bm-card:hover .bm-card__line,
+  .bm-card:hover .bm-card__corner,
+  .bm-card:hover .bm-card__control {
+    opacity: 1;
+  }
+}
+/* A card whose save or compare control is on stays marked everywhere. */
+.bm-card__control.is-on {
+  opacity: 1;
+}
+/* The keyboard twins of the hover rules stay in rules of their own: a browser
+   without :has() drops a whole selector list that contains one. */
+.bm-card:has(:focus-visible) {
+  z-index: 1;
   transform: translateY(-2px);
 }
+.bm-card:has(:focus-visible)::before,
+.bm-card:has(:focus-visible) .bm-card__line,
+.bm-card:has(:focus-visible) .bm-card__corner,
+.bm-card:has(:focus-visible) .bm-card__control {
+  opacity: 1;
+}
 
+.bm-card__line {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.45), transparent);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.bm-card__thumb {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border-radius: 11px 11px 0 0;
+}
+
+.bm-card__img {
+  opacity: 0;
+  transition: opacity 0.4s, transform 0.5s;
+}
+.bm-card__img.is-shown {
+  opacity: 0.97;
+}
+@media (hover: hover) and (pointer: fine) {
+  .bm-card:hover .bm-card__img {
+    transform: scale(1.05);
+  }
+  .bm-card:hover .bm-card__img.is-shown {
+    opacity: 1;
+  }
+}
+.bm-card:has(:focus-visible) .bm-card__img {
+  transform: scale(1.05);
+}
+.bm-card:has(:focus-visible) .bm-card__img.is-shown {
+  opacity: 1;
+}
+
+/* Both thumbnail sources failed: say so instead of leaving a black block. */
+.bm-card__thumb--failed {
+  background: rgba(0, 0, 0, 0.05);
+}
+.bm-card__fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.bm-card__corner {
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+
+.bm-card__link {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 700;
+  color: #111111;
+}
+.bm-card__link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: 11px;
+}
+.bm-card__link:focus-visible {
+  outline: none;
+}
+.bm-card__link:focus-visible::after {
+  outline: 2px solid #002d72;
+  outline-offset: 2px;
+}
+
+.bm-card__control {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+/* Touch screens have no hover phase, so the controls are always shown there. */
+@media (hover: none) {
+  .bm-card__control {
+    opacity: 1;
+  }
+}
+/* White inner ring plus a blue outer ring reads on the dark scan and on the
+   light fade at the bottom of the thumbnail alike. */
+.bm-card__control:focus-visible {
+  opacity: 1;
+  outline: 2px solid #ffffff;
+  outline-offset: 0;
+  box-shadow: 0 0 0 4px #002d72;
+}
+
+.bm-card__save {
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.bm-card__save:hover {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.bm-card__compare {
+  bottom: 8px;
+  left: 8px;
+  gap: 6px;
+  padding: 5px 9px 5px 7px;
+  background: rgba(0, 0, 0, 0.5);
+}
+.bm-card__compare.is-on {
+  background: #002d72;
+}
+/* Finger-sized targets on touch. This sits after the base rules on purpose: the
+   hover: none block above has the same specificity and would lose to them. */
+@media (hover: none), (pointer: coarse) {
+  .bm-card__save {
+    width: 36px;
+    height: 36px;
+  }
+  .bm-card__compare {
+    min-height: 36px;
+    padding: 0 12px 0 10px;
+  }
+}
+
+/* Reduced motion: no lift and no zoom, the reveal alone marks the card. */
+@media (prefers-reduced-motion: reduce) {
+  .bm-card:hover,
+  .bm-card:hover .bm-card__img {
+    transform: none;
+  }
+  .bm-card:has(:focus-visible),
+  .bm-card:has(:focus-visible) .bm-card__img {
+    transform: none;
+  }
+}
+
+/* Loading placeholder with the card's box model (PreviewSkeleton). The
+   shimmer is a band on ::after moved by transform, not an animated
+   background-position, so it never repaints. */
 @keyframes bm-shimmer {
-  0%   { background-position: -600px 0; }
-  100% { background-position:  600px 0; }
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
 }
 
 .bm-card-skeleton {
-  background: linear-gradient(
-    90deg,
-    rgba(0, 0, 0, 0.02) 0px,
-    rgba(0, 0, 0, 0.05) 200px,
-    rgba(0, 0, 0, 0.02) 400px
-  );
-  background-size: 600px 100%;
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+.bm-card-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.035), transparent);
+  transform: translateX(-100%);
   animation: bm-shimmer 1.8s infinite linear;
+}
+.bm-card-skeleton__thumb {
+  aspect-ratio: 4 / 3;
+  border-radius: 11px 11px 0 0;
+  background: rgba(0, 0, 0, 0.04);
+}
+.bm-card-skeleton__text {
+  display: inline-block;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.045);
 }
 .logo {
   height: 6em;

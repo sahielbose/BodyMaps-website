@@ -16,26 +16,29 @@ export default function Pagination({ page, resultCount, pageInput, setPageInput,
   const pages = Math.max(1, Math.ceil(resultCount / PER_PAGE));
 
   return (
-    <div className={styles.pager}>
+    <nav aria-label="Pagination" className={styles.pager}>
       <button
+        type="button"
         className={pagerBtnClass(page <= 1)}
         disabled={page <= 1}
         onClick={() => onGoToPage(page - 1)}
       >
-        ‹ Prev
+        <span aria-hidden="true">‹</span> Prev
       </button>
       <span className={styles.pagerInfo}>
         Page {page.toLocaleString()} of {pages.toLocaleString()}
       </span>
       <button
+        type="button"
         className={pagerBtnClass(page >= pages)}
         disabled={page >= pages}
         onClick={() => onGoToPage(page + 1)}
       >
-        Next ›
+        Next <span aria-hidden="true">›</span>
       </button>
       <form
         className={styles.pagerGoForm}
+        noValidate
         onSubmit={(e) => {
           e.preventDefault();
           const n = parseInt(pageInput, 10);
@@ -63,6 +66,6 @@ export default function Pagination({ page, resultCount, pageInput, setPageInput,
           Go
         </button>
       </form>
-    </div>
+    </nav>
   );
 }

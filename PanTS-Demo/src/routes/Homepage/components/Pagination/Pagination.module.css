@@ -9,7 +9,7 @@
 
 .pagerBtn {
   padding: 8px 16px;
-  border-radius: 8px;
+  border-radius: 5px;
   font-family: "IBM Plex Sans", system-ui, sans-serif;
   font-size: 13px;
   font-weight: 600;
@@ -18,6 +18,15 @@
   color: #111111;
   cursor: pointer;
   outline: none;
+}
+/* Restates the resting edge: the global button:hover border would otherwise
+   turn it near-black, disabled buttons included. */
+.pagerBtn:hover {
+  border-color: rgba(0, 0, 0, 0.12);
+}
+.pagerBtn:focus-visible {
+  outline: 2px solid #002d72;
+  outline-offset: 2px;
 }
 .pagerBtnDisabled {
   background: rgba(0, 0, 0, 0.03);
@@ -43,7 +52,7 @@
 .pagerInput {
   width: 132px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 5px;
   border: 1px solid rgba(0, 0, 0, 0.12);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 12px;
@@ -51,8 +60,29 @@
   background: #ffffff;
   outline: none;
 }
+.pagerInput::placeholder {
+  color: var(--muted-2);
+}
+.pagerInput:focus-visible {
+  border-color: #002d72;
+  outline: 2px solid #002d72;
+  outline-offset: 1px;
+}
 
 @media (max-width: 767px) {
-  .pagerGoForm { display: none; }
   .pagerInfo { min-width: unset; }
+  /* The Go form wraps onto its own centred row. 16px stops iOS zooming on
+     focus; 40px is a touch-sized target. */
+  .pagerGoForm {
+    flex-basis: 100%;
+    justify-content: center;
+    margin-left: 0;
+  }
+  .pagerInput {
+    width: 168px;
+    min-height: 40px;
+    box-sizing: border-box;
+    font-size: 16px;
+  }
+  .pagerGoForm .pagerBtn { min-height: 40px; }
 }

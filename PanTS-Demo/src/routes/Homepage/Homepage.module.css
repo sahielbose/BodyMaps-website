@@ -1,10 +1,96 @@
+/* ── Page column ──
+   Top padding matches UploadPage's .upload-main. The bottom padding grows
+   while the compare tray is open so the last row is not stuck under it. */
+.main {
+  padding: 36px 24px 64px;
+}
+.mainTrayOpen {
+  padding-bottom: 128px;
+}
+
 /* ── Library panel container ── */
 .libraryCard {
   background: #f5f5f5;
   border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 16px;
-  padding: 24px 32px;
+  border-radius: 8px;
+  /* The same top offset and card padding as the Upload panel, so the panel
+     does not jump when the tab changes. */
+  padding: 28px 32px 32px;
   margin-bottom: 24px;
+}
+
+/* ── Grid fetch error ──
+   The Retry button carries its own colours: Tailwind utilities lose to the
+   unlayered global button rule in index.css, which had made it navy text on
+   a near-black pill. */
+/* Stable focus target for the results: Clear filters, Retry and the tray's
+   Clear unmount the control that had focus, so focus moves here instead of
+   dropping to the page body. Programmatic only, so no ring. */
+.results:focus {
+  outline: none;
+}
+
+.fetchError {
+  padding: 48px 0;
+  text-align: center;
+}
+.fetchErrorText {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  color: var(--muted);
+}
+.retryBtn {
+  margin-top: 12px;
+  padding: 8px 16px;
+  border: 1px solid #002d72;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #002d72;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.retryBtn:hover {
+  border-color: #002d72;
+  background: rgba(0, 45, 114, 0.06);
+}
+.retryBtn:focus-visible {
+  outline: 2px solid #002d72;
+  outline-offset: 2px;
+}
+
+/* ── Compare tray shortcut ──
+   First control in the results. Off screen (like the skip link in index.css)
+   until keyboard focus, then a blue button above the grid. Fixed like the skip
+   link, so the translate moves it off the viewport instead of up over the
+   summary row. A module class, not
+   Tailwind's sr-only: both the global button rule and liveRooms.css's global
+   .sr-only are unlayered and would beat the utilities. */
+.trayShortcut {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: calc(var(--z-modal) + 1);
+  transform: translateY(-200%);
+  padding: 8px 14px;
+  border: 1px solid #002d72;
+  border-radius: 5px;
+  background: #002d72;
+  color: #ffffff;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+}
+.trayShortcut:focus {
+  position: static;
+  transform: none;
+  margin-bottom: 12px;
+  background: #002d72;
+  color: #ffffff;
+  outline: 2px solid #002d72;
+  outline-offset: 2px;
 }
 
 /* ── Ambient background orbs ── */
@@ -40,5 +126,17 @@
 }
 
 @media (max-width: 767px) {
-  .libraryCard { padding: 16px; }
+  /* The tray is three rows plus an error line on a phone. */
+  .mainTrayOpen { padding-bottom: 200px; }
+}
+
+/* From 640px down the footer is static and follows <main>, so the tray would
+   sit over it at the end of the page; the padding goes after it instead.
+   The top offset and card padding tighten here too, where UploadPage.css
+   tightens .upload-main and .upload-card, so the two panels keep lining up. */
+@media (max-width: 640px) {
+  .main { padding-top: 24px; }
+  .libraryCard { padding: 20px 16px; }
+  .mainTrayOpen { padding-bottom: 64px; }
+  .pageTrayOpen { padding-bottom: 200px; }
 }

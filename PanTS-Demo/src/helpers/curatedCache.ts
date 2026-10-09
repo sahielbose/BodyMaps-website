@@ -30,7 +30,8 @@ const UNKNOWN_DEMOGRAPHIC_VALUES = new Set([
   "unknown",
 ]);
 
-function hasKnownDemographicValue(value: string | number | null | undefined): boolean {
+/** False for the placeholder values the metadata uses when a field was not recorded. */
+export function hasKnownDemographicValue(value: string | number | null | undefined): boolean {
   if (value == null) return false;
   return !UNKNOWN_DEMOGRAPHIC_VALUES.has(String(value).trim().toLowerCase());
 }
@@ -64,16 +65,21 @@ function doFetch(): Promise<SearchItem[]> {
       .catch(() => null);
 
   return Promise.all([grab(1), grab(0)]).then(([tumorRes, noTumorRes]) => {
-    if (tumorRes == null && noTumorRes == null) {
-      // Total failure (both requests errored/non-OK) -- don't poison the cache
-      // with an empty result; let the next call retry instead of showing an
-      // empty grid for the rest of the session.
+    if (tumorRes == null || noTumorRes == null) {
+      // Either request errored or came back non-OK. Caching the half that did
+      // arrive would pin a lopsided grid (say 4 tumor-only cards) for the whole
+      // session, with no error and no Retry. Throw so nothing is cached, the page
+      // shows its error card, and the next call retries both.
       throw new Error("curated fetch failed");
     }
     const tumorItems = prioritizeKnownDemographics(tumorRes?.items ?? []).slice(0, HALF);
     const noTumorItems = prioritizeKnownDemographics(noTumorRes?.items ?? []).slice(0, HALF);
     const items = interleave(tumorItems, noTumorItems);
-    cachedItems = items;
+    // Backend reachable but returned no cases (e.g. PANTS_PATH unset, transient
+    // empty response). That is an empty dataset, not a failure, so resolve to an
+    // empty list the page can say so about, but don't cache it; let the next
+    // mount retry.
+    if (items.length > 0) cachedItems = items;
     return items;
   });
 }

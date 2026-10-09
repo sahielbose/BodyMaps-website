@@ -1,9 +1,15 @@
 import { useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
+import { IconPhotoOff } from "@tabler/icons-react";
 import { API_BASE } from "../helpers/constants";
+import { formatSex, formatTumor } from "../helpers/demographics";
 import { prefetchViewer } from "../helpers/prefetchViewer";
 import type { CaseId } from "../helpers/search";
 import type { PreviewType } from "../types";
+
+// Hover effects, the keyboard-focus reveal of the save and compare buttons and
+// the stretched case link are CSS (the .bm-card rules in App.css), so a
+// keyboard user sees what a mouse user sees and hovering re-renders nothing.
 
 type Props = {
 	id: CaseId;
@@ -29,10 +35,8 @@ export default function Preview({
 	reveal = true,
 	onSettled,
 }: Props) {
-	const navigate = useNavigate();
 	const [imgLoaded, setImgLoaded] = useState(false);
 	const [imgError, setImgError] = useState(false);
-	const [hovered, setHovered] = useState(false);
 	// Report "settled" exactly once (load or terminal error) so the grid can count
 	// down to an all-at-once reveal without a broken thumbnail double-counting.
 	const settledRef = useRef(false);
@@ -70,61 +74,43 @@ export default function Preview({
 			settle(); // count it as settled so one dead thumbnail can't stall the grid
 		}
 	};
-	const tumorLabel =
-		previewMetadata.tumor === 1
-			? "Tumor"
-			: previewMetadata.tumor === 0
-				? "No Tumor"
-				: "Unknown";
+	const tumorLabel = formatTumor(previewMetadata.tumor);
+	// Deep shades so the 11px label clears 4.5:1 on the card background.
 	const tumorColor =
 		previewMetadata.tumor === 1
-			? "#ef4444"
+			? "#b91c1c"
 			: previewMetadata.tumor === 0
-				? "#10b981"
-				: "#6b7280";
+				? "#047857"
+				: "#5a6175";
+	// Fields the metadata does not record are left off the card rather than
+	// shown as a placeholder dash. Age 0 is how an unknown age arrives.
+	const sex = formatSex(previewMetadata.sex);
+	const age = previewMetadata.age > 0 ? previewMetadata.age : null;
+	// Only reveal once the image is loaded AND the grid has released the batch,
+	// so cards appear together rather than popping in.
+	const shown = imgLoaded && reveal;
 
 	return (
 		<div
-			className="bm-card rounded-xl overflow-hidden cursor-pointer group"
-			style={
-				hovered
-					? {
-							borderColor: "rgba(0,0,0,0.18)",
-							boxShadow:
-								"0 0 0 1px rgba(0,0,0,0.05), 0 8px 32px rgba(0,0,0,0.10), 0 2px 12px rgba(0,0,0,0.10)",
-							transform: "translateY(-2px)",
-					  }
-					: {}
-			}
+			className="bm-card"
 			onMouseEnter={() => {
-				setHovered(true);
 				// The viewer JavaScript is small enough to warm safely. Do not prefetch a
 				// CT here: scans are tens of MB, and background downloads can starve the
 				// case the reader actually clicks (or reset its connection).
 				prefetchViewer();
 			}}
-			onMouseLeave={() => {
-				setHovered(false);
-			}}
-			onClick={() => navigate(`/case/${id}`)}
 		>
-			{/* Gradient accent line — slides in on hover */}
-			<div
-				style={{
-					height: "1px",
-					background:
-						"linear-gradient(90deg, transparent, rgba(0,0,0,0.45), transparent)",
-					opacity: hovered ? 1 : 0,
-					transition: "opacity 0.3s",
-				}}
-			/>
+			{/* Gradient accent line — fades in on hover and keyboard focus */}
+			<div className="bm-card__line" aria-hidden="true" />
 
 			{/* Thumbnail */}
-			<div
-				className="relative overflow-hidden"
-				style={{ aspectRatio: "4/3", background: "#000" }}
-			>
-				{!imgError && (
+			<div className={`bm-card__thumb${imgError ? " bm-card__thumb--failed" : ""}`}>
+				{imgError ? (
+					<div className="bm-card__fallback">
+						<IconPhotoOff size={22} stroke={1.5} aria-hidden="true" />
+						<span>Preview unavailable</span>
+					</div>
+				) : (
 					<img
 						src={thumbUrl}
 						alt={`Case ${id} CT scan`}
@@ -138,18 +124,10 @@ export default function Preview({
 							settle();
 						}}
 						onError={handleImgError}
-						className="w-full h-full object-contain object-center"
-						style={{
-							objectPosition: "center",
-							// Only reveal once the image is loaded AND the grid has released
-							// the batch, so cards appear together rather than popping in.
-							opacity: imgLoaded && reveal ? (hovered ? 1 : 0.97) : 0,
-							transform: hovered ? "scale(1.05)" : "scale(1)",
-							transition: "opacity 0.4s, transform 0.5s",
-						}}
+						className={`bm-card__img w-full h-full object-contain object-center${shown ? " is-shown" : ""}`}
 					/>
 				)}
-				{(!imgLoaded || !reveal) && !imgError && (
+				{!shown && !imgError && (
 					<div className="absolute inset-0 flex items-center justify-center">
 						<div
 							className="w-7 h-7 rounded-full animate-spin"
@@ -162,19 +140,22 @@ export default function Preview({
 				)}
 
 				{/* Bottom fade to card bg */}
-				<div
-					className="absolute inset-0"
-					style={{
-						background:
-							"linear-gradient(to top, #f5f5f5 0%, rgba(245,245,245,0.5) 45%, transparent 80%)",
-					}}
-				/>
+				{!imgError && (
+					<div
+						className="absolute inset-0"
+						style={{
+							background:
+								"linear-gradient(to top, #f5f5f5 0%, rgba(245,245,245,0.5) 45%, transparent 80%)",
+						}}
+					/>
+				)}
 
-				{/* Corner brackets — appear on hover */}
+				{/* Corner brackets — appear on hover and keyboard focus */}
 				{(["tl", "tr", "bl", "br"] as const).map((corner) => (
 					<div
 						key={corner}
-						className="absolute w-4 h-4"
+						className="bm-card__corner absolute w-4 h-4"
+						aria-hidden="true"
 						style={{
 							top: corner[0] === "t" ? "8px" : "auto",
 							bottom: corner[0] === "b" ? "8px" : "auto",
@@ -184,43 +165,20 @@ export default function Preview({
 							borderBottom: corner[0] === "b" ? "1.5px solid rgba(255,255,255,0.55)" : "none",
 							borderLeft: corner[1] === "l" ? "1.5px solid rgba(255,255,255,0.55)" : "none",
 							borderRight: corner[1] === "r" ? "1.5px solid rgba(255,255,255,0.55)" : "none",
-							opacity: hovered ? 1 : 0,
-							transition: "opacity 0.25s",
 						}}
 					/>
 				))}
 
-				{/* Bookmark toggle — always visible once saved, otherwise reveals on hover */}
-				{onToggleSave && (saved || hovered) && (
+				{/* Bookmark toggle. Always in the tab order; shown once saved, on touch
+				    devices (no hover), and on hover or keyboard focus otherwise. */}
+				{onToggleSave && (
 					<button
 						type="button"
-						aria-label={saved ? `Remove case ${id} from saved` : `Save case ${id}`}
-						title={saved ? "Saved — click to remove" : "Save case"}
-						onClick={(e) => {
-							e.stopPropagation();
-							onToggleSave();
-						}}
-						className="absolute flex items-center justify-center"
-						style={{
-							top: "8px",
-							right: "8px",
-							width: "30px",
-							height: "30px",
-							padding: 0,
-							borderRadius: "8px",
-							border: "none",
-							outline: "none",
-							cursor: "pointer",
-							zIndex: 2,
-							background: "rgba(0,0,0,0.45)",
-							transition: "background 0.15s",
-						}}
-						onMouseEnter={(e) => {
-							(e.currentTarget as HTMLElement).style.background = "rgba(0,0,0,0.72)";
-						}}
-						onMouseLeave={(e) => {
-							(e.currentTarget as HTMLElement).style.background = "rgba(0,0,0,0.45)";
-						}}
+						aria-label={`Save case ${id}`}
+						aria-pressed={saved}
+						title={saved ? "Saved, click to remove" : "Save case"}
+						onClick={onToggleSave}
+						className={`bm-card__control bm-card__save${saved ? " is-on" : ""}`}
 					>
 						<svg
 							width="16"
@@ -236,32 +194,16 @@ export default function Preview({
 
 				{/* Compare selector — a labelled checkbox in the bottom-left (kept away from the
 				    top-right bookmark to avoid mis-taps). A checkbox + text reads as "select to
-				    compare" far more clearly than a bare icon. Reveals on hover; stays + turns
-				    blue once selected. */}
-				{onToggleCompare && (compareSelected || hovered) && (
+				    compare" far more clearly than a bare icon. Revealed like the bookmark;
+				    stays and turns JHU blue once selected. */}
+				{onToggleCompare && (
 					<button
 						type="button"
-						aria-label={compareSelected ? `Remove case ${id} from comparison` : `Add case ${id} to comparison`}
+						aria-label={`Compare case ${id}`}
 						aria-pressed={compareSelected}
-						title={compareSelected ? "Selected to compare — click to remove" : "Select to compare"}
-						onClick={(e) => {
-							e.stopPropagation();
-							onToggleCompare();
-						}}
-						className="absolute flex items-center"
-						style={{
-							bottom: "8px",
-							left: "8px",
-							gap: "6px",
-							padding: "5px 9px 5px 7px",
-							borderRadius: "8px",
-							border: "none",
-							outline: "none",
-							cursor: "pointer",
-							zIndex: 2,
-							background: compareSelected ? "#2563eb" : "rgba(0,0,0,0.5)",
-							transition: "background 0.15s",
-						}}
+						title={compareSelected ? "Selected to compare, click to remove" : "Select to compare"}
+						onClick={onToggleCompare}
+						className={`bm-card__control bm-card__compare${compareSelected ? " is-on" : ""}`}
 					>
 						<span
 							className="flex items-center justify-center"
@@ -274,7 +216,7 @@ export default function Preview({
 							}}
 						>
 							{compareSelected && (
-								<svg width="10" height="10" viewBox="0 0 24 24" aria-hidden="true" style={{ display: "block", fill: "none", stroke: "#2563eb", strokeWidth: 4, strokeLinecap: "round", strokeLinejoin: "round" }}>
+								<svg width="10" height="10" viewBox="0 0 24 24" aria-hidden="true" style={{ display: "block", fill: "none", stroke: "#002d72", strokeWidth: 4, strokeLinecap: "round", strokeLinejoin: "round" }}>
 									<path d="M5 13l4 4L19 7" />
 								</svg>
 							)}
@@ -286,23 +228,23 @@ export default function Preview({
 				)}
 			</div>
 
-			{/* Data row */}
+			{/* Data row. The case ID is the card's link; its ::after covers the whole
+			    card, so a click anywhere opens the case and so do Enter and a
+			    middle-click or cmd-click into a new tab. */}
 			<div className="p-3">
 				<div className="mb-1">
-					<span
-						className="font-bold"
-						style={{ fontSize: "13px", color: "#111111" }}
-					>
+					<Link to={`/case/${id}`} className="bm-card__link" onFocus={prefetchViewer}>
 						{caseIdStr}
-					</span>
+					</Link>
 				</div>
 
+				{/* Wraps rather than spilling past the card edge on the narrowest cards. */}
 				<div
-					className="flex items-center gap-2"
+					className="flex flex-wrap items-center gap-x-2 gap-y-0.5"
 					style={{ fontSize: "11px", fontWeight: 700, color: "#111111" }}
 				>
-					<span>Sex {previewMetadata.sex || "—"}</span>
-					<span>Age {previewMetadata.age || "—"}y</span>
+					{sex && <span>{sex}</span>}
+					{age !== null && <span>Age {age}y</span>}
 					<span
 						style={{
 							color: tumorColor,
@@ -311,6 +253,30 @@ export default function Preview({
 					>
 						{tumorLabel}
 					</span>
+				</div>
+			</div>
+		</div>
+	);
+}
+
+// Loading placeholder with the card's exact box model (1px line, 4:3
+// thumbnail, data row with the same type sizes), so the grid keeps its height
+// when the real cards replace it.
+export function PreviewSkeleton() {
+	return (
+		<div className="bm-card-skeleton" aria-hidden="true">
+			<div style={{ height: "1px" }} />
+			<div className="bm-card-skeleton__thumb" />
+			<div className="p-3">
+				<div className="mb-1">
+					<span className="bm-card-skeleton__text" style={{ fontSize: "13px", width: "62%" }}>
+						&nbsp;
+					</span>
+				</div>
+				<div className="flex items-center gap-2" style={{ fontSize: "11px" }}>
+					<span className="bm-card-skeleton__text" style={{ width: "22%" }}>&nbsp;</span>
+					<span className="bm-card-skeleton__text" style={{ width: "24%" }}>&nbsp;</span>
+					<span className="bm-card-skeleton__text" style={{ width: "26%" }}>&nbsp;</span>
 				</div>
 			</div>
 		</div>

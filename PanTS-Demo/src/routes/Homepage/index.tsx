@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import Header from "../../components/Header";
 import { useDashboard } from "./hooks/useDashboard";
 import LibraryHeader from "./components/LibraryHeader";
@@ -13,9 +14,37 @@ import { PER_PAGE } from "./constants";
 
 export default function Homepage() {
   const dash = useDashboard();
+  // The buttons that replace the list (Clear filters, Retry, the tray's Clear)
+  // unmount with focus on them; this region outlives the swap, so focus goes here.
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const focusResults = () => resultsRef.current?.focus({ preventScroll: true });
+  const resetFilters = () => {
+    dash.handleResetFilters();
+    focusResults();
+  };
+  const retry = () => {
+    dash.retryLast();
+    focusResults();
+  };
+  // Paging swaps the cards and scrolls to the top, so focus follows it rather
+  // than staying on the pager at the bottom.
+  const goToPage = (p: number) => {
+    dash.goToPage(p);
+    focusResults();
+  };
+  const clearCompare = () => {
+    dash.handleClearCompare();
+    focusResults();
+  };
 
+  // overflow-x-clip, not hidden: hidden makes this wrapper a scroll container
+  // and stops the sticky header from sticking.
   return (
-    <div className="min-h-screen bg-white text-black relative overflow-x-hidden flex flex-col">
+    <div
+      className={`min-h-screen bg-white text-black relative overflow-x-clip flex flex-col ${
+        dash.compareIds.length > 0 ? styles.pageTrayOpen : ""
+      }`}
+    >
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
         <div className={styles.orb1} />
         <div className={styles.orb2} />
@@ -24,7 +53,11 @@ export default function Homepage() {
 
       <Header />
 
-      <section className="mx-auto w-full max-w-6xl flex-1 px-6 pt-8 pb-16">
+      <main
+        className={`mx-auto w-full max-w-6xl flex-1 ${styles.main} ${
+          dash.compareIds.length > 0 ? styles.mainTrayOpen : ""
+        }`}
+      >
         <div className={styles.libraryCard}>
           <LibraryHeader
             showSaved={dash.showSaved}
@@ -54,26 +87,41 @@ export default function Homepage() {
 
         </div>
 
-        {!dash.showSaved && dash.resultCount !== null && (
+        {!dash.showSaved && dash.resultCount !== null && dash.resultCount > 0 && (
           <ResultsSummary
             resultCount={dash.resultCount}
             page={dash.page}
-            onReset={dash.handleResetFilters}
+            hasFilters={dash.appliedFilterCount > 0}
+            onReset={resetFilters}
           />
         )}
 
-        <CaseGrid
-          showSaved={dash.showSaved}
-          savedCases={dash.savedCases}
-          loading={dash.loading}
-          resultCount={dash.resultCount}
-          previewIds={dash.previewIds}
-          previewMetadata={dash.previewMetadata}
-          savedIds={dash.savedIds}
-          compareIds={dash.compareIds}
-          onToggleSave={dash.handleToggleSave}
-          onToggleCompare={dash.toggleCompare}
-        />
+        <div ref={resultsRef} tabIndex={-1} role="region" aria-label="Cases" className={styles.results}>
+          {!dash.showSaved && !dash.loading && dash.fetchError ? (
+            <div className={styles.fetchError} role="alert">
+              <p className={styles.fetchErrorText}>{dash.fetchError}</p>
+              <button type="button" onClick={retry} className={styles.retryBtn}>
+                Retry
+              </button>
+            </div>
+          ) : (
+            <CaseGrid
+              showSaved={dash.showSaved}
+              savedCases={dash.savedCases}
+              loading={dash.loading}
+              skeletonCount={dash.skeletonCount}
+              resultCount={dash.resultCount}
+              hasFilters={dash.appliedFilterCount > 0}
+              onResetFilters={resetFilters}
+              previewIds={dash.previewIds}
+              previewMetadata={dash.previewMetadata}
+              savedIds={dash.savedIds}
+              compareIds={dash.compareIds}
+              onToggleSave={dash.handleToggleSave}
+              onToggleCompare={dash.toggleCompare}
+            />
+          )}
+        </div>
 
         {!dash.showSaved && dash.resultCount !== null && dash.resultCount > PER_PAGE && (
           <Pagination
@@ -81,10 +129,10 @@ export default function Homepage() {
             resultCount={dash.resultCount}
             pageInput={dash.pageInput}
             setPageInput={dash.setPageInput}
-            onGoToPage={dash.goToPage}
+            onGoToPage={goToPage}
           />
         )}
-      </section>
+      </main>
 
       {dash.compareIds.length > 0 && (
         <CompareTray
@@ -92,7 +140,7 @@ export default function Homepage() {
           compareTyped={dash.compareTyped}
           setCompareTyped={dash.setCompareTyped}
           onSubmitTyped={dash.submitTypedCompare}
-          onClear={dash.handleClearCompare}
+          onClear={clearCompare}
           onCompare={dash.handleCompare}
         />
       )}

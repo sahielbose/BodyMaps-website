@@ -1,10 +1,8 @@
 .sectionHeader {
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 16px;
   font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: #8f8f8f;
+  color: var(--ink);
   margin-bottom: 20px;
   display: flex;
   justify-content: space-between;
@@ -13,20 +11,48 @@
   gap: 12px;
 }
 
+/* The page's h1, sized like the panel heading it replaced (the global h1
+   rule would make it 3.2em). */
+.title {
+  margin: 0;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+/* The three view actions. Right-aligned beside the title on wide panes; on a
+   phone the group takes the full row and packs from the left edge, so if a
+   narrow pane wraps it the overflow lines up with the heading and the fields
+   below instead of sitting orphaned on the right. */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 20px;
+  /* The buttons' 4px side padding sits inside the label edge; pull the group
+     out so the last label ends on the panel's content edge (the phone rule
+     pulls the left side instead). */
+  margin-right: -4px;
+}
+
 .actionBtn {
-  font-size: 11px;
-  color: rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  color: var(--muted);
   background: transparent;
   border: none;
   cursor: pointer;
-  text-transform: none;
-  letter-spacing: 0.04em;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: var(--font-sans);
+  font-weight: 500;
   display: flex;
   align-items: center;
   gap: 6px;
   transition: color 0.2s;
-  padding: 0;
+  /* A 32px hit area (40px on phones); the wrapper's gap keeps the row's look. */
+  min-height: 32px;
+  padding: 0 4px;
 }
 .actionBtn:hover {
   color: rgba(0, 0, 0, 0.85);
@@ -37,15 +63,39 @@
 .actionBtnActive:hover {
   color: rgba(0, 0, 0, 0.85);
 }
-
-.matchTotal {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 11px;
-  font-weight: 400;
-  letter-spacing: 0.04em;
-  color: rgba(0, 0, 0, 0.45);
+.actionBtn:focus-visible {
+  outline: 2px solid #002d72;
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 @media (max-width: 767px) {
   .sectionHeader { margin-bottom: 16px; }
+  /* One row for all three even with a count ("Saved (12)" is 7px wider than
+     "Saved (3)", and a wrapped row makes the panel 40px taller than with no
+     saved cases). Tight 2px button padding and a 4px minimum gap fit two
+     digits in the 293px pane at 375px with 12px to spare (a third digit adds
+     about 7px); space-between spreads any slack, so the first label sits on
+     the heading's left edge and the last on the panel's right edge. The -2px
+     margins undo the padding, and the extra 4px of width is what lets the
+     right one pull the box out (a negative margin alone does not widen it). */
+  .actions {
+    width: calc(100% + 4px);
+    justify-content: space-between;
+    gap: 0 4px;
+    margin-left: -2px;
+    margin-right: -2px;
+  }
+  .actionBtn {
+    min-height: 40px;
+    padding: 0 2px;
+    white-space: nowrap;
+  }
+}
+
+/* A phone under 375px (a 278px pane at 360, 238px at 320) cannot hold three
+   labels, their icons and a count, so the icons go; the labels and the pressed
+   colour still tell the actions apart. */
+@media (max-width: 374px) {
+  .actionBtn svg { display: none; }
 }

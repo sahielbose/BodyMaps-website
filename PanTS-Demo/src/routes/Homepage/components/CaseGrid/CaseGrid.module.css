@@ -1,11 +1,38 @@
+/* Same face as the copy around it, in the muted ink that clears 4.5:1. */
 .emptyState {
   padding: 48px 0;
   text-align: center;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: var(--font-sans);
   font-size: 13px;
-  color: rgba(0, 0, 0, 0.5);
+  color: var(--muted);
 }
 
-.skeleton {
-  aspect-ratio: 3 / 4;
+/* Focus lands here (not shown) when the last saved case is removed. */
+.emptyState:focus {
+  outline: none;
+}
+
+.emptyText {
+  margin: 0;
+}
+
+.emptyAction {
+  margin-top: 12px;
+  padding: 8px 16px;
+  border: 1px solid #002d72;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #002d72;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.emptyAction:hover {
+  border-color: #002d72;
+  background: rgba(0, 45, 114, 0.06);
+}
+.emptyAction:focus-visible {
+  outline: 2px solid #002d72;
+  outline-offset: 2px;
 }

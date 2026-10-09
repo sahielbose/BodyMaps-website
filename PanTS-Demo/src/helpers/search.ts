@@ -61,10 +61,12 @@ export const caseIdToApiId = (id: CaseId): string =>
 		? id
 		: `PanTS_${String(id).padStart(8, "0")}`;
 
-// Build the /api/search (and /api/facets, and URL) query string from the active
-// filters. Mirrors the backend params accepted by apply_filters: sex[]/age_bin[]/
-// manufacturer[]/ct_phase[]/site_nat[]/year[] (multi), tumor (1/0, omitted for "any"),
-// plus optional sort_by / per_page.
+// Build the /api/search (and URL) query string from the active filters. The
+// /api/facets request never carries filters: the pill counts stay the unfiltered
+// baseline on purpose (see loadFacetOptions in useDashboard). Mirrors the backend
+// params accepted by apply_filters: sex[]/age_bin[]/manufacturer[]/ct_phase[]/
+// site_nat[]/year[] (multi), tumor (1/0, omitted for "any"), plus optional
+// sort_by / per_page.
 export const buildSearchParams = (
 	filters: SearchFilters,
 	opts: { sortBy?: string; perPage?: number } = {}

@@ -2,10 +2,13 @@ import type { TumorFilter, MultiFilterKey } from "../../helpers/search";
 
 export const FACET_GROUPS: { key: MultiFilterKey; field: string; title: string }[] = [
   { key: "manufacturer", field: "manufacturer", title: "Manufacturer" },
-  { key: "ctPhase", field: "ct_phase", title: "CT Phase" },
+  { key: "ctPhase", field: "ct_phase", title: "CT phase" },
   { key: "siteNat", field: "site_nat", title: "Site" },
-  { key: "year", field: "year", title: "Study Year" },
+  { key: "year", field: "year", title: "Study year" },
 ];
+
+// id of the Advanced filters panel, for the toggle's aria-controls.
+export const FILTER_PANEL_ID = "dataset-filters";
 
 // Number of cards in the curated landing strip (and skeleton placeholders).
 export const CARD_COUNT = 8;
