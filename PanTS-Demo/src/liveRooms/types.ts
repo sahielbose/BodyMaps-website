@@ -166,6 +166,8 @@ export type LiveRoomController = {
 	participantId: string;
 	name: string;
 	connectionState: LiveRoomConnectionState;
+	/** Server clock minus this device's clock, in ms; add it to Date.now() before comparing with a server timestamp. */
+	clockOffsetMs?: number;
 	participants: LiveRoomParticipant[];
 	state: LiveRoomDurableState;
 	pendingEvents: LiveRoomEventDelivery[];
@@ -192,7 +194,8 @@ export type LiveRoomController = {
 	requestUndo: () => void;
 	follow: (participantId: string) => void;
 	stopFollowing: () => void;
-	copyShareLink: () => Promise<void>;
+	/** Resolves true only when the clipboard write succeeded; false means the link was only offered in a prompt. */
+	copyShareLink: () => Promise<boolean>;
 	downloadExport: (kind: "zip" | "pdf") => Promise<void>;
 	startQuiz: () => boolean;
 	answerQuiz: (choiceId: string) => boolean;

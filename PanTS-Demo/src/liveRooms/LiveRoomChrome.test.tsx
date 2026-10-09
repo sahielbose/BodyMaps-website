@@ -69,7 +69,7 @@ describe("Live Room collaboration chrome", () => {
 		expect(screen.getByText("Ronit (you)")).toBeInTheDocument();
 		expect(screen.getByText("Maya")).toBeInTheDocument();
 		expect(screen.queryByText(/owner|host|admin/i)).not.toBeInTheDocument();
-		fireEvent.click(screen.getByRole("button", { name: "Follow" }));
+		fireEvent.click(screen.getByRole("button", { name: "Follow Maya" }));
 		expect(room.follow).toHaveBeenCalledWith("peer");
 	});
 
@@ -78,7 +78,28 @@ describe("Live Room collaboration chrome", () => {
 		render(<LiveRoomDock room={room} crosshair={[1, 2, 3]} activePlane="axial" onClose={vi.fn()} />);
 		fireEvent.click(screen.getByRole("tab", { name: /Chat/ }));
 		expect(screen.getByLabelText("Room message")).toBeDisabled();
-		expect(screen.getByText(/not being saved/i)).toBeInTheDocument();
+		expect(screen.getByText("Reconnecting. Edits are paused.")).toBeInTheDocument();
+	});
+
+	it("keeps the quiz countdown out of the live region and announces answers and phases", () => {
+		const quiz = {
+			phase: "question_open" as const, question_index: 0, question_count: 4,
+			current_question: { id: "organ", prompt: "Which organ?", choices: [{ id: "pancreas", label: "Pancreas" }] },
+			deadline_at: "2099-01-01T00:00:00Z", remaining_seconds: 30, timer_paused: false,
+			response_count: 1, eligible_count: 3, reveal: null, leaderboard: [],
+			consistency_summary: { consistent: 0, inconsistent: 0, incomplete: 0 }, round_completed: false, host_connected: true,
+		};
+		const room = controller({
+			metadata: { ...controller().metadata, mode: "quiz", quiz_pack_id: "radworld-case-35-v1", quiz_timer_seconds: 30 },
+			quiz,
+		});
+		render(<LiveRoomDock room={room} crosshair={null} activePlane="axial" onClose={vi.fn()} />);
+
+		const timer = screen.getByRole("timer");
+		expect(timer.textContent).toMatch(/\d+s$/);
+		expect(timer.closest("[aria-live], [role=status], [role=alert], [role=log]")).toBeNull();
+		expect(screen.getByRole("status")).toHaveTextContent("Question 1 open. 1 of 3 answered.");
+		expect(screen.getByRole("status")).not.toHaveTextContent(/\d+s/);
 	});
 
 	it("renders private student choices and sends one quiz answer", () => {
@@ -134,8 +155,9 @@ describe("Live Room collaboration chrome", () => {
 		expect(screen.getByText("Your answer is correct")).toBeInTheDocument();
 		expect(screen.getByText("The synchronized crosshair is within the pancreas.")).toBeInTheDocument();
 		expect(screen.getByText("Structured report finding")).toBeInTheDocument();
-		expect(screen.getByText("Complete the remaining linked questions.")).toBeInTheDocument();
-		expect(screen.getByLabelText("Answer distribution")).toHaveTextContent("Pancreas1");
+		// Mid-race, an incomplete row's reasons only say that questions are still to come.
+		expect(screen.queryByText("Complete the remaining linked questions.")).not.toBeInTheDocument();
+		expect(screen.getByLabelText("Answer distribution")).toHaveTextContent("Pancreas Correct answer1");
 		expect(screen.queryByRole("button", { name: "Export quiz ZIP" })).not.toBeInTheDocument();
 		expect(downloadExport).not.toHaveBeenCalled();
 	});

@@ -230,6 +230,33 @@ describe("viewer smoke test", () => {
 		expect(screen.getByRole("heading", { level: 1, name: "Case 17" })).toHaveClass("sr-only");
 	});
 
+	it("still opens a case when the browser blocks site data", async () => {
+		// Blocked cookies or a sandboxed iframe: even reaching sessionStorage
+		// throws, and localStorage calls throw. The live-room dialog, mounted
+		// with every case, read its display name from sessionStorage in render.
+		const blocked = () => { throw new DOMException("The operation is insecure.", "SecurityError"); };
+		const spies = [
+			vi.spyOn(globalThis, "sessionStorage", "get").mockImplementation(blocked),
+			vi.spyOn(Storage.prototype, "getItem").mockImplementation(blocked),
+			vi.spyOn(Storage.prototype, "setItem").mockImplementation(blocked),
+		];
+		try {
+			render(
+				<AuthProvider>
+					<MemoryRouter initialEntries={["/case/1"]}>
+						<Routes>
+							<Route path="/case/:caseId" element={<VisualizationPage />} />
+						</Routes>
+					</MemoryRouter>
+				</AuthProvider>
+			);
+			await waitFor(() => expect(renderVisualization).toHaveBeenCalled());
+			expect(screen.getByRole("main")).toBeInTheDocument();
+		} finally {
+			spies.forEach((spy) => spy.mockRestore());
+		}
+	});
+
 	it("lets go of a local NIfTI's blob URL when the viewer closes", async () => {
 		const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
 		const { unmount } = render(

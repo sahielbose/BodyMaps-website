@@ -649,6 +649,7 @@ class LiveRoomWebSocketService:
                 "participants": participants,
                 "self": peer.public(),
                 "resync_required": resync_required,
+                "at": isoformat(utcnow()),
             }
             if issued_resume_credential:
                 ready["resume_credential"] = issued_resume_credential
@@ -1081,7 +1082,7 @@ class LiveRoomWebSocketService:
             pass
         except Exception:
             logger.exception("Unhandled WebSocket error room=%s", room_id)
-            await self.error(websocket, "Live Room service error", fatal=True)
+            await self.error(websocket, "Live room service error", fatal=True)
         finally:
             if peer:
                 await self.leave(peer)

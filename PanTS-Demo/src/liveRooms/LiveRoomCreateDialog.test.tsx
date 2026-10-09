@@ -30,9 +30,9 @@ describe("Live Room mode menu", () => {
 		expect(solo).toBeEnabled();
 		const race = screen.getByRole("button", { name: /Individual Race/i });
 		expect(race).toBeEnabled();
-			expect(screen.getByRole("button", { name: /Solo VQA Practice/i })).toBeEnabled();
+			expect(screen.getByRole("button", { name: /Quiz practice/i })).toBeEnabled();
 		fireEvent.click(race);
-		expect(screen.getByRole("heading", { name: "Start an Individual Race" })).toBeInTheDocument();
+		expect(screen.getByRole("heading", { name: "Start an individual race" })).toBeInTheDocument();
 		expect(screen.getByRole("radio", { name: "30 seconds" })).toBeChecked();
 
 		fireEvent.click(screen.getByRole("button", { name: /Back to room modes/i }));
@@ -52,7 +52,7 @@ describe("Live Room mode menu", () => {
 		renderDialog();
 		fireEvent.click(screen.getByRole("button", { name: /Collaborative Review/i }));
 
-		expect(screen.getByRole("heading", { name: "Start a Live Room" })).toBeInTheDocument();
+		expect(screen.getByRole("heading", { name: "Start a live room" })).toBeInTheDocument();
 		expect(screen.getByLabelText("Display name")).toBeInTheDocument();
 	});
 
@@ -70,7 +70,7 @@ describe("Live Room mode menu", () => {
 		renderDialog();
 		fireEvent.click(screen.getByRole("button", { name: /Individual Race/i }));
 		fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Creator" } });
-		fireEvent.click(screen.getByRole("button", { name: "Create Race Room" }));
+		fireEvent.click(screen.getByRole("button", { name: "Create race room" }));
 
 		await waitFor(() => expect(screen.getByLabelText("Current route")).toHaveTextContent("/live/room-35"));
 		const route = screen.getByLabelText("Current route").textContent || "";
@@ -94,7 +94,7 @@ describe("Live Room mode menu", () => {
 		renderDialog();
 		fireEvent.click(screen.getByRole("button", { name: /Individual Race/i }));
 		fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Legacy Creator" } });
-		fireEvent.click(screen.getByRole("button", { name: "Create Race Room" }));
+		fireEvent.click(screen.getByRole("button", { name: "Create race room" }));
 
 		await waitFor(() => expect(screen.getByLabelText("Current route")).toHaveTextContent("/live/legacy-room"));
 		const route = screen.getByLabelText("Current route").textContent || "";
@@ -102,5 +102,30 @@ describe("Live Room mode menu", () => {
 		expect(route).not.toContain("quizHostClaim");
 		const storedValues = Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.getItem(sessionStorage.key(index) || ""));
 		expect(storedValues).not.toContain("legacy-secret");
+	});
+
+	it("opens and still creates the room when site data is blocked", async () => {
+		// Blocked cookies or a sandboxed iframe: even reaching sessionStorage throws.
+		const blocked = () => { throw new DOMException("The operation is insecure.", "SecurityError"); };
+		const storage = vi.spyOn(globalThis, "sessionStorage", "get").mockImplementation(blocked);
+		try {
+			vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+				if (!init?.method) return Promise.resolve(new Response(JSON.stringify({ playlists: [] }), { status: 200 }));
+				return Promise.resolve(new Response(JSON.stringify({ room_id: "room-9", case_id: "35", room_key: "k" }), {
+					status: 201,
+					headers: { "Content-Type": "application/json" },
+				}));
+			}));
+			renderDialog();
+			fireEvent.click(screen.getByRole("button", { name: /Collaborative Review/i }));
+			expect(screen.getByLabelText("Display name")).toHaveValue("");
+			fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Reader" } });
+			fireEvent.submit(screen.getByLabelText("Display name").closest("form")!);
+
+			await waitFor(() => expect(screen.getByLabelText("Current route")).toHaveTextContent("/live/room-9"));
+			expect(screen.queryByRole("alert")).toBeNull();
+		} finally {
+			storage.mockRestore();
+		}
 	});
 });

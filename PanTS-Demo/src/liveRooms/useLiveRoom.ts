@@ -16,6 +16,7 @@ import {
 	loadLiveQuizRevealMask,
 	sanitizeLiveRoomPresence,
 	sanitizeLiveRoomView,
+	writeLiveRoomSession,
 } from "./protocol";
 import type {
 	LiveRoomConnectionState,
@@ -59,6 +60,7 @@ type IncomingMessage = {
 	total?: number;
 	reason?: string;
 	message?: string;
+	code?: string;
 	fatal?: boolean;
 	self?: LiveRoomParticipant;
 	quiz?: LiveQuizState | {
@@ -72,7 +74,15 @@ type IncomingMessage = {
 	event_id?: string;
 	latest_seq?: number;
 	resync_required?: boolean;
+	at?: string;
 };
+
+// Set on every socket error and only cleared by room.ready, so a stop that follows
+// a dropped connection (expired, refused) has to clear it or it reads as "still trying".
+const CONNECTION_LOST_ERROR = "Connection lost. Reconnecting…";
+const REVEAL_OVERLAY_ERROR = "Could not load the lesion overlay. Trying again.";
+const REVEAL_OVERLAY_GAVE_UP = "Could not load the lesion overlay. Reload the page to try again.";
+const MAX_REVEAL_ATTEMPTS = 4;
 
 type TransientMessageType = "presence.update" | "view.update";
 
@@ -111,6 +121,23 @@ function isSameQuizStep(current: LiveQuizState, incoming: LiveQuizState): boolea
 		&& current.current_question?.id === incoming.current_question?.id;
 }
 
+export const ROOM_FULL_ERROR = "This room is full.";
+export const ROOM_IDENTITY_LIMIT_ERROR = "This room has had too many visitors to admit anyone new. Ask the host to start a new room.";
+
+/** The next step after a stopped connection. Reloading cannot get anyone into a room that refuses newcomers, so those reasons stand alone. */
+export function rejoinHint(reason: string): string {
+	return reason === ROOM_FULL_ERROR || reason === ROOM_IDENTITY_LIMIT_ERROR ? "" : " Reload to rejoin.";
+}
+
+/** Server validation text is written for developers; the cases a person can hit get plain wording, anything else passes through. */
+export function friendlyServerError(serverMessage: string, rejectedEvent: boolean): string {
+	if (/rate limit/i.test(serverMessage)) return "You are going too fast. Wait a moment and try again.";
+	if (/already has \d+ participants/i.test(serverMessage)) return ROOM_FULL_ERROR;
+	if (/identity limit/i.test(serverMessage)) return ROOM_IDENTITY_LIMIT_ERROR;
+	if (rejectedEvent) return "That change could not be saved. Try again.";
+	return serverMessage;
+}
+
 export function useLiveRoom(options: Options): LiveRoomController {
 	const { metadata, roomKey, name, maskUrl: initialMaskUrl, snapshotSequence, initialState, initialQuiz } = options;
 	const initialCredential = useMemo(() => getLiveRoomParticipantCredential(metadata.room_id), [metadata.room_id]);
@@ -120,12 +147,15 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	const [state, setState] = useState<LiveRoomDurableState>(initialState);
 	const [pendingEvents, setPendingEvents] = useState<LiveRoomEventDelivery[]>([]);
 	const [followingId, setFollowingId] = useState<string | null>(null);
+	const [revealAttempt, setRevealAttempt] = useState(0);
 	const [error, setError] = useState<string | null>(null);
 	const [undoNotice, setUndoNotice] = useState<string | null>(null);
 	const [maskUrl, setMaskUrl] = useState(initialMaskUrl);
 	const [quiz, setQuiz] = useState<LiveQuizState | null>(initialQuiz);
 	const [quizOwnSubmissions, setQuizOwnSubmissions] = useState<Record<string, LiveQuizSubmission>>({});
 	const [quizEligible, setQuizEligible] = useState(false);
+	// Server time minus this device's time, so deadlines stamped on the server's clock count down correctly.
+	const [clockOffsetMs, setClockOffsetMs] = useState(0);
 	const [selfRole, setSelfRole] = useState<LiveRoomParticipant["role"]>(metadata.mode === "quiz" ? "student" : "reviewer");
 	const websocketRef = useRef<WebSocket | null>(null);
 	const participantCredentialRef = useRef(initialCredential);
@@ -134,10 +164,16 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	const reconnectAttemptRef = useRef(0);
 	const reconnectTimerRef = useRef<number | null>(null);
 	const stoppedRef = useRef(false);
+	const followingIdRef = useRef<string | null>(null);
+	const revealFailuresRef = useRef(0);
 	const lastTransientRef = useRef<Partial<Record<TransientMessageType, number>>>({});
 	const pendingTransientRef = useRef<Partial<Record<TransientMessageType, Record<string, unknown>>>>({});
+	// The server builds a fresh Peer, with no presence or view, on every (re)join, so the
+	// merged latest payload per type is kept to repopulate it when room.ready arrives.
+	const lastPayloadRef = useRef<Partial<Record<TransientMessageType, Record<string, unknown>>>>({});
 	const transientTimerRef = useRef<Partial<Record<TransientMessageType, number>>>({});
 	const undoTimerRef = useRef<number | null>(null);
+	const errorTimerRef = useRef<number | null>(null);
 	const sequenceGapTimerRef = useRef<number | null>(null);
 	const bufferedEventsRef = useRef(new Map<number, LiveRoomEventDelivery>());
 	const quizRevealMaskRef = useRef<string | null>(null);
@@ -155,6 +191,11 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	const collaborationLocked = metadata.mode === "quiz" && Boolean(
 		quiz && ["question_open", "question_closed"].includes(quiz.phase)
 	);
+
+	const noteServerTime = useCallback((at: unknown) => {
+		const serverTime = typeof at === "string" ? Date.parse(at) : Number.NaN;
+		if (Number.isFinite(serverTime)) setClockOffsetMs(serverTime - Date.now());
+	}, []);
 
 	const sendFrame = useCallback((message: Record<string, unknown>): boolean => {
 		const socket = websocketRef.current;
@@ -241,6 +282,10 @@ export function useLiveRoom(options: Options): LiveRoomController {
 			...pendingTransientRef.current[type],
 			...payload,
 		};
+		// A pointer position is stale by the time a reconnect lands, so it is not kept.
+		const durable = { ...lastPayloadRef.current[type], ...payload };
+		delete durable.cursor;
+		lastPayloadRef.current[type] = durable;
 		const elapsed = performance.now() - (lastTransientRef.current[type] ?? -Infinity);
 		const remaining = Math.max(0, 50 - elapsed);
 		if (remaining === 0) {
@@ -259,6 +304,16 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		}, remaining);
 	}, [flushTransient]);
 
+	// A participant who leaves takes their Follow toggle with them, so a stale id would
+	// keep this tab from sharing its own view with nobody left to undo it.
+	const dropFollowIfGone = useCallback((remaining: LiveRoomParticipant[]) => {
+		const followed = followingIdRef.current;
+		if (!followed || remaining.some((item) => item.participant_id === followed)) return;
+		followingIdRef.current = null;
+		setFollowingId(null);
+		sendTransient("presence.update", { following: null });
+	}, [sendTransient]);
+
 	const clearSequenceGapTimer = useCallback(() => {
 		if (sequenceGapTimerRef.current !== null) window.clearTimeout(sequenceGapTimerRef.current);
 		sequenceGapTimerRef.current = null;
@@ -269,7 +324,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		sequenceGapTimerRef.current = window.setTimeout(() => {
 			sequenceGapTimerRef.current = null;
 			bufferedEventsRef.current.clear();
-			setError("Live Room sequence gap detected. Resynchronizing…");
+			setError("The live room missed an update. Resynchronizing…");
 			const socket = websocketRef.current;
 			if (socket) socket.close(LIVE_ROOM_SEQUENCE_GAP_CLOSE_CODE, "Sequence gap resync");
 		}, LIVE_ROOM_SEQUENCE_GAP_MS);
@@ -360,15 +415,27 @@ export function useLiveRoom(options: Options): LiveRoomController {
 			try {
 				message = JSON.parse(String(messageEvent.data)) as IncomingMessage;
 			} catch {
-				setError("Live Room sent an invalid message");
+				setError("The live room sent a message this page could not read.");
+				return;
+			}
+			if (message.type === "pong") {
+				noteServerTime(message.at);
 				return;
 			}
 			if (message.type === "room.ready") {
 				reconnectAttemptRef.current = 0;
 				setConnectionState("connected");
+				// The first interval ping is 20 s away, so ask for the server time now.
+				noteServerTime(message.at);
+				sendFrame({ type: "ping" });
 				setError(null);
+				if (revealFailuresRef.current > 0) {
+					revealFailuresRef.current = 0;
+					setRevealAttempt((attempt) => attempt + 1);
+				}
 				if (Array.isArray(message.participants)) {
 					setParticipants((current) => JSON.stringify(current) === JSON.stringify(message.participants) ? current : message.participants!);
+					dropFollowIfGone(message.participants);
 				}
 				if (message.self?.participant_id) {
 					participantIdRef.current = message.self.participant_id;
@@ -379,7 +446,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 							resumeCredential: message.resume_credential,
 						};
 						participantCredentialRef.current = credential;
-						sessionStorage.setItem(liveRoomParticipantStorageKey(metadata.room_id), JSON.stringify(credential));
+						writeLiveRoomSession(liveRoomParticipantStorageKey(metadata.room_id), JSON.stringify(credential));
 					}
 				}
 				if (message.self?.role) {
@@ -416,8 +483,16 @@ export function useLiveRoom(options: Options): LiveRoomController {
 					scheduleSequenceGapRecovery();
 				}
 				flushOutbox();
-				flushTransient("presence.update");
-				flushTransient("view.update");
+				// Anything the last socket already delivered is gone with its Peer, so send
+				// it again under whatever is still pending. A follower's view is the
+				// leader's, so it is not re-sent while following.
+				for (const type of ["presence.update", "view.update"] as const) {
+					const last = lastPayloadRef.current[type];
+					if (last && !(type === "view.update" && followingIdRef.current)) {
+						pendingTransientRef.current[type] = { ...last, ...pendingTransientRef.current[type] };
+					}
+					flushTransient(type);
+				}
 				return;
 			}
 			if (message.type === "event.committed" && message.event) {
@@ -465,6 +540,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 					setParticipants((current) => JSON.stringify(current) === JSON.stringify(message.participants) ? current : message.participants!);
 					const self = message.participants.find((item) => item.participant_id === participantIdRef.current);
 					if (self?.role) setSelfRole(self.role);
+					dropFollowIfGone(message.participants);
 				} else if (message.participant?.participant_id) {
 					const participant = message.participant;
 					setParticipants((current) => {
@@ -480,6 +556,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 						return next;
 					});
 				} else if (message.participant_id) {
+					if (message.participant_id === followingIdRef.current) dropFollowIfGone([]);
 					setParticipants((current) => current.filter((item) => item.participant_id !== message.participant_id));
 				}
 				return;
@@ -498,15 +575,26 @@ export function useLiveRoom(options: Options): LiveRoomController {
 				}, 5000);
 				return;
 			}
-			if (message.type === "room.expired") {
+			// A tab that was offline past the expiry only learns it from the join error on reconnect.
+			if (message.type === "room.expired" || (message.type === "error" && (message.code === "room_expired" || message.code === "room_not_found"))) {
 				setConnectionState("expired");
+				setError((current) => current === CONNECTION_LOST_ERROR ? null : current);
 				stoppedRef.current = true;
 				failOutbox(true);
 				if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
 				return;
 			}
 			if (message.type === "error") {
-				setError(String(message.message || "Live Room error"));
+				const serverMessage = String(message.message || "Something went wrong in the live room.");
+				const friendly = friendlyServerError(serverMessage, Boolean(message.event_id));
+				if (friendly !== serverMessage) console.error("Live room error", serverMessage);
+				setError(friendly);
+				if (errorTimerRef.current !== null) window.clearTimeout(errorTimerRef.current);
+				// A fatal error stays; anything else clears itself, and only if it is still the one showing.
+				errorTimerRef.current = message.fatal ? null : window.setTimeout(() => {
+					errorTimerRef.current = null;
+					setError((current) => current === friendly ? null : current);
+				}, 6000);
 				if (message.event_id) {
 					const queued = outboxRef.current.get(message.event_id);
 					if (queued) {
@@ -534,11 +622,10 @@ export function useLiveRoom(options: Options): LiveRoomController {
 				failOutbox(event.code !== 4000);
 				if (event.code === 4000) {
 					setConnectionState("disconnected");
-					setError("This Live Room connection was replaced by another tab.");
-				} else if (event.code === 4001) {
-					setConnectionState("expired");
+					setError("This live room connection was replaced by another tab.");
 				} else {
-					setConnectionState("error");
+					setConnectionState(event.code === 4001 ? "expired" : "error");
+					setError((current) => current === CONNECTION_LOST_ERROR ? null : current);
 				}
 				return;
 			}
@@ -549,10 +636,11 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		});
 
 		socket.addEventListener("error", () => {
-			if (websocketRef.current !== socket) return;
-			setError("Connection lost. Reconnecting…");
+			// A room that already stopped (expired or fatal) must not get the reconnect text back.
+			if (websocketRef.current !== socket || stoppedRef.current) return;
+			setError(CONNECTION_LOST_ERROR);
 		});
-	}, [acceptCommittedEvents, acknowledgeQuizHostClaim, applyQuizState, clearSequenceGapTimer, failOutbox, flushOutbox, flushTransient, metadata.mode, metadata.room_id, name, rejectOutboxItem, requestAuthoritativeResync, roomKey, scheduleSequenceGapRecovery]);
+	}, [acceptCommittedEvents, acknowledgeQuizHostClaim, applyQuizState, clearSequenceGapTimer, failOutbox, flushOutbox, flushTransient, metadata.mode, metadata.room_id, name, dropFollowIfGone, noteServerTime, sendFrame, rejectOutboxItem, requestAuthoritativeResync, roomKey, scheduleSequenceGapRecovery]);
 
 	useEffect(() => {
 		stoppedRef.current = false;
@@ -564,6 +652,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 			window.clearInterval(ping);
 			if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
 			if (undoTimerRef.current !== null) window.clearTimeout(undoTimerRef.current);
+			if (errorTimerRef.current !== null) window.clearTimeout(errorTimerRef.current);
 			clearSequenceGapTimer();
 			for (const timer of Object.values(transientTimerRef.current)) {
 				if (timer !== undefined) window.clearTimeout(timer);
@@ -578,18 +667,41 @@ export function useLiveRoom(options: Options): LiveRoomController {
 
 	useEffect(() => {
 		const shouldReveal = Boolean(quiz?.reveal?.viewer_cue?.show_lesion_overlay);
-		if (!shouldReveal || quizRevealMaskRef.current) return;
+		if (!shouldReveal) {
+			// The host moved past the reveal: drop the retry state so the next reveal question starts fresh.
+			revealFailuresRef.current = 0;
+			setError((current) => current === REVEAL_OVERLAY_ERROR || current === REVEAL_OVERLAY_GAVE_UP ? null : current);
+			return;
+		}
+		if (quizRevealMaskRef.current) return;
 		let active = true;
+		let retryTimer: number | null = null;
 		void loadLiveQuizRevealMask(metadata.room_id, roomKey).then((url) => {
 			if (!active) {
 				URL.revokeObjectURL(url);
 				return;
 			}
+			revealFailuresRef.current = 0;
 			quizRevealMaskRef.current = url;
 			setMaskUrl(url);
-		}).catch((caught) => setError(caught instanceof Error ? caught.message : "Quiz reveal failed"));
-		return () => { active = false; };
-	}, [metadata.room_id, quiz?.reveal?.viewer_cue?.show_lesion_overlay, roomKey]);
+			setError((current) => current === REVEAL_OVERLAY_ERROR || current === REVEAL_OVERLAY_GAVE_UP ? null : current);
+		}).catch((caught) => {
+			if (!active) return;
+			console.error("Live quiz reveal overlay failed", caught);
+			revealFailuresRef.current += 1;
+			// Retry on a short backoff; a reconnect also retries (room.ready bumps the attempt).
+			if (revealFailuresRef.current < MAX_REVEAL_ATTEMPTS) {
+				setError(REVEAL_OVERLAY_ERROR);
+				retryTimer = window.setTimeout(() => setRevealAttempt((attempt) => attempt + 1), 3000 * revealFailuresRef.current);
+			} else {
+				setError(REVEAL_OVERLAY_GAVE_UP);
+			}
+		});
+		return () => {
+			active = false;
+			if (retryTimer !== null) window.clearTimeout(retryTimer);
+		};
+	}, [metadata.room_id, quiz?.reveal?.viewer_cue?.show_lesion_overlay, roomKey, revealAttempt]);
 
 	useEffect(() => () => {
 		if (quizRevealMaskRef.current) URL.revokeObjectURL(quizRevealMaskRef.current);
@@ -651,11 +763,13 @@ export function useLiveRoom(options: Options): LiveRoomController {
 	}, [collaborationLocked, connectionState, sendFrame]);
 
 	const follow = useCallback((id: string) => {
+		followingIdRef.current = id;
 		setFollowingId(id);
 		sendTransient("presence.update", { following: id });
 	}, [sendTransient]);
 
 	const stopFollowing = useCallback(() => {
+		followingIdRef.current = null;
 		setFollowingId(null);
 		sendTransient("presence.update", { following: null });
 	}, [sendTransient]);
@@ -674,8 +788,10 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		const url = liveRoomShareUrl(metadata.room_id, roomKey);
 		try {
 			await navigator.clipboard.writeText(url);
+			return true;
 		} catch {
-			window.prompt("Copy Live Room link:", url);
+			window.prompt("Copy the live room link:", url);
+			return false;
 		}
 	}, [metadata.room_id, roomKey]);
 
@@ -707,6 +823,7 @@ export function useLiveRoom(options: Options): LiveRoomController {
 		participantId,
 		name,
 		connectionState,
+		clockOffsetMs,
 		participants,
 		state,
 		pendingEvents,

@@ -34,7 +34,13 @@
 	padding: 24px;
 }
 
+/* Dialog entrance, shared with the other viewer dialogs: the backdrop fades
+   in and the card rises a few pixels (opacity and transform only). */
+@keyframes lr-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes lr-rise-in { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+
 .lr-modal-backdrop {
+	animation: lr-fade-in 160ms ease-out both;
 	position: fixed;
 	inset: 0;
 	z-index: 20000;
@@ -46,6 +52,7 @@
 }
 
 .lr-modal {
+	color-scheme: dark;
 	width: min(540px, 100%);
 	max-height: calc(100dvh - 40px);
 	overflow-y: auto;
@@ -59,6 +66,7 @@
 	color: var(--lr-text);
 	font-family: var(--lr-font);
 }
+.lr-modal-backdrop > .lr-modal { animation: lr-rise-in 220ms cubic-bezier(.22, 1, .36, 1) both; }
 
 .lr-modal__head,
 .lr-dock__head {
@@ -69,13 +77,13 @@
 }
 
 .lr-modal h1,
-.lr-modal h2,
-.lr-expired h1 {
+.lr-modal h2 {
 	margin: 4px 0 0;
 	font-size: 29px;
 	font-weight: 600;
 	line-height: 1.08;
 	letter-spacing: -.035em;
+	text-wrap: balance;
 }
 
 .lr-eyebrow {
@@ -93,8 +101,10 @@
 	height: 40px;
 	flex: 0 0 40px;
 	place-items: center;
+	/* The global button padding (0.6em 1.2em) would push the glyph off centre. */
+	padding: 0;
 	border: 1px solid var(--lr-border);
-	border-radius: 6px;
+	border-radius: 8px;
 	background: transparent;
 	color: var(--lr-text);
 	cursor: pointer;
@@ -104,20 +114,32 @@
 .lr-icon-button svg,
 .lr-dock__close svg { display: block; margin: auto; }
 .lr-icon-button:hover,
+.lr-back-button:hover:not(:disabled),
 .lr-dock__close:hover { border-color: var(--lr-border-strong); background: var(--lr-surface-2); }
 .lr-icon-button:focus-visible,
 .lr-dock__close:focus-visible,
 .lr-button:focus-visible,
-.lr-header-button:focus-visible { outline: 2px solid var(--lr-primary); outline-offset: 2px; }
+.lr-header-button:focus-visible,
+.lr-back-button:focus-visible,
+.lr-mode-card:focus-visible,
+.lr-person button:focus-visible,
+.lr-compose button:focus-visible,
+.lr-chat-compose button:focus-visible,
+.lr-export button:focus-visible,
+.lr-message button:focus-visible { outline: 2px solid var(--lr-primary); outline-offset: 2px; }
+/* Tabs sit edge to edge, so their ring is drawn inside. */
+.lr-tabs button:focus-visible { outline: 2px solid var(--lr-primary); outline-offset: -2px; }
+
+.lr-nowrap { white-space: nowrap; }
 
 .lr-modal__intro,
-.lr-join p,
-.lr-expired p {
+.lr-join p {
 	margin: 14px 0 22px;
 	color: var(--lr-muted);
 	max-width: 62ch;
 	font-size: 14px;
 	line-height: 1.55;
+	text-wrap: balance;
 }
 
 .lr-mode-menu { width: min(680px, 100%); }
@@ -130,7 +152,7 @@
 	gap: 9px;
 	padding: 18px;
 	border: 1px solid var(--lr-border);
-	border-radius: 3px;
+	border-radius: 8px;
 	background: rgba(255,255,255,.025);
 	color: var(--lr-text);
 	font-family: var(--lr-font);
@@ -139,14 +161,18 @@
 	transition: border-color .18s ease, background .18s ease, transform .18s ease;
 }
 .lr-mode-card:hover:not(:disabled) { transform: translateY(-2px); border-color: rgba(110,168,254,.5); background: rgba(110,168,254,.06); }
-.lr-mode-card:disabled { opacity: .43; cursor: not-allowed; }
-.lr-mode-card > span { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid rgba(110,168,254,.35); color: var(--lr-primary); }
+.lr-mode-card > span { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid rgba(110,168,254,.35); border-radius: 8px; color: var(--lr-primary); }
 .lr-mode-card--challenge > span { border-color: rgba(110,168,254,.35); color: var(--lr-primary); }
 .lr-mode-card--quiz > span { border-color: rgba(110,168,254,.45); color: var(--lr-primary); }
 .lr-mode-card strong { font-size: 15px; }
-.lr-mode-card small { color: rgba(255,255,255,.49); font-size: 11px; line-height: 1.5; }
-.lr-modal__title-row { display: flex; align-items: center; gap: 10px; }
-.lr-back-button { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--lr-border); background: transparent; color: var(--lr-muted); cursor: pointer; }
+.lr-mode-card small { color: rgba(255,255,255,.6); font-size: 12px; line-height: 1.5; text-wrap: balance; }
+/* Unavailable: dim the icon, title and border, not the whole card, so the
+   reason line underneath stays readable. */
+.lr-mode-card:disabled { cursor: not-allowed; border-color: rgba(255,255,255,.07); }
+.lr-mode-card:disabled > span { opacity: .5; }
+.lr-mode-card:disabled strong { color: rgba(255,255,255,.6); }
+.lr-modal__title-row { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; min-width: 0; }
+.lr-back-button { width: 40px; height: 40px; flex: 0 0 40px; display: grid; place-items: center; padding: 0; border-radius: 8px; border: 1px solid var(--lr-border); background: transparent; color: var(--lr-text); cursor: pointer; transition: background .16s ease, border-color .16s ease; }
 
 .lr-field {
 	display: grid;
@@ -192,21 +218,25 @@
 	font-weight: 600;
 }
 
+.lr-quiz-source__note { margin: 8px 0 0; color: var(--lr-muted); font-size: 12px; line-height: 1.45; }
+
 .lr-resolution label {
 	display: flex;
 	align-items: center;
-	min-height: 62px;
+	min-height: 56px;
 	gap: 12px;
 	box-sizing: border-box;
-	padding: 12px;
+	padding: 10px 12px;
 	border: 1px solid var(--lr-border);
 	border-radius: 0;
 	background: #0b0d10;
 	cursor: pointer;
 	transition: background .16s ease, border-color .16s ease;
 }
+.lr-resolution label + label { margin-top: -1px; }
 .lr-resolution label:first-of-type { border-radius: 7px 7px 0 0; }
-.lr-resolution label:last-of-type { margin-top: -1px; border-radius: 0 0 7px 7px; }
+.lr-resolution label:last-of-type { border-radius: 0 0 7px 7px; }
+.lr-resolution label:only-of-type { border-radius: 7px; }
 
 .lr-resolution label.is-selected {
 	border-color: var(--lr-primary);
@@ -216,15 +246,35 @@
 	box-shadow: inset 3px 0 0 var(--lr-primary);
 }
 
-.lr-resolution input { accent-color: var(--lr-primary); }
+.lr-resolution input {
+	appearance: none;
+	flex: none;
+	width: 18px;
+	height: 18px;
+	margin: 0;
+	border: 1.5px solid rgba(255, 255, 255, .45);
+	border-radius: 50%;
+	background: transparent;
+	cursor: inherit;
+}
+.lr-resolution input:checked {
+	border-color: var(--lr-primary);
+	background: radial-gradient(circle, var(--lr-primary) 0 4.5px, transparent 5.5px);
+}
+.lr-resolution input:disabled { border-color: rgba(255, 255, 255, .2); }
+.lr-resolution input:disabled:checked { border-color: rgba(110, 168, 254, .4); background: radial-gradient(circle, rgba(110, 168, 254, .4) 0 4.5px, transparent 5.5px); }
+.lr-resolution label:has(input:disabled) { cursor: not-allowed; }
+.lr-resolution label:has(input:disabled) strong { color: rgba(255, 255, 255, .6); }
+.lr-resolution input:focus-visible { outline: 2px solid var(--lr-primary); outline-offset: 2px; }
 .lr-resolution span { display: grid; gap: 3px; }
 .lr-resolution strong { font-size: 13px; font-weight: 600; }
 .lr-resolution small { color: var(--lr-muted); font-size: 11px; }
 .lr-quiz-timer { grid-template-columns: repeat(4, 1fr); }
 .lr-quiz-timer legend { grid-column: 1 / -1; }
+/* Four cells share the 540px dialog, so each has room for the 18px radio and
+   "60 seconds" on one line only with the tighter gap and padding. */
 .lr-quiz-timer label,
-.lr-quiz-timer label:first-of-type,
-.lr-quiz-timer label:last-of-type { min-height: 52px; margin: 0 0 0 -1px; border-radius: 0; }
+.lr-quiz-timer label + label { min-height: 48px; gap: 8px; margin: 0 0 0 -1px; padding: 10px; border-radius: 0; }
 .lr-quiz-timer label:first-of-type { margin-left: 0; border-radius: 7px 0 0 7px; }
 .lr-quiz-timer label:last-of-type { border-radius: 0 7px 7px 0; }
 
@@ -242,6 +292,10 @@
 	font-size: 11px;
 	line-height: 1.45;
 }
+.lr-capability-note span { text-wrap: pretty; }
+/* The icon is a flex item beside wrapping text, so without flex: none it shrinks to about 10px. */
+.lr-capability-note > svg,
+.lr-banner > svg { flex: none; margin-top: 1px; }
 
 .lr-modal__actions {
 	display: flex;
@@ -249,6 +303,17 @@
 	gap: 10px;
 	margin-top: 22px;
 }
+
+/* The create form keeps its actions in view: the options scroll between a
+   fixed head and a pinned footer, so a tall race form never hides Create. */
+.lr-modal--form { --lr-pad-x: 32px; display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+.lr-modal--form > .lr-modal__head { flex: none; padding: 30px var(--lr-pad-x) 0; }
+/* Padded top and bottom so the last notice does not touch the footer rule and
+   scrolled content is not cut flush under the title. */
+.lr-modal__body { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 2px var(--lr-pad-x) 18px; }
+.lr-modal--form > .lr-error { margin: 0; padding: 10px var(--lr-pad-x) 0; }
+.lr-modal--form > .lr-modal__actions { flex: none; margin: 0; padding: 14px var(--lr-pad-x) 24px; border-top: 1px solid var(--lr-border); background: var(--lr-surface); }
+.lr-modal--form > .lr-error + .lr-modal__actions { margin-top: 10px; }
 
 .lr-button,
 .lr-header-button {
@@ -267,22 +332,24 @@
 	transition: background 180ms ease, border-color 180ms ease, color 180ms ease;
 }
 
-.lr-button--primary,
-.lr-header-button--primary {
+.lr-button--primary {
 	background: var(--lr-primary);
 	color: #07111f;
 }
 
-.lr-button--primary:hover,
-.lr-header-button--primary:hover { background: #8bb9fe; }
+.lr-button--primary:hover { background: #8bb9fe; }
 .lr-button:active,
 .lr-header-button:active,
 .lr-icon-button:active,
+.lr-back-button:active:not(:disabled),
 .lr-dock__close:active { transform: translateY(1px); }
 .lr-button--secondary { border-color: var(--lr-border); background: transparent; color: var(--lr-text); }
+.lr-button--secondary:hover:not(:disabled) { border-color: var(--lr-border-strong); background: var(--lr-surface-2); }
+.lr-button--secondary:hover:disabled { border-color: var(--lr-border); }
 .lr-button--wide { width: 100%; }
 .lr-button:disabled,
-.lr-icon-button:disabled { cursor: not-allowed; opacity: 0.45; }
+.lr-icon-button:disabled,
+.lr-back-button:disabled { cursor: not-allowed; opacity: 0.45; }
 
 .lr-error {
 	margin-top: 12px;
@@ -317,20 +384,6 @@
 
 @keyframes lr-spin { to { transform: rotate(360deg); } }
 
-.lr-expired {
-	display: grid;
-	width: min(480px, 100%);
-	justify-items: center;
-	padding: 32px;
-	box-sizing: border-box;
-	border: 1px solid var(--lr-border);
-	border-radius: 10px;
-	background: var(--lr-surface);
-	text-align: center;
-}
-
-.lr-expired > svg { color: var(--lr-warning); margin-bottom: 10px; }
-
 .lr-header {
 	display: flex;
 	min-height: 58px;
@@ -349,25 +402,42 @@
 .lr-header__identity,
 .lr-header__actions {
 	display: flex;
+	min-width: 0;
 	align-items: center;
 	gap: 10px;
 }
 
-.lr-header__identity > div { display: grid; gap: 3px; }
-.lr-header__identity strong { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
-.lr-header__identity span:not(.lr-live-dot) { color: var(--lr-muted); font-family: var(--lr-mono); font-size: 9px; }
+.lr-header__identity > div { display: grid; gap: 3px; min-width: 0; }
+.lr-header__identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
+.lr-header__identity span:not(.lr-live-dot) { color: var(--lr-muted); font-family: var(--lr-mono); font-size: 11px; }
+.lr-header__access-short { display: none; }
 .lr-live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--lr-warning); box-shadow: 0 0 0 4px rgba(251,191,36,.1); }
 .lr-live-dot[data-state="connected"] { background: #34d399; box-shadow: 0 0 0 4px rgba(52,211,153,.12); }
 .lr-live-dot[data-state="error"], .lr-live-dot[data-state="expired"] { background: var(--lr-danger); }
-.lr-header__warning { color: #d9c58d; font-family: var(--lr-mono); font-size: 9px; }
+/* Undo result while the dock is closed. It takes its own row in the header, so it never
+   lands on the viewer toolbar under it; the header only wraps while there is text to show. */
+.lr-header--room:has(.lr-header__notice:not(:empty)) { flex-wrap: wrap; row-gap: 8px; }
+.lr-header__notice { flex: 1 0 100%; box-sizing: border-box; padding: 9px 12px; border-left: 2px solid rgba(215, 183, 101, .72); background: var(--lr-surface); color: var(--lr-text); font: 400 11px/1.45 var(--lr-font); }
+.lr-header__notice:empty { display: none; }
+.lr-header__warning { align-self: center; color: var(--lr-muted); font: 400 12px/1.3 var(--lr-font); }
 .lr-header__actions { margin-left: auto; }
 .lr-header-button { min-height: 38px; border-color: var(--lr-border); background: var(--lr-surface-2); color: var(--lr-text); }
 .lr-header-button:hover { border-color: var(--lr-border-strong); background: rgba(255, 255, 255, .08); }
-.lr-header-button--primary { border-color: transparent; color: #07111f; }
+/* The Leave and CT viewer links are anchors: without this the global a:hover (black) wins on the dark header. */
+a.lr-header-button:hover { color: var(--lr-text); }
+/* Two classes: the plain .lr-header-button rules above (and their :hover) come
+   first in the file at the same weight, and would otherwise repaint the Share
+   button grey with dark text. */
+.lr-header-button.lr-header-button--primary { border-color: transparent; background: var(--lr-primary); color: #07111f; }
+.lr-header-button.lr-header-button--primary:hover { border-color: transparent; background: #8bb9fe; }
+/* The button that opens and closes the dock keeps a pressed look while it is open. */
+.lr-header-button[aria-expanded="true"] { border-color: var(--lr-border-strong); background: rgba(255, 255, 255, .1); }
+.lr-header-button[aria-expanded="true"]:hover { background: rgba(255, 255, 255, .14); }
+.lr-header__state { display: flex; align-items: center; gap: 10px; }
 .lr-status { color: var(--lr-muted); font-size: 12px; }
 .lr-status[data-state="connected"] { color: #6ee7b7; }
 .lr-status[data-state="error"], .lr-status[data-state="expired"] { color: #fda4af; }
-.lr-countdown { font: 600 11px/1 var(--lr-mono); color: var(--lr-text); font-variant-numeric: tabular-nums; }
+.lr-countdown { color: var(--lr-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .lr-dock {
 	display: flex;
@@ -383,10 +453,19 @@
 	font-family: var(--lr-font);
 }
 
-.lr-dock__head { align-items: center; padding: 14px 14px 12px; }
-.lr-dock__head > div { display: grid; gap: 5px; }
-.lr-dock__head strong { font-size: 14px; font-weight: 600; }
-.lr-dock__close { width: 36px; height: 36px; flex-basis: 36px; }
+/* The header follows the viewer's own side panels (.vp-panel-head in
+   VisualizationPage.css): 48px tall, the same inset, a faint mono eyebrow and a
+   borderless 32px close button (36px for touch). The tab row below stays a
+   separate strip. */
+.lr-dock__head { flex: none; align-items: center; box-sizing: border-box; min-height: 48px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--lr-border); }
+.lr-dock__head > div { display: grid; min-width: 0; gap: 4px; }
+.lr-dock__head strong { overflow: hidden; font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.lr-dock__head .lr-eyebrow { overflow: hidden; color: var(--vp-text-faint, rgba(255, 255, 255, .5)); letter-spacing: .16em; text-overflow: ellipsis; white-space: nowrap; }
+.lr-dock__close { width: 32px; height: 32px; flex-basis: 32px; border-color: transparent; color: var(--vp-text-dim, rgba(255, 255, 255, .7)); }
+.lr-dock__close:hover { border-color: transparent; background: var(--vp-hover, rgba(255, 255, 255, .1)); color: var(--vp-text, rgba(255, 255, 255, .92)); }
+@media (max-width: 640px), (pointer: coarse) {
+	.lr-dock__close { width: 36px; height: 36px; flex-basis: 36px; }
+}
 
 .lr-tabs {
 	display: grid;
@@ -415,7 +494,8 @@
 
 .lr-tabs button:hover { color: var(--lr-text); }
 .lr-tabs button[aria-selected="true"] { color: var(--lr-text); box-shadow: inset 0 -2px 0 var(--lr-primary); }
-.lr-dock > .lr-banner { margin: 0 10px 10px; }
+.lr-dock > .lr-banner { margin: 10px 14px 0; }
+.lr-dock > .lr-error { margin: 10px 14px 0; }
 .lr-banner--warning { color: #d9c58d; }
 .lr-dock__body { min-height: 0; flex: 1 1 auto; overflow: auto; padding: 10px 14px 14px; }
 
@@ -432,14 +512,19 @@
 }
 
 .lr-quiz-dock { width: 370px; flex-basis: 370px; max-width: 42vw; }
-.lr-quiz-dock__head strong { display: flex; align-items: center; gap: 6px; }
+/* The title lines up with the 18px inset of the question body below it. */
+/* The quiz title wraps, so keep 4px above and below it; one line still sits at 48px. */
+.lr-quiz-dock__head { padding: 4px 8px 4px 18px; }
+.lr-quiz-dock__head strong { display: flex; align-items: center; gap: 6px; overflow: visible; white-space: normal; }
 .lr-quiz-status {
 	display: grid;
 	grid-template-columns: 1fr auto;
 	align-items: center;
 	gap: 8px;
-	padding: 10px 14px;
+	padding: 10px 18px;
+	/* The dock header above already draws the top rule. */
 	border-block: 1px solid var(--lr-border);
+	border-block-start-width: 0;
 	background: rgba(110,168,254,.055);
 	font: 600 11px/1 var(--lr-mono);
 	font-variant-numeric: tabular-nums;
@@ -447,7 +532,7 @@
 .lr-quiz-status span { display: flex; align-items: center; gap: 6px; }
 .lr-quiz-status span:last-of-type { color: var(--lr-muted); }
 .lr-quiz-body { display: grid; align-content: start; gap: 18px; padding: 18px; }
-.lr-quiz-body h2 { margin: 6px 0 10px; font-size: 20px; line-height: 1.2; letter-spacing: -.025em; }
+.lr-quiz-body h2 { margin: 6px 0 10px; font-size: 20px; line-height: 1.2; letter-spacing: -.025em; text-wrap: balance; }
 .lr-quiz-body p { color: var(--lr-muted); font-size: 12px; line-height: 1.55; }
 .lr-quiz-kicker,
 .lr-quiz-section-title { color: var(--lr-primary); font: 600 10px/1.3 var(--lr-mono); letter-spacing: .12em; text-transform: uppercase; }
@@ -469,11 +554,11 @@
 	border-radius: 5px;
 	background: #0b0d10;
 	color: var(--lr-text);
-	font: 500 12px/1.35 var(--lr-font);
+	font: 500 14px/1.35 var(--lr-font);
 	text-align: left;
 	cursor: pointer;
 }
-.lr-quiz-choices button > span { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--lr-border); color: var(--lr-muted); font: 600 10px/1 var(--lr-mono); }
+.lr-quiz-choices button > span { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--lr-border); color: var(--lr-muted); font: 600 12px/1 var(--lr-mono); }
 .lr-quiz-choices button:hover:not(:disabled) { border-color: rgba(110,168,254,.55); background: rgba(110,168,254,.07); }
 .lr-quiz-choices button:focus-visible { outline: 2px solid var(--lr-primary); outline-offset: 2px; }
 .lr-quiz-choices button.is-selected { border-color: var(--lr-primary); background: rgba(110,168,254,.1); }
@@ -489,6 +574,7 @@
 .lr-quiz-distribution i { position: absolute; z-index: 1; inset: auto auto 0 0; height: 3px; background: var(--lr-primary); }
 .lr-quiz-distribution .is-correct { color: #a7f3d0; }
 .lr-quiz-distribution .is-correct i { background: #34d399; }
+.lr-quiz-correct-mark { display: inline-flex; align-items: center; gap: 3px; margin-left: 4px; padding: 1px 6px; border: 1px solid #34d399; color: #a7f3d0; font: 600 10px/1.4 var(--lr-mono); letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
 .lr-quiz-leaderboard,
 .lr-quiz-people,
 .lr-quiz-chat { padding-top: 14px; border-top: 1px solid var(--lr-border); }
@@ -503,16 +589,12 @@
 
 @media (max-width: 760px) {
 	.lr-mode-grid { grid-template-columns: 1fr; }
+	/* Two rows of two: the corners and the shared borders follow the 2x2. */
 	.lr-quiz-timer { grid-template-columns: 1fr 1fr; }
-	.lr-quiz-timer label:nth-of-type(3) { margin-left: 0; }
-	.lr-quiz-dock { width: min(100vw, 370px); max-width: 100vw; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-	.lr-loading-ring { animation-duration: 1.5s; }
-	.lr-mode-card,
-	.lr-button,
-	.lr-header-button { transition-duration: .01ms; }
+	.lr-quiz-timer label:nth-of-type(1) { border-radius: 7px 0 0 0; }
+	.lr-quiz-timer label:nth-of-type(2) { border-radius: 0 7px 0 0; }
+	.lr-quiz-timer label:nth-of-type(3) { margin: -1px 0 0; border-radius: 0 0 0 7px; }
+	.lr-quiz-timer label:nth-of-type(4) { margin-top: -1px; border-radius: 0 0 7px 0; }
 }
 
 .lr-people { display: grid; }
@@ -531,7 +613,7 @@
 .lr-avatar { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 8px; color: #061015; font-size: 12px; font-weight: 700; }
 .lr-person > div { display: grid; min-width: 0; gap: 3px; }
 .lr-person strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.lr-person span { color: var(--lr-muted); font-size: 10px; }
+.lr-person > div span { color: var(--lr-muted); font-size: 10px; }
 .lr-person button,
 .lr-compose button,
 .lr-chat-compose button,
@@ -556,6 +638,14 @@
 .lr-chat-compose textarea { min-height: 78px; resize: vertical; padding: 9px 10px; font-size: 14px; }
 .lr-compose button,
 .lr-chat-compose button { min-height: 42px; background: var(--lr-primary); color: #07111f; border-color: transparent; }
+/* A field that cannot take text (reconnecting, or no crosshair to anchor a note
+   to) reads as dimmed, not as a live input that silently ignores typing. The
+   placeholder carries the reason, so it is brighter than the muted text to stay
+   legible under the field's own dimming. */
+.lr-compose textarea:disabled,
+.lr-chat-compose textarea:disabled { background: transparent; cursor: not-allowed; opacity: .55; }
+.lr-compose textarea:disabled::placeholder,
+.lr-chat-compose textarea:disabled::placeholder { color: rgba(255, 255, 255, .8); }
 .lr-compose button:disabled,
 .lr-chat-compose button:disabled,
 .lr-message button:disabled { cursor: not-allowed; opacity: 0.45; }
@@ -574,7 +664,7 @@
 .lr-message strong { font-size: 12px; }
 .lr-message time,
 .lr-message small { color: var(--lr-muted); font-size: 10px; }
-.lr-message p { margin: 0; color: #e6eef2; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.lr-message p { margin: 0; color: #e6eef2; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
 .lr-message button { justify-self: end; border: 0; background: transparent; color: #fda4af; cursor: pointer; }
 .lr-thread--chat { min-height: 100%; grid-template-rows: minmax(0, 1fr) auto; }
 .lr-chat-list { display: grid; align-content: start; gap: 8px; overflow: auto; }
@@ -589,6 +679,9 @@
 .lr-export button { display: flex; min-height: 42px; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; }
 .lr-export small { grid-column: 1 / -1; color: var(--lr-muted); font-size: 10px; line-height: 1.4; }
 .lr-export .lr-error { grid-column: 1 / -1; }
+/* The header note carries this on a wide screen and on a tablet that wraps the header. Between the two (781 to 900px) the
+   header is one full row with no room for it, and on a phone it moves under the title, so the footer says it too. */
+.lr-export__access { display: none; }
 
 .lr-remote-cursor {
 	position: absolute;
@@ -603,11 +696,22 @@
 .lr-note-pin { position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
 .lr-note-pin > span { display: block; width: 12px; height: 12px; margin: auto; border: 2px solid #fff; border-radius: 50% 50% 50% 0; background: var(--lr-warning); box-shadow: 0 2px 8px rgba(0,0,0,.8); transform: rotate(-45deg); }
 .lr-note-pin:focus-visible { outline: 3px solid var(--lr-primary); outline-offset: 2px; }
+/* The popover opens inside .vp-pane-wrap, which clips it, and a phone pane is
+   narrower than the note. It takes the pane's width, then slides back inside the
+   pane edges: sideways with clamp() against the pin's x (--lr-x), up or down with
+   a percentage translate because the note's height is only known to the browser.
+   --lr-pane-h comes from the viewer (the pane is an inline-size container, so
+   there is no cqh), and a longer note scrolls inside the box. */
 .lr-note-popover {
+	--lr-w: min(280px, calc(100cqw - 16px));
+	--lr-start: 18px;
 	position: absolute;
 	top: 18px;
-	left: 18px;
-	width: min(280px, calc(100vw - 40px));
+	left: clamp(8px - var(--lr-x, 0px), var(--lr-start), 100cqw - var(--lr-w) - 8px - var(--lr-x, 0px));
+	width: var(--lr-w);
+	max-height: calc(var(--lr-pane-h, 100vh) - 16px);
+	overflow-y: auto;
+	transform: translateY(min(0px, calc(var(--lr-pane-h, 100vh) - var(--lr-y, 0px) - 26px - 100%)));
 	box-sizing: border-box;
 	padding: 13px 14px 12px;
 	border: 1px solid var(--lr-border-strong);
@@ -618,8 +722,12 @@
 	color: var(--lr-text);
 	font-family: var(--lr-font);
 }
-.lr-note-anchor[data-horizontal="left"] .lr-note-popover { right: 18px; left: auto; }
-.lr-note-anchor[data-vertical="above"] .lr-note-popover { top: auto; bottom: 18px; }
+.lr-note-anchor[data-horizontal="left"] .lr-note-popover { --lr-start: calc(-18px - var(--lr-w)); }
+.lr-note-anchor[data-vertical="above"] .lr-note-popover {
+	top: auto;
+	bottom: 18px;
+	transform: translateY(max(0px, calc(100% + 26px - var(--lr-y, 0px))));
+}
 .lr-note-popover header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .lr-note-popover header > div { display: grid; gap: 2px; min-width: 0; }
 .lr-note-popover header span { color: var(--lr-warning); font-size: 9px; font-weight: 700; letter-spacing: .14em; }
@@ -642,9 +750,9 @@
 .lr-note-popover header button svg { display: block; margin: auto; }
 .lr-note-popover header button:hover { background: rgba(255, 255, 255, .07); color: #fff; }
 .lr-note-popover header button:focus-visible { outline: 2px solid var(--lr-primary); outline-offset: 1px; }
-.lr-note-popover p { margin: 11px 0 12px; color: #e5eef2; font-size: 13px; line-height: 1.48; overflow-wrap: anywhere; }
+.lr-note-popover p { margin: 11px 0 12px; color: #e5eef2; font-size: 13px; line-height: 1.48; overflow-wrap: anywhere; white-space: pre-wrap; }
 .lr-note-popover footer { display: flex; justify-content: space-between; gap: 12px; padding-top: 9px; border-top: 1px solid var(--lr-border); color: var(--lr-muted); font-family: var(--lr-mono); font-size: 9px; }
-.lr-note-popover footer span:first-child { text-transform: capitalize; }
+.lr-note-popover footer span:first-child::first-letter { text-transform: uppercase; }
 
 .vp-tool:disabled,
 .vp-flyout__item:disabled { cursor: not-allowed; opacity: .42; }
@@ -653,23 +761,76 @@
 .lr-room-ended h2 { margin: 0; color: var(--lr-text); font-size: 25px; }
 .lr-room-ended p { margin: 12px 0 20px; color: var(--lr-muted); line-height: 1.5; }
 
-@media (max-width: 900px) {
-	.lr-header { flex-wrap: wrap; gap: 8px; }
-	.lr-header__warning { display: none; }
-	.lr-header__actions { width: 100%; margin-left: 0; justify-content: space-between; }
+/* The docked column (312px, 370px for a quiz) needs room beside the scan, so
+   it only becomes an overlay on a phone-width viewport. */
+@media (max-width: 700px) {
 	.lr-dock { position: absolute; inset: 0 0 0 auto; z-index: 110; width: min(360px, 92vw); max-width: 92vw; box-shadow: -18px 0 48px rgba(0,0,0,.5); }
+	/* iOS zooms the page into any focused field under 16px. The fields keep their
+	   min-heights, which the larger text fits inside. */
+	.lr-field input,
+	.lr-compose textarea,
+	.lr-chat-compose textarea { font-size: 16px; }
+}
+
+/* The header wraps a little earlier than the dock: with the "Expires in" label,
+   the longest status and the full resolution label, the identity and actions
+   need about 740px on one row. */
+@media (max-width: 780px) {
+	.lr-header { flex-wrap: wrap; gap: 8px; }
+	.lr-header__actions { width: 100%; margin-left: 0; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+	/* Once the actions take their own row the note would float mid-row between the title and
+	   the case line, so it goes to the right end of the title row instead. */
+	.lr-header__warning { align-self: flex-start; margin-left: auto; padding-top: 2px; }
+}
+
+/* Between the wrap (780px) and 900px the identity and actions fill one row, and the
+   note beside them would squeeze it, so only the dock footer says who can edit. */
+@media (min-width: 781px) and (max-width: 900px) {
+	.lr-header__warning { display: none; }
+	.lr-export__access { display: inline; }
+}
+
+/* On a phone the status, countdown, Leave, the participants button and Share
+   come to about 490px, more than the header leaves anywhere up to 520px. The
+   status word and the countdown share their own row (status left, countdown
+   right) so the three buttons stay together on the next one, and the wrap
+   above is the backstop for anything wider than that. */
+@media (max-width: 520px) {
+	.lr-header__actions { gap: 6px 8px; }
+	.lr-header__actions .lr-header__state { flex: 1 0 100%; justify-content: space-between; }
+	/* The note moves under the case line (there is no room beside the title, and beside the case
+	   label it wraps on a 360px phone), and the dock footer repeats it. */
+	.lr-header__warning { display: none; }
+	.lr-header__access-short { display: block; }
+	.lr-export__access { display: inline; }
 }
 
 @media (max-width: 520px) {
 	.lr-modal { padding: 22px 18px; }
+	.lr-modal--form { --lr-pad-x: 18px; padding: 0; }
+	.lr-modal--form > .lr-modal__head { padding-top: 22px; }
+	.lr-modal--form > .lr-modal__actions { padding-bottom: 18px; }
+	.lr-modal h1,
+	.lr-modal h2 { font-size: 24px; }
 	.lr-mode-grid { grid-template-columns: 1fr; }
 	.lr-mode-card { min-height: 118px; }
 	.lr-modal__actions { flex-direction: column-reverse; }
 	.lr-modal__actions .lr-button { width: 100%; }
-	.lr-status { display: none; }
 }
 
+/* One reduced-motion block (there used to be two that disagreed, and both
+   lost to the global rule anyway). The spinner holds still, the dialog skips
+   its entrance, and nothing eases on hover. */
 @media (prefers-reduced-motion: reduce) {
-	.lr-loading-ring { animation-duration: 1.8s; }
-	.lr-button, .lr-header-button { transition: none; }
+	.lr-loading-ring,
+	.lr-modal-backdrop,
+	.lr-modal-backdrop > .lr-modal { animation: none !important; }
+	.lr-mode-card,
+	.lr-button,
+	.lr-header-button,
+	.lr-dock__close,
+	.lr-icon-button,
+	.lr-back-button,
+	.lr-tabs button { transition: none !important; }
+	.lr-mode-card:hover:not(:disabled) { transform: none; }
 }

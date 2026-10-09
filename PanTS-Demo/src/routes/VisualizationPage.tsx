@@ -236,7 +236,7 @@ import { decodeViewerState, encodeViewerState, VIEWER_STATE_PARAMS } from "../he
 import { scrollRowToActive } from "../helpers/scrollRowToActive";
 import { meshCheckStateFor, meshesHeldBack } from "../helpers/meshVisibility";
 import { caseFileSlug, isCaseId } from "../helpers/sessionReport";
-import { LiveRoomDock, LiveRoomHeader } from "../liveRooms/LiveRoomChrome";
+import { LiveRoomDock, LiveRoomHeader, useDockDrafts } from "../liveRooms/LiveRoomChrome";
 import LiveRoomCreateDialog from "../liveRooms/LiveRoomCreateDialog";
 import { appRootRelativeUrl } from "../liveRooms/protocol";
 import type { LiveRoomController, LiveRoomMaskPatch } from "../liveRooms/types";
@@ -2024,6 +2024,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const [showLiveRoomCreate, setShowLiveRoomCreate] = useState(false);
 	const [challengeMeasurements, setChallengeMeasurements] = useState<MeasurementSummary[]>([]);
 	const [liveRoomDockOpen, setLiveRoomDockOpen] = useState(Boolean(liveRoom));
+	// The dock unmounts when closed; its tab and unsent drafts live here.
+	const liveRoomDockDrafts = useDockDrafts();
 	const [openPinnedNote, setOpenPinnedNote] = useState<{ noteId: string; pane: CinePane } | null>(null);
 	const segmentationShadowRef = useRef<Uint8Array | null>(null);
 	const authoritativeMeasurementsRef = useRef(liveRoom?.state.measurements);
@@ -4081,7 +4083,13 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					<div
 						className="lr-note-anchor"
 						key={note.id}
-						style={{ left: position[0], top: position[1] }}
+						style={{
+							left: position[0],
+							top: position[1],
+							"--lr-x": `${position[0]}px`,
+							"--lr-y": `${position[1]}px`,
+							"--lr-pane-h": paneElement ? `${paneElement.clientHeight}px` : undefined,
+						} as React.CSSProperties}
 						data-horizontal={opensLeft ? "left" : "right"}
 						data-vertical={opensAbove ? "above" : "below"}
 						onKeyDown={(event) => {
@@ -4459,6 +4467,12 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		onEscape: cancelAnnotateHd,
 		lockScroll: false,
 	});
+
+	// The expired-room overlay covers the whole viewer: focus moves to Return to
+	// case and stays there, since it is the only way on.
+	const roomEndedRef = useRef<HTMLDivElement>(null);
+	const roomEndedLinkRef = useRef<HTMLAnchorElement>(null);
+	useDialogFocus(liveRoom?.connectionState === "expired", roomEndedRef, { initialFocus: roomEndedLinkRef });
 
 	// The load-failure screen covers the viewer like a dialog, so it takes the keyboard too:
 	// focus lands on its first recovery button and Tab stays there.
@@ -6142,6 +6156,7 @@ const aiAvailableOrgans = useMemo(() => {
 					crosshair={crosshairMm}
 					activePlane={focusedPane.getFocusedPane()}
 					onClose={() => setLiveRoomDockOpen(false)}
+					drafts={liveRoomDockDrafts}
 				/>
 			)}
 			{soloChallenge && soloChallenge.taskDockOpen && (
@@ -6691,11 +6706,11 @@ const aiAvailableOrgans = useMemo(() => {
 			)}
 
 			{liveRoom?.connectionState === "expired" && (
-				<div className="lr-room-ended" role="alert">
+				<div className="lr-room-ended" ref={roomEndedRef} role="dialog" aria-modal="true" aria-labelledby="lr-room-ended-title">
 					<div>
-						<h2>Live Room expired</h2>
-						<p>Temporary room data was deleted. Canonical dataset case remains unchanged.</p>
-						<a className="lr-button lr-button--primary" href={`/case/${liveRoom.metadata.case_id}`}>Return to case</a>
+						<h2 id="lr-room-ended-title">Live room expired</h2>
+						<p>Temporary room data was deleted. The dataset case itself is not affected.</p>
+						<a ref={roomEndedLinkRef} className="lr-button lr-button--primary" href={appRootRelativeUrl(`/case/${liveRoom.metadata.case_id}`)}>Return to case</a>
 					</div>
 				</div>
 			)}

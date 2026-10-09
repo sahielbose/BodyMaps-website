@@ -28,6 +28,26 @@ export function liveRoomParticipantStorageKey(roomId: string): string {
 	return `bodymaps.live-room.${roomId}.participant-credential`;
 }
 
+// sessionStorage can throw on any access (site data blocked, a sandboxed
+// iframe), and a throw during render blanks the whole viewer. The live-room
+// screens go through these instead: a value that can't be read counts as
+// absent, and one that can't be written is simply not remembered.
+export function readLiveRoomSession(key: string): string | null {
+	try {
+		return sessionStorage.getItem(key);
+	} catch {
+		return null;
+	}
+}
+
+export function writeLiveRoomSession(key: string, value: string): void {
+	try {
+		sessionStorage.setItem(key, value);
+	} catch {
+		// Storage is off; this tab just won't remember it.
+	}
+}
+
 export function getLiveRoomParticipantCredential(roomId: string): LiveRoomParticipantCredential | null {
 	try {
 		const value = JSON.parse(sessionStorage.getItem(liveRoomParticipantStorageKey(roomId)) || "null") as Partial<LiveRoomParticipantCredential> | null;
@@ -220,6 +240,16 @@ export function chunkMaskRanges(ranges: MaskRange[], targetBytes = 440 * 1024): 
 	return chunks;
 }
 
+/** A room request the server answered with an error, keeping its HTTP status
+ *  so the page can tell a bad link (401, 404) from a server that's down. */
+export class LiveRoomRequestError extends Error {
+	readonly status: number;
+	constructor(message: string, status: number) {
+		super(message);
+		this.status = status;
+	}
+}
+
 export async function bootstrapLiveRoom(roomId: string, roomKey: string): Promise<{
 	metadata: LiveRoomMetadata;
 	state: LiveRoomDurableState;
@@ -230,7 +260,9 @@ export async function bootstrapLiveRoom(roomId: string, roomKey: string): Promis
 	const headers = { "X-Room-Key": roomKey };
 	const snapshotResponse = await fetch(liveRoomApiUrl(roomId, "/snapshot"), { headers });
 	const snapshot = await snapshotResponse.json().catch(() => ({}));
-	if (!snapshotResponse.ok) throw new Error(snapshot.error || `Room snapshot failed (${snapshotResponse.status})`);
+	if (!snapshotResponse.ok) {
+		throw new LiveRoomRequestError(snapshot.error || `Room snapshot failed (${snapshotResponse.status})`, snapshotResponse.status);
+	}
 	const snapshotSequence = Number(snapshot.latest_seq);
 	if (!Number.isSafeInteger(snapshotSequence) || snapshotSequence < 0) {
 		throw new Error("Room snapshot has an invalid sequence");
@@ -242,7 +274,7 @@ export async function bootstrapLiveRoom(roomId: string, roomKey: string): Promis
 	const maskResponse = await fetch(`${liveRoomApiUrl(roomId, "/snapshot")}?format=mask`, { headers });
 	if (!maskResponse.ok) {
 		const body = await maskResponse.json().catch(() => ({}));
-		throw new Error(body.error || `Room mask failed (${maskResponse.status})`);
+		throw new LiveRoomRequestError(body.error || `Room mask failed (${maskResponse.status})`, maskResponse.status);
 	}
 	// Cornerstone decides gzip handling from URL suffix. Blob URLs don't end in
 	// `.gz`, so expose decompressed NIfTI bytes instead of compressed bytes under a
