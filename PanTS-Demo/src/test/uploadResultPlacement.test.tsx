@@ -72,7 +72,7 @@ describe("completed inference actions", () => {
     await user.click(screen.getByRole("button", { name: "Run" }));
 
     const completedPanel = await screen.findByRole("status");
-    expect(completedPanel).toHaveTextContent("Inference Complete");
+    expect(completedPanel).toHaveTextContent("Inference complete");
     // In the drop zone's own slot...
     expect(completedPanel.closest(".dropzone")).toBe(dropzone);
     // ...one panel only, and the drop zone's class list is unaffected (no

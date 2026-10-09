@@ -19,6 +19,29 @@ const LESION_OPTIONS: {
   { id: "colon", label: "Colon lesion" },
 ];
 
+// Preprocessing and postprocessing steps. Neither alternative is wired into
+// the run yet (nothing consumes the value), so each is listed as coming soon.
+const PRE_OPTIONS: Omit<PipelineMenuItem, "checked">[] = [
+  { id: "", label: "None (skip)", desc: "Upload and segment as-is" },
+  {
+    id: "OpenVAE",
+    label: "OpenVAE",
+    desc: "Enhance the scan quality before segmenting",
+    disabled: true,
+    badge: "Coming soon",
+  },
+];
+const POST_OPTIONS: Omit<PipelineMenuItem, "checked">[] = [
+  { id: "", label: "None (skip)", desc: "Use results as-is" },
+  {
+    id: "ShapeKit",
+    label: "ShapeKit",
+    desc: "Clean up and smooth organ outlines",
+    disabled: true,
+    badge: "Coming soon",
+  },
+];
+
 // SuPreM, MedFormer, and R-Super are deliberately not offered here - the
 // models themselves are untouched (backend dispatch, existing runs of them
 // in Completed Uploads, etc. all still work), this just hides them from the
@@ -42,13 +65,13 @@ const MODEL_OPTIONS: {
   {
     id: "None",
     label: "None",
-    desc: "View only — files never leave your browser",
+    desc: "View only: files never leave your browser",
     quickFacts: [
       { value: "Browser-only", label: "Where it runs" },
       { value: "None", label: "Inference" },
     ],
     details: [
-      "Nothing is uploaded - the scan opens straight in the local viewer from your browser's memory.",
+      "Nothing is uploaded: the scan opens straight in the local viewer from your browser's memory.",
       "No inference runs, so there's nothing to download or share afterward.",
     ],
   },
@@ -103,6 +126,7 @@ const MODEL_OPTIONS: {
 ];
 import { useNavigate } from "react-router-dom";
 import "./UploadPage.css";
+import UploadPipelineMenu, { type PipelineMenuItem } from "./UploadPipelineMenu";
 
 // Lazy so NiiVue / Cornerstone aren't pulled into the upload bundle until a file
 // is actually previewed. CtPreview handles NIfTI, DicomPreview handles a DICOM series.
@@ -131,7 +155,6 @@ import { track } from "../helpers/analytics";
 import UpgradeDialog, { type UpgradeBlock } from "../components/UpgradeDialog";
 import { useAuth } from "../contexts/authContext";
 import {
-  canPostprocess,
   gatingPlan,
   isModelLocked,
   maxConcurrentScans,
@@ -209,7 +232,7 @@ const estimateTypicalSeconds = (model: string, fileSizeBytes?: number): number =
   return profile.floorSeconds + profile.secondsPerMb * mb;
 };
 
-// "About 3 min left" from how long the run has been going vs. how long a run
+// "~3 min left" from how long the run has been going vs. how long a run
 // like this one usually takes. `typicalSecondsOverride` lets the caller swap
 // in a real server-measured median (see fetchDurationEstimate) once one is
 // available, instead of the size-formula fallback above. Once elapsed passes
@@ -226,7 +249,7 @@ const estimateRemaining = (
   const elapsed = (Date.now() - startedAt) / 1000;
   const remaining = typical - elapsed;
   if (remaining < 30) return "Finishing up…";
-  return `About ${formatEta(remaining)} left`;
+  return `${formatEta(remaining)} left`;
 };
 
 // A selection is either a single NIfTI file or a picked DICOM folder (the series'
@@ -392,6 +415,8 @@ const UploadPage: React.FC = () => {
   // same default), this goes false and the plan-aware default effect below
   // stops touching selectedModel, so it can never clobber a real choice.
   const modelTouchedRef = useRef(false);
+  // The comparison cards, in order, for the radio group's arrow keys.
+  const modelCardRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [modelDropOpen, setModelDropOpen] = useState(false);
   const [couponOpen, setCouponOpen] = useState(false);
   const [couponValue, setCouponValue] = useState("");
@@ -402,7 +427,14 @@ const UploadPage: React.FC = () => {
   const [lesionTarget, setLesionTarget] = useState<
     "pancreatic" | "liver" | "kidney" | "colon"
   >("pancreatic");
-  const modelDropRef = useRef<HTMLDivElement>(null);
+
+  const couponInputRef = useRef<HTMLInputElement>(null);
+  const couponRefocusRef = useRef(false);
+  useEffect(() => {
+    if (!couponRefocusRef.current) return;
+    couponRefocusRef.current = false;
+    document.querySelector<HTMLElement>('button[aria-labelledby^="upload-step-model "]')?.focus();
+  }, [modelDropOpen, couponOpen]);
 
   const submitAdminCoupon = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -414,18 +446,21 @@ const UploadPage: React.FC = () => {
       await redeemAdminCoupon(coupon);
       setCouponValue("");
       setCouponOpen(false);
+      // The coupon form goes with the lock, and the menu was opened to get
+      // past it: close the menu and hand focus to its trigger (see below).
+      couponRefocusRef.current = true;
+      setModelDropOpen(false);
       setMessage("Sponsored access enabled. All models are now available.");
     } catch (error) {
       setCouponError(error instanceof Error ? error.message : "That access coupon could not be redeemed.");
+      couponInputRef.current?.focus();
     } finally {
       setCouponBusy(false);
     }
   };
   const [preDropOpen, setPreDropOpen] = useState(false);
-  const preDropRef = useRef<HTMLDivElement>(null);
   const [preValue, setPreValue] = useState("");
   const [postDropOpen, setPostDropOpen] = useState(false);
-  const postDropRef = useRef<HTMLDivElement>(null);
   const [postValue, setPostValue] = useState("");
   const [isDragOver, setIsDragOver] = useState(false);
   const [recentUploads, setRecentUploads] = useState<RecentUpload[]>(() =>
@@ -468,7 +503,7 @@ const UploadPage: React.FC = () => {
   // and only ever read by the ETA display, no re-render needed on its own.
   const sessionFileSizeRef = useRef<Map<string, number>>(new Map());
   // Re-renders ProcessingCard once a second while anything is running, purely
-  // so the "About N min left" text advances - nothing else here depends on it.
+  // so the "~N min left" text advances - nothing else here depends on it.
   // Gated on there actually being a running scan: an unconditional 1s re-render
   // of the whole page while idle is wasted work, and it kept the dropzone in a
   // constant reflow (see the transition note in UploadPage.css).
@@ -951,42 +986,6 @@ const UploadPage: React.FC = () => {
     }, 1000);
     return () => clearInterval(timer);
   }, []);
-
-  useEffect(() => {
-    if (!modelDropOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (
-        modelDropRef.current &&
-        !modelDropRef.current.contains(e.target as Node)
-      )
-        setModelDropOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [modelDropOpen]);
-
-  useEffect(() => {
-    if (!preDropOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (preDropRef.current && !preDropRef.current.contains(e.target as Node))
-        setPreDropOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [preDropOpen]);
-
-  useEffect(() => {
-    if (!postDropOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (
-        postDropRef.current &&
-        !postDropRef.current.contains(e.target as Node)
-      )
-        setPostDropOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [postDropOpen]);
 
   /* ── Upload (chunked) ── */
   // 512 KiB, not 256 KiB. Measured against the live backend (67 MB payload, loopback
@@ -1935,7 +1934,7 @@ const UploadPage: React.FC = () => {
             <path d="M20 6 9 17l-5-5" />
           </svg>
         </span>
-        <span>Inference Complete</span>
+        <span>Inference complete</span>
       </div>
       <div className="result-btns">
         {selectedModel === "OpenVAE" ? (
@@ -1947,10 +1946,10 @@ const UploadPage: React.FC = () => {
                 navigate(`/reconstruction/${sessionId}`);
               }}
             >
-              View Reconstruction
+              View reconstruction
             </button>
             <button className="result-btn" onClick={handleRunEpaiOnReconstruction}>
-              Run ePAI on Result
+              Run ePAI on result
             </button>
             <button className="result-btn" onClick={() => downloadResult(sessionId)}>
               Download
@@ -1965,10 +1964,10 @@ const UploadPage: React.FC = () => {
                 navigate(`/session/${sessionId}`);
               }}
             >
-              View Visualization
+              View visualization
             </button>
             <button className="result-btn" onClick={() => downloadResult(sessionId)}>
-              Download Results
+              Download results
             </button>
           </>
         )}
@@ -1999,6 +1998,30 @@ const UploadPage: React.FC = () => {
       />
     </div>
   );
+
+  // The Model step's rows. LesionSegmenter carries its lesion picker as a
+  // submenu; lesionTarget keeps whatever it was last set to even while
+  // another model is active, so a lesion only shows checked while
+  // LesionSegmenter itself is the selected model.
+  const modelMenuItems: PipelineMenuItem[] = MODEL_OPTIONS.map((m) => {
+    const locked = modelLocked(m.id);
+    return {
+      id: m.id,
+      label: m.label,
+      desc: m.desc,
+      checked: selectedModel === m.id,
+      locked,
+      badge: locked ? "Donate" : undefined,
+      submenu:
+        !locked && m.id === "LesionSegmenter"
+          ? LESION_OPTIONS.map((l) => ({
+              id: l.id,
+              label: l.label,
+              checked: selectedModel === "LesionSegmenter" && lesionTarget === l.id,
+            }))
+          : undefined,
+    };
+  });
 
   return (
     <div className="upload-page-wrapper">
@@ -2234,397 +2257,137 @@ const UploadPage: React.FC = () => {
             {/* Step 1: Preprocessing */}
             <div className="pipeline-step">
               <div className="pipeline-step-header">
-                <div className="pipeline-badge">1</div>
-                <span className="pipeline-label">Preprocessing</span>
+                <div className="pipeline-badge" aria-hidden="true">1</div>
+                <span className="pipeline-label" id="upload-step-pre">Preprocessing</span>
                 <span className="pipeline-optional">optional</span>
               </div>
-              <div className="model-dropdown" ref={preDropRef}>
-                <button
-                  className={`model-dropdown-btn${preValue ? " has-value" : ""}${preDropOpen ? " open" : ""}`}
-                  onClick={() => setPreDropOpen((o) => !o)}
-                  type="button"
-                >
-                  <span>{preValue || "None (skip)"}</span>
-                  <svg
-                    className={`model-dropdown-chevron${preDropOpen ? " rotated" : ""}`}
-                    width="10"
-                    height="6"
-                    viewBox="0 0 10 6"
-                    fill="none"
-                  >
-                    <path
-                      d="M1 1l4 4 4-4"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-                {preDropOpen && (
-                  <div className="model-dropdown-menu">
-                    {[
-                      {
-                        id: "",
-                        label: "None (skip)",
-                        desc: "Upload and segment as-is",
-                      },
-                      {
-                        id: "OpenVAE",
-                        label: "OpenVAE",
-                        desc: "Enhance the scan quality before segmenting",
-                      },
-                    ].map((opt) => (
-                      <div
-                        key={opt.id}
-                        className={`model-dropdown-item${preValue === opt.id ? " selected" : ""}`}
-                        onClick={() => {
-                          setPreValue(opt.id);
-                          setPreDropOpen(false);
-                        }}
-                      >
-                        <div className="model-dropdown-item-content">
-                          <span className="model-dropdown-item-name">
-                            {opt.label}
-                          </span>
-                          <span className="model-dropdown-item-desc">
-                            {opt.desc}
-                          </span>
-                        </div>
-                        <div className="model-dropdown-item-side">
-                          {preValue === opt.id && (
-                            <svg
-                              width="12"
-                              height="12"
-                              viewBox="0 0 12 12"
-                              fill="none"
-                              className="model-dropdown-check"
-                            >
-                              <path
-                                d="M2 6l3 3 5-5"
-                                stroke="currentColor"
-                                strokeWidth="1.5"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              />
-                            </svg>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {/* OpenVAE preprocessing isn't wired into the run yet (nothing
+                  consumes this value), so it's shown but disabled rather
+                  than silently discarded. */}
+              <UploadPipelineMenu
+                labelId="upload-step-pre"
+                valueText={preValue || "None (skip)"}
+                hasValue={!!preValue}
+                open={preDropOpen}
+                onOpenChange={setPreDropOpen}
+                items={PRE_OPTIONS.map((opt) => ({ ...opt, checked: preValue === opt.id }))}
+                onSelect={(id) => setPreValue(id)}
+              />
             </div>
 
-            <div className="pipeline-arrow">→</div>
+            <div className="pipeline-arrow" aria-hidden="true">→</div>
 
             {/* Step 2: Model */}
             <div className="pipeline-step">
               <div className="pipeline-step-header">
-                <div className="pipeline-badge">2</div>
-                <span className="pipeline-label">Model</span>
+                <div className="pipeline-badge" aria-hidden="true">2</div>
+                <span className="pipeline-label" id="upload-step-model">Model</span>
               </div>
-              <div className="model-dropdown" ref={modelDropRef}>
-                <button
-                  className={`model-dropdown-btn${selectedModel && selectedModel !== "None" ? " has-value" : ""}${modelDropOpen ? " open" : ""}`}
-                  onClick={() => setModelDropOpen((o) => !o)}
-                  type="button"
-                >
-                  <span>
-                    {selectedModel === "None"
-                      ? "None (view scan)"
-                      : selectedModel === "LesionSegmenter"
-                        ? `LesionSegmenter — ${
-                            LESION_OPTIONS.find((l) => l.id === lesionTarget)
-                              ?.label ?? "Pancreatic lesion"
-                          }`
-                        : MODEL_OPTIONS.find((m) => m.id === selectedModel)
-                            ?.label || "Select a model"}
-                  </span>
-                  <svg
-                    className={`model-dropdown-chevron${modelDropOpen ? " rotated" : ""}`}
-                    width="10"
-                    height="6"
-                    viewBox="0 0 10 6"
-                    fill="none"
-                  >
-                    <path
-                      d="M1 1l4 4 4-4"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-                {modelDropOpen && (
-                  <div className="model-dropdown-menu">
-                    {MODEL_OPTIONS.map((m) => {
-                      // Locked models stay visible with an "Upgrade" pill rather
-                      // than being hidden — you can't want what you can't see,
-                      // and ChatGPT's model picker works the same way.
-                      const locked = modelLocked(m.id);
-                      const hasSubmenu = !locked && m.id === "LesionSegmenter";
-                      return (
-                      <div
-                        key={m.id}
-                        className={`model-dropdown-item${selectedModel === m.id ? " selected" : ""}${locked ? " locked" : ""}${hasSubmenu ? " has-submenu" : ""}`}
+              <UploadPipelineMenu
+                labelId="upload-step-model"
+                valueText={
+                  selectedModel === "None"
+                    ? "None (view scan)"
+                    : selectedModel === "LesionSegmenter"
+                      ? `LesionSegmenter (${(
+                          LESION_OPTIONS.find((l) => l.id === lesionTarget)?.label ?? "Pancreatic lesion"
+                        ).toLowerCase()})`
+                      : MODEL_OPTIONS.find((m) => m.id === selectedModel)?.label || "Select a model"
+                }
+                hasValue={!!selectedModel}
+                open={modelDropOpen}
+                onOpenChange={setModelDropOpen}
+                items={modelMenuItems}
+                onSelect={(id) => {
+                  // Locked models stay visible with a "Donate" pill rather
+                  // than being hidden (you can't want what you can't see),
+                  // and picking one explains the lock instead of selecting.
+                  if (modelLocked(id)) {
+                    const opt = MODEL_OPTIONS.find((m) => m.id === id);
+                    setUpgradeBlock({
+                      reason: "model_locked", feature: opt?.label ?? id, plan: plan as PlanId,
+                    });
+                    return;
+                  }
+                  track("upload_select_model");
+                  modelTouchedRef.current = true;
+                  setSelectedModel(id as typeof selectedModel);
+                }}
+                onSelectSub={(_itemId, lesionId) => {
+                  modelTouchedRef.current = true;
+                  setSelectedModel("LesionSegmenter");
+                  setLesionTarget(lesionId as typeof lesionTarget);
+                }}
+                footer={
+                  isAuthenticated && modelLocked("ePAI") ? (
+                    <div className="model-dropdown-access" onClick={(event) => event.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="model-dropdown-access__toggle"
+                        aria-expanded={couponOpen}
                         onClick={() => {
-                          if (locked) {
-                            setModelDropOpen(false);
-                            setUpgradeBlock({
-                              reason: "model_locked", feature: m.label, plan: plan as PlanId,
-                            });
-                            return;
-                          }
-                          track("upload_select_model");
-                          modelTouchedRef.current = true;
-                          setSelectedModel(m.id as typeof selectedModel);
-                          setModelDropOpen(false);
+                          setCouponOpen((open) => !open);
+                          setCouponError(null);
                         }}
                       >
-                        <div className="model-dropdown-item-content">
-                          <span className="model-dropdown-item-name">
-                            {m.label}
-                          </span>
-                          <span className="model-dropdown-item-desc">
-                            {m.desc}
-                          </span>
-                        </div>
-                        <div className="model-dropdown-item-side">
-                          {locked && <span className="model-dropdown-lock">Donate</span>}
-                          {hasSubmenu ? (
-                            <svg
-                              className="model-submenu-arrow"
-                              width="7"
-                              height="10"
-                              viewBox="0 0 7 10"
-                              fill="none"
-                            >
-                              <path
-                                d="M1 1l4 4-4 4"
-                                stroke="currentColor"
-                                strokeWidth="1.5"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              />
-                            </svg>
-                          ) : (
-                            !locked && selectedModel === m.id && (
-                            <svg
-                              width="12"
-                              height="12"
-                              viewBox="0 0 12 12"
-                              fill="none"
-                              className="model-dropdown-check"
-                            >
-                              <path
-                                d="M2 6l3 3 5-5"
-                                stroke="currentColor"
-                                strokeWidth="1.5"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              />
-                            </svg>
-                            )
-                          )}
-                        </div>
-                        {hasSubmenu && (
-                          <div className="model-submenu" role="menu">
-                            {LESION_OPTIONS.map((l) => {
-                              // lesionTarget keeps whatever it was last set to even
-                              // when a different model is active (it defaults to
-                              // "pancreatic" and there's no reason to clear it just
-                              // because the user picked ePAI) - so the checkmark
-                              // must also confirm LesionSegmenter is the SELECTED
-                              // model, not just that this is the remembered target.
-                              // Without the first half, "Pancreatic lesion" showed
-                              // checked here even while ePAI was the active model.
-                              const isChecked =
-                                selectedModel === "LesionSegmenter" && lesionTarget === l.id;
-                              return (
-                              <div
-                                key={l.id}
-                                role="menuitemradio"
-                                aria-checked={isChecked}
-                                className={`model-submenu-item${isChecked ? " selected" : ""}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  modelTouchedRef.current = true;
-                                  setSelectedModel("LesionSegmenter");
-                                  setLesionTarget(l.id);
-                                  setModelDropOpen(false);
-                                }}
-                              >
-                                <span className="model-submenu-check">
-                                  {isChecked && (
-                                    <svg
-                                      width="12"
-                                      height="12"
-                                      viewBox="0 0 12 12"
-                                      fill="none"
-                                    >
-                                      <path
-                                        d="M2 6l3 3 5-5"
-                                        stroke="currentColor"
-                                        strokeWidth="1.5"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                      />
-                                    </svg>
-                                  )}
-                                </span>
-                                <span className="model-submenu-label">
-                                  {l.label}
-                                </span>
-                              </div>
-                              );
-                            })}
+                        Have an admin access coupon?
+                      </button>
+                      {couponOpen && (
+                        <form className="model-dropdown-access__form" onSubmit={submitAdminCoupon}>
+                          <label htmlFor="admin-access-coupon">Access coupon</label>
+                          <div className="model-dropdown-access__row">
+                            <input
+                              ref={couponInputRef}
+                              id="admin-access-coupon"
+                              type="password"
+                              value={couponValue}
+                              onChange={(event) => setCouponValue(event.target.value)}
+                              placeholder="Enter coupon"
+                              autoComplete="off"
+                              // Not `disabled` while checking: a disabled control
+                              // drops keyboard focus to the page.
+                              readOnly={couponBusy}
+                              aria-busy={couponBusy}
+                            />
+                            <button type="submit" aria-disabled={couponBusy} disabled={!couponBusy && !couponValue.trim()}>
+                              {couponBusy ? "Checking…" : "Unlock"}
+                            </button>
                           </div>
-                        )}
-                      </div>
-                      );
-                    })}
-                    {isAuthenticated && modelLocked("ePAI") && (
-                      <div className="model-dropdown-access" onClick={(event) => event.stopPropagation()}>
-                        <button
-                          type="button"
-                          className="model-dropdown-access__toggle"
-                          onClick={() => {
-                            setCouponOpen((open) => !open);
-                            setCouponError(null);
-                          }}
-                        >
-                          Have an admin access coupon?
-                        </button>
-                        {couponOpen && (
-                          <form className="model-dropdown-access__form" onSubmit={submitAdminCoupon}>
-                            <label htmlFor="admin-access-coupon">Access coupon</label>
-                            <div className="model-dropdown-access__row">
-                              <input
-                                id="admin-access-coupon"
-                                type="password"
-                                value={couponValue}
-                                onChange={(event) => setCouponValue(event.target.value)}
-                                placeholder="Enter coupon"
-                                autoComplete="off"
-                                disabled={couponBusy}
-                              />
-                              <button type="submit" disabled={couponBusy || !couponValue.trim()}>
-                                {couponBusy ? "Checking…" : "Unlock"}
-                              </button>
-                            </div>
-                            {couponError && <p role="alert">{couponError}</p>}
-                            <small>Access is verified by the server and does not grant admin controls.</small>
-                          </form>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+                          {couponError && <p role="alert">{couponError}</p>}
+                          <small>Access is verified by the server and does not grant admin controls.</small>
+                        </form>
+                      )}
+                    </div>
+                  ) : undefined
+                }
+              />
             </div>
 
-            <div className="pipeline-arrow">→</div>
+            <div className="pipeline-arrow" aria-hidden="true">→</div>
 
             {/* Step 3: Postprocessing */}
-            <div className="pipeline-step">
+            <div className="pipeline-step pipeline-step--last">
               <div className="pipeline-step-header">
-                <div className="pipeline-badge">3</div>
-                <span className="pipeline-label">Postprocessing</span>
+                <div className="pipeline-badge" aria-hidden="true">3</div>
+                <span className="pipeline-label" id="upload-step-post">Postprocessing</span>
                 <span className="pipeline-optional">optional</span>
               </div>
-              <div className="model-dropdown" ref={postDropRef}>
-                <button
-                  className={`model-dropdown-btn${postValue ? " has-value" : ""}${postDropOpen ? " open" : ""}`}
-                  onClick={() => setPostDropOpen((o) => !o)}
-                  type="button"
-                >
-                  <span>{postValue || "None (skip)"}</span>
-                  <svg
-                    className={`model-dropdown-chevron${postDropOpen ? " rotated" : ""}`}
-                    width="10"
-                    height="6"
-                    viewBox="0 0 10 6"
-                    fill="none"
-                  >
-                    <path
-                      d="M1 1l4 4 4-4"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-                {postDropOpen && (
-                  <div className="model-dropdown-menu">
-                    {[
-                      {
-                        id: "",
-                        label: "None (skip)",
-                        desc: "Use results as-is",
-                      },
-                      {
-                        id: "ShapeKit",
-                        label: "ShapeKit",
-                        desc: "Clean up and smooth organ outlines",
-                      },
-                    ].map((opt) => {
-                      const locked =
-                        opt.id !== "" && isAuthenticated && !canPostprocess(plan);
-                      return (
-                      <div
-                        key={opt.id}
-                        className={`model-dropdown-item${postValue === opt.id ? " selected" : ""}${locked ? " locked" : ""}`}
-                        onClick={() => {
-                          if (locked) {
-                            setPostDropOpen(false);
-                            setUpgradeBlock({
-                              reason: "postprocessing", feature: opt.label, plan: plan as PlanId,
-                            });
-                            return;
-                          }
-                          track("upload_select_postprocessing");
-                          setPostValue(opt.id);
-                          setPostDropOpen(false);
-                        }}
-                      >
-                        <div className="model-dropdown-item-content">
-                          <span className="model-dropdown-item-name">
-                            {opt.label}
-                          </span>
-                          <span className="model-dropdown-item-desc">
-                            {opt.desc}
-                          </span>
-                        </div>
-                        <div className="model-dropdown-item-side">
-                          {locked && <span className="model-dropdown-lock">Donate</span>}
-                          {!locked && postValue === opt.id && (
-                            <svg
-                              width="12"
-                              height="12"
-                              viewBox="0 0 12 12"
-                              fill="none"
-                              className="model-dropdown-check"
-                            >
-                              <path
-                                d="M2 6l3 3 5-5"
-                                stroke="currentColor"
-                                strokeWidth="1.5"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              />
-                            </svg>
-                          )}
-                        </div>
-                      </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+              {/* ShapeKit postprocessing isn't wired into the run yet (nothing
+                  consumes this value), so it's shown but disabled - no Donate
+                  lock on a control that does nothing. The plan gate returns
+                  when the wiring lands. */}
+              <UploadPipelineMenu
+                labelId="upload-step-post"
+                valueText={postValue || "None (skip)"}
+                hasValue={!!postValue}
+                open={postDropOpen}
+                onOpenChange={setPostDropOpen}
+                items={POST_OPTIONS.map((opt) => ({ ...opt, checked: postValue === opt.id }))}
+                onSelect={(id) => {
+                  track("upload_select_postprocessing");
+                  setPostValue(id);
+                }}
+              />
             </div>
 
             <button
@@ -2834,11 +2597,11 @@ const UploadPage: React.FC = () => {
 
           // ── Model comparison: one info card per model, always shown, so the
           // models can be weighed against each other. Clicking a card selects
-          // it (the pipeline dropdown does the same); the selected card is
-          // outlined + badged. The section stays put - it doesn't collapse or
-          // rearrange based on what's been picked. ──
+          // it (the pipeline dropdown does the same, and neither asks a guest
+          // to sign in: picking a model sends nothing, and Run still does);
+          // the selected card is outlined + badged. The section stays put - it
+          // doesn't collapse or rearrange based on what's been picked. ──
           const pickModelFromCard = (id: string) => {
-            if (!ensureAccount()) return;
             const opt = MODEL_OPTIONS.find((m) => m.id === id);
             if (modelLocked(id)) {
               setUpgradeBlock({ reason: "model_locked", feature: opt?.label ?? id, plan: plan as PlanId });
@@ -2859,20 +2622,47 @@ const UploadPage: React.FC = () => {
           // "None" (view-only, no inference) is a real dropdown option but isn't
           // a model to compare against the other three, so it's left out of the
           // comparison grid.
-          const modelCards = MODEL_OPTIONS.filter((m) => m.id !== "None").map((m) => {
+          const cardModels = MODEL_OPTIONS.filter((m) => m.id !== "None");
+          // A radio group is one tab stop: the checked card, or the first one
+          // while none is (model "None"). Arrow keys move between cards and
+          // select, as radios do; a locked card only takes focus, so arrowing
+          // past it doesn't throw up the upgrade dialog (Enter or Space on it
+          // explains the lock).
+          const tabStopId = cardModels.some((m) => m.id === currentModelId)
+            ? currentModelId
+            : cardModels[0]?.id;
+          const onCardKeyDown = (e: React.KeyboardEvent<HTMLDivElement>, index: number) => {
+            const last = cardModels.length - 1;
+            let next: number | null = null;
+            if (e.key === "ArrowRight" || e.key === "ArrowDown") next = index === last ? 0 : index + 1;
+            else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = index === 0 ? last : index - 1;
+            else if (e.key === "Home") next = 0;
+            else if (e.key === "End") next = last;
+            if (next !== null) {
+              e.preventDefault();
+              modelCardRefs.current[next]?.focus();
+              const target = cardModels[next];
+              if (!modelLocked(target.id)) pickModelFromCard(target.id);
+              return;
+            }
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              pickModelFromCard(cardModels[index].id);
+            }
+          };
+          const modelCards = cardModels.map((m, index) => {
             const isCurrent = currentModelId === m.id;
             const locked = modelLocked(m.id);
             return (
               <div
                 key={m.id}
+                ref={(el) => { modelCardRefs.current[index] = el; }}
                 role="radio"
                 aria-checked={isCurrent}
                 aria-label={`Select the ${m.label} model`}
-                tabIndex={0}
+                tabIndex={m.id === tabStopId ? 0 : -1}
                 onClick={() => pickModelFromCard(m.id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickModelFromCard(m.id); }
-                }}
+                onKeyDown={(e) => onCardKeyDown(e, index)}
                 style={{
                   background: "#fff",
                   border: isCurrent ? "1.5px solid #002d72" : "1px solid rgba(0,0,0,0.08)",

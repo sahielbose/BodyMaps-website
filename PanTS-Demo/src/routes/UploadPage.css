@@ -367,7 +367,17 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   text-align: left;
+}
+/* One line, always: a long value ("LesionSegmenter (pancreatic lesion)")
+   truncates with the full text in the tooltip and the accessible name,
+   instead of wrapping and making its step taller than the other two. */
+.model-dropdown-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .model-dropdown-btn:hover {
   border-color: rgba(0,0,0,.15);
@@ -423,13 +433,48 @@
 .model-dropdown-item.selected {
   background: rgba(0, 45, 114, .05);
 }
+/* Keyboard focus inside the menu: the arrow keys move a visible highlight. */
+.model-dropdown-item:focus,
+.model-submenu-item:focus {
+  outline: none;
+}
+.model-dropdown-item:focus-visible,
+.model-submenu-item:focus-visible {
+  background: rgba(0, 45, 114, .08);
+  box-shadow: inset 0 0 0 2px var(--focus-ring, #002d72);
+}
+/* "Coming soon": announced as disabled and skipped by the arrow keys, and it
+   has to look it too - no pointer, no hover, lighter text, a grey pill. */
+.model-dropdown-item[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+.model-dropdown-item[aria-disabled="true"]:hover {
+  background: transparent;
+}
+.model-dropdown-item[aria-disabled="true"] .model-dropdown-item-name,
+.model-dropdown-item[aria-disabled="true"] .model-dropdown-item-desc {
+  color: #767676;
+}
+.model-dropdown-item[aria-disabled="true"] .model-dropdown-item-name {
+  font-weight: 400;
+}
+.model-dropdown-item[aria-disabled="true"] .model-dropdown-lock {
+  background: rgba(0, 0, 0, .06);
+  color: #4a4a4a;
+}
 .model-dropdown-item-content {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  /* Take the slack, so the pill sits at the edge rather than squeezing the text. */
+  /* Take the slack, so the check sits at the edge rather than squeezing the text. */
   flex: 1;
   min-width: 0;
+}
+.model-dropdown-item-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
 }
 .model-dropdown-item-name {
   font-family: 'Space Grotesk', sans-serif;
@@ -443,7 +488,7 @@
 .model-dropdown-item-desc {
   font-family: 'Space Grotesk', sans-serif;
   font-size: 11px;
-  color: #8f8f8f;
+  color: #6a6a6a;
 }
 .model-dropdown-check {
   color: #002d72;
@@ -1019,8 +1064,16 @@
   width: 8px;
   height: 100%;
 }
+/* The last row sits at the bottom of the menu, often at the bottom of the
+   screen, so its flyout opens upward from the row's bottom edge instead of
+   running down past the footer. */
+.model-dropdown-item.has-submenu:last-child > .model-submenu {
+  top: auto;
+  bottom: -1px;
+}
 .model-dropdown-item.has-submenu:hover > .model-submenu,
-.model-dropdown-item.has-submenu:focus-within > .model-submenu {
+.model-dropdown-item.has-submenu:focus-within > .model-submenu,
+.model-dropdown-item.submenu-open > .model-submenu {
   opacity: 1;
   visibility: visible;
   transform: translateX(0);
@@ -1061,6 +1114,64 @@
 }
 .model-submenu-item.selected .model-submenu-label {
   color: #002d72;
+}
+
+/* Just above the phone layout (641 to 760px) three dropdowns, two arrows and
+   Run don't fit on one line: "None (view scan)" wrapped and the Model step
+   stood taller than its neighbours. The steps keep their row (the numbered
+   badges already give the order, so the arrows go) and Run takes the full
+   width underneath. Each step is then under 210px wide, so the last step's
+   300px menu hung past the right edge (the wrapper clips it); it opens
+   leftwards from the step's right edge instead. */
+@media (min-width: 641px) and (max-width: 760px) {
+  .pipeline-row {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .pipeline-arrow {
+    display: none;
+  }
+  .run-btn {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+  .pipeline-step--last .model-dropdown-menu {
+    left: auto;
+    right: 0;
+  }
+}
+
+/* Up to 800px the lesion flyout (220px, beside a 300px menu) runs off the
+   right edge, and a hover flyout never opens on touch anyway, so it renders
+   inline below its item, as on phones. */
+@media (max-width: 800px) {
+  .model-dropdown-item.has-submenu {
+    flex-wrap: wrap;
+  }
+  .model-submenu-arrow {
+    display: none; /* points at a flyout that is now inline below */
+  }
+  /* The row is padded (10px 14px) and takes the hover and selected tint, so
+     the inline list reaches out to the row's edges and lets that tint show:
+     no inset white box, no grey strips that select the model when clicked. */
+  .model-submenu {
+    position: static;
+    width: calc(100% + 28px);
+    min-width: 0;
+    margin: 10px -14px -10px;
+    padding: 0;
+    background: transparent;
+    box-shadow: none;
+    border: none;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 0;
+    transform: none;
+    opacity: 1;
+    visibility: visible;
+  }
+  .model-submenu::before {
+    display: none;
+  }
 }
 
 @media (max-width: 640px) {

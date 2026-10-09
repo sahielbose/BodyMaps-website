@@ -52,7 +52,7 @@ describe("model comparison cards", () => {
     expect(screen.getByText(/Full abdominal organ segmentation/)).toBeInTheDocument();
     expect(screen.getByText(/anatomically consistent/)).toBeInTheDocument();
     expect(screen.getByText(/fast pancreatic lesion detection/)).toBeInTheDocument();
-    expect(screen.queryByText(/View only — files never leave your browser/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/View only: files never leave your browser/)).not.toBeInTheDocument();
   });
 
   it("stays put after a pick and moves the Selected badge to the clicked card", async () => {

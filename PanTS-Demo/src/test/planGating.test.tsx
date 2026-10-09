@@ -189,14 +189,18 @@ describe("model access", () => {
 
     expect(await screen.findByText("Sponsored access enabled. All models are now available.")).toBeInTheDocument();
     expect(screen.queryByText("Donate")).not.toBeInTheDocument();
+    // Unlocking closes the menu it was opened from; open it again to pick.
+    await openModelMenu(user);
     await user.click(modelOption("ePAI"));
     expect(screen.queryByText("ePAI needs Pro")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^ePAI$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Model ePAI$/i })).toBeInTheDocument();
   });
 });
 
 describe("postprocessing", () => {
-  it("is locked on Free", async () => {
+  // ShapeKit isn't wired into the run yet (its value was never sent anywhere),
+  // so it is disabled as coming soon on every plan - not sold behind a lock.
+  it("shows ShapeKit as coming soon and refuses to select it", async () => {
     const user = userEvent.setup();
     renderUpload();
     await settled();
@@ -205,9 +209,16 @@ describe("postprocessing", () => {
     // the second is the one ShapeKit lives under.
     const skipButtons = screen.getAllByRole("button", { name: /None \(skip\)/ });
     await user.click(skipButtons[skipButtons.length - 1]);
+
+    expect(screen.getByText("Coming soon")).toBeInTheDocument();
     await user.click(screen.getByText("ShapeKit"));
 
-    expect(await screen.findByText("ShapeKit needs Pro")).toBeInTheDocument();
+    // No upgrade dialog for a control that does nothing, and no selection:
+    // both step triggers still read "None (skip)".
+    expect(screen.queryByText("ShapeKit needs Pro")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: /None \(skip\)/ })
+    ).toHaveLength(2);
   });
 });
 
