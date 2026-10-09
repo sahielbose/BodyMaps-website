@@ -1,7 +1,9 @@
 // helpers/viewer/useLevelTracing.ts
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import {
 	canvasPointToVoxel,
+	canvasPointToWorld,
+	isWorldPointInSegmentation,
 	computeLevelTraceMask,
 	commitLevelTraceMask,
 	levelTraceMaskToCanvasPath,
@@ -10,6 +12,8 @@ import {
 	type MaskFilter,
 	type CinePane,
 } from "../CornerstoneNifti2";
+import { operationLog } from "./editLog";
+import { commitOnRelease } from "./commitOnRelease";
 
 interface UseLevelTracingArgs {
 	enabled: boolean;
@@ -30,14 +34,20 @@ interface UseLevelTracingArgs {
 	 *  mousemove happens to refresh it. Re-deriving the outline from the
 	 *  still-valid traced mask on every camera change keeps it pinned. */
 	cameraVersion?: number;
+	/** Changes whenever the slice under any pane changes (scroll, cine,
+	 *  crosshair). The cached outline belongs to the old slice, so it is
+	 *  dropped until the next mousemove traces the new one. */
+	sliceKey?: string;
 	onLog?: (detail: string) => void;
+	/** Plain-sentence hint shown to the reader when a click changed nothing. */
+	onNoop?: (message: string) => void;
 }
 
 /** Slicer-style level tracing: on hover, flood-fill the connected same-intensity
  *  region under the cursor on the current slice and preview its outline; on
  *  click, commit it into (or out of) the active segment per `operation`. */
 export function useLevelTracing({
-	enabled, toleranceHu, operation, activeSegmentIndex, maskFilter, cameraVersion, onLog,
+	enabled, toleranceHu, operation, activeSegmentIndex, maskFilter, cameraVersion, sliceKey, onLog, onNoop,
 }: UseLevelTracingArgs) {
 	const [previewPane, setPreviewPane] = useState<CinePane | null>(null);
 	const [previewPath, setPreviewPath] = useState<Array<[number, number]> | null>(null);
@@ -45,13 +55,18 @@ export function useLevelTracing({
 	// it without recomputing when the click point maps to the same voxel.
 	const tracedRef = useRef<{ pane: CinePane; mask: LevelTraceMask } | null>(null);
 
-	const clearPreview = () => {
+	const clearPreview = useCallback(() => {
 		tracedRef.current = null;
 		setPreviewPane(null);
 		setPreviewPath(null);
-	};
+	}, []);
 
 	const computeAt = (pane: CinePane, canvasPos: [number, number]): LevelTraceMask | null => {
+		// canvasPointToVoxel never bounds-checks, so a pointer in the black margin
+		// beside the scan would seed the flood off the grid and wrap onto the
+		// opposite edge of the slice.
+		const world = canvasPointToWorld(pane, canvasPos);
+		if (!world || !isWorldPointInSegmentation(world)) return null;
 		const seed = canvasPointToVoxel(pane, canvasPos);
 		if (!seed) return null;
 		return computeLevelTraceMask(pane, seed, toleranceHu);
@@ -70,25 +85,32 @@ export function useLevelTracing({
 
 	const handleClick = (pane: CinePane) => (e: MouseEvent) => {
 		if (!enabled) return;
-		if (activeSegmentIndex == null) {
-			onLog?.("Level tracing: no target segment selected.");
-			return;
-		}
+		// Runs from mousedown: a right or middle press must not commit a trace.
+		if (e.button !== 0) return;
+		if (activeSegmentIndex == null) return;
 		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
-		// Recompute fresh off the click point rather than trusting a possibly
-		// stale hover preview (e.g. a click with no preceding mousemove).
-		const traced = computeAt(pane, canvasPos) ?? (tracedRef.current?.pane === pane ? tracedRef.current.mask : null);
-		if (!traced) {
-			onLog?.("Level tracing: no traceable region under the cursor.");
-			return;
-		}
-		const result = commitLevelTraceMask(pane, traced, activeSegmentIndex, operation, maskFilter);
-		onLog?.(
-			result?.filledVoxels
-				? `Level trace ${operation} (${result.filledVoxels.toLocaleString()} vox)`
-				: "Level tracing: no voxels changed — try a different spot or higher sensitivity."
-		);
+		// Pan stays on the left button, so the trace is only committed on release
+		// and only if the pointer stayed put: a drag is a pan, not a click.
+		commitOnRelease(e, () => {
+			// Recompute fresh off the click point rather than trusting a possibly
+			// stale hover preview (e.g. a click with no preceding mousemove). A click
+			// beside the scan never falls back to that preview: it belongs to a spot
+			// the pointer has since left.
+			const world = canvasPointToWorld(pane, canvasPos);
+			if (world && !isWorldPointInSegmentation(world)) {
+				onNoop?.("That spot is outside the scan. Click on the image.");
+				return;
+			}
+			const traced = computeAt(pane, canvasPos) ?? (tracedRef.current?.pane === pane ? tracedRef.current.mask : null);
+			if (!traced) {
+				onNoop?.("No region to trace here. Try a different spot.");
+				return;
+			}
+			const result = commitLevelTraceMask(pane, traced, activeSegmentIndex, operation, maskFilter);
+			if (result?.filledVoxels) onLog?.(operationLog("Level trace", operation, result.filledVoxels));
+			else onNoop?.("Nothing changed. Try a different spot or a higher sensitivity.");
+		});
 	};
 
 	// Re-derive the outline from the still-valid (voxel-space) traced mask
@@ -101,9 +123,18 @@ export function useLevelTracing({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [cameraVersion]);
 
+	// The outline also goes stale when the tool is disarmed, the sensitivity
+	// changes (the pointer is on the toolbar, so no mousemove follows) or the
+	// slice changes under a still pointer; drop it and let the next hover
+	// trace afresh.
+	useEffect(() => {
+		clearPreview();
+	}, [enabled, toleranceHu, sliceKey, clearPreview]);
+
 	return {
 		handleClick,
 		handleMouseMove,
+		clearPreview,
 		previewPane,
 		previewPath,
 	};

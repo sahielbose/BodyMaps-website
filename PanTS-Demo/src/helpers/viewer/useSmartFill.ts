@@ -1,15 +1,18 @@
-import { useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import {
 	canvasPointToVoxel,
 	canvasPointToWorld,
 	worldToCanvasPoint,
 	runDualScribbleFill,
 	pushEditHistory,
+	isWorldPointInSegmentation,
+	discardEditHistoryEntries,
 	type CinePane,
 	type SliceInfo,
 	type MaskFilter,
 } from "../CornerstoneNifti2";
 import type { Point3 } from "@cornerstonejs/core/types";
+import { voxelsLog } from "./editLog";
 
 // World-space, not canvas-pixel — a canvas position only means what it means
 // for the camera active the instant it was clicked, so a dot stored that way
@@ -38,23 +41,27 @@ interface UseSmartFillArgs {
 	maskFilter: MaskFilter;
 	/** Optional reading-session logger. */
 	onLog?: (detail: string) => void;
+	/** Plain-sentence hint shown to the reader when a mark is refused. */
+	onNoop?: (message: string) => void;
 }
 
 /**
- * Click-and-drag scribble segmentation: mark foreground (cyan) and background
- * (red) voxels on any pane, then apply a dual-scribble fill that grows the
+ * Click-to-mark segmentation: mark foreground (cyan) and background (red)
+ * voxels on any pane, then apply a dual-scribble fill that grows the
  * foreground region away from the background markers. Scope can be locked to
- * the pane/slice the scribbles started on, or applied across the whole volume.
+ * the pane/slice the foreground was first marked on, or applied across the
+ * whole volume. A press that travels is a pan, not a mark.
  */
-export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog }: UseSmartFillArgs) {
-	const [markMode, setMarkMode] = useState<"fg" | "bg">("fg");
+export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog, onNoop }: UseSmartFillArgs) {
+	const [markMode, setMarkMode] = useState<"fg" | "bg" | null>("fg");
 	const [scope, setScope] = useState<"slice" | "volume">("slice");
 	const [previewWorld, setPreviewWorld] = useState<Record<CinePane, PanePreview>>(EMPTY_PREVIEW);
 
-	const scribbleActiveRef = useRef(false);
 	const fgVoxelsRef = useRef<[number, number, number][]>([]);
 	const bgVoxelsRef = useRef<[number, number, number][]>([]);
-	const paneRef = useRef<CinePane | null>(null);
+	// The pane the region was first marked in. The slice lock follows this, not
+	// whichever pane the last mark (often an exclusion point) landed on.
+	const fgPaneRef = useRef<CinePane | null>(null);
 
 	// Mirrors `previewWorld` so stroke bookkeeping can read the latest value
 	// synchronously (state updates are async/batched, refs aren't).
@@ -64,100 +71,146 @@ export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog }: UseSm
 		setPreviewWorld(next);
 	};
 
-	// Captures everything needed to undo/redo one whole click-and-drag
-	// stroke as a single step — not one undo per pixel, the same way a
-	// brush stroke undoes as one action rather than one per sampled point.
-	const strokeRef = useRef<{
+	// Where the left button went down. Pan stays on the left button while this
+	// tool is armed, so the mark is only committed on release, and only if the
+	// pointer stayed put: a drag is a pan and must not drop a seed at its start.
+	// Same 4px slack as the point prompt tool.
+	const pressRef = useRef<{
 		mode: "fg" | "bg";
 		pane: CinePane;
-		voxelStart: number;
-		previewStart: number;
+		canvasPos: [number, number];
+		client: [number, number];
+		moved: boolean;
 	} | null>(null);
 
+	// The shared-history entry of every stroke still on screen. Once the marks
+	// are cleared those entries only slice empty arrays, so they leave the
+	// history with them instead of costing the reader dead Undo presses.
+	const strokeEntriesRef = useRef<ReturnType<typeof pushEditHistory>[]>([]);
+
 	const clearScribbles = () => {
+		discardEditHistoryEntries(strokeEntriesRef.current.filter(Boolean));
+		strokeEntriesRef.current = [];
 		fgVoxelsRef.current = [];
 		bgVoxelsRef.current = [];
-		paneRef.current = null;
+		fgPaneRef.current = null;
 		updatePreview(EMPTY_PREVIEW);
 	};
 
-	const addPoint = (pane: CinePane, e: MouseEvent) => {
-		const target = e.currentTarget as HTMLElement;
-		const rect = target.getBoundingClientRect();
-		const canvasPos: [number, number] = [e.clientX - rect.left, e.clientY - rect.top];
+	// Returns what was added so the caller can record it as one undo step.
+	const addPoint = (mode: "fg" | "bg", pane: CinePane, canvasPos: [number, number]) => {
 		const voxel = canvasPointToVoxel(pane, canvasPos);
-		if (!voxel) return;
+		if (!voxel) return null;
 		const world = canvasPointToWorld(pane, canvasPos);
-		if (!world) return;
+		if (!world) return null;
+		// canvasPointToVoxel never bounds-checks, so a click in the black margin
+		// around the scan would count as a mark the fill later throws away.
+		if (!isWorldPointInSegmentation(world)) return null;
 
-		paneRef.current = pane;
-		(markMode === "fg" ? fgVoxelsRef : bgVoxelsRef).current.push(voxel);
+		const voxelsRef = mode === "fg" ? fgVoxelsRef : bgVoxelsRef;
+		const firstForeground = mode === "fg" && voxelsRef.current.length === 0;
+		if (firstForeground) fgPaneRef.current = pane;
+		voxelsRef.current.push(voxel);
 
 		const sliceIdx = sliceInfoRef.current[pane]?.current ?? -1;
+		const dot = { posWorld: world, slice: sliceIdx };
 		updatePreview({
 			...previewRef.current,
-			[pane]: {
-				...previewRef.current[pane],
-				[markMode]: [...previewRef.current[pane][markMode], { posWorld: world, slice: sliceIdx }],
-			},
+			[pane]: { ...previewRef.current[pane], [mode]: [...previewRef.current[pane][mode], dot] },
 		});
+		return { voxel, dot, firstForeground };
 	};
 
-	const apply = () => {
+	// Returns how many voxels the fill wrote, so the caller can tell a real
+	// fill from one that was refused (no background marks) or changed
+	// nothing. The marks are kept in that case so the user can adjust them.
+	const apply = (): number => {
 		const fg = fgVoxelsRef.current;
 		const bg = bgVoxelsRef.current;
-		if (!fg.length || !bg.length) return;
+		if (!fg.length || !bg.length) return 0;
 
-		const sliceLock = scope === "slice" && paneRef.current ? { pane: paneRef.current } : null;
+		const sliceLock = scope === "slice" && fgPaneRef.current ? { pane: fgPaneRef.current } : null;
 		const result = runDualScribbleFill(fg, bg, { sliceLock, maskFilter });
-		if (result) onLog?.(`Smart fill: ${result.filledVoxels.toLocaleString()} voxels`);
+		if (!result || result.filledVoxels <= 0) return 0;
+		const n = result.filledVoxels;
+		onLog?.(`Grew a class from seeds (${voxelsLog(n)})`);
 		clearScribbles();
+		return result.filledVoxels;
 	};
 
 	const handleMouseDown = (pane: CinePane) => (e: MouseEvent) => {
-		if (!enabled) return;
+		if (!enabled || !markMode) return;
+		// A right press opens the context menu, which swallows its mouseup and
+		// would leave the press pending with no button held.
+		if (e.button !== 0) return;
 		e.preventDefault();
-		scribbleActiveRef.current = true;
-		strokeRef.current = {
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		pressRef.current = {
 			mode: markMode,
 			pane,
-			voxelStart: (markMode === "fg" ? fgVoxelsRef : bgVoxelsRef).current.length,
-			previewStart: previewRef.current[pane][markMode].length,
+			canvasPos: [e.clientX - rect.left, e.clientY - rect.top],
+			client: [e.clientX, e.clientY],
+			moved: false,
 		};
-		addPoint(pane, e);
 	};
-	const handleMouseMove = (pane: CinePane) => (e: MouseEvent) => {
-		if (!enabled || !scribbleActiveRef.current) return;
-		addPoint(pane, e);
+	const handleMouseMove = (_pane: CinePane) => (e: MouseEvent) => {
+		const press = pressRef.current;
+		if (!enabled || !press || press.moved) return;
+		if (Math.abs(e.clientX - press.client[0]) >= 4 || Math.abs(e.clientY - press.client[1]) >= 4) press.moved = true;
 	};
+	// A press released outside the pane never reaches the pane's own mouseup
+	// handler, which would leave the press pending. The window always sees the
+	// release, and the handler below reads only refs, so ending the press from
+	// here is identical to ending it from the pane. A window blur has no
+	// release, so it drops the press without marking anything.
+	const handleMouseUpRef = useRef<() => void>(() => {});
+	useEffect(() => {
+		const end = () => handleMouseUpRef.current();
+		const cancel = () => { pressRef.current = null; };
+		window.addEventListener("mouseup", end);
+		window.addEventListener("blur", cancel);
+		return () => {
+			window.removeEventListener("mouseup", end);
+			window.removeEventListener("blur", cancel);
+		};
+	}, []);
+
 	const handleMouseUp = () => {
-		scribbleActiveRef.current = false;
-		const stroke = strokeRef.current;
-		strokeRef.current = null;
-		if (!stroke) return;
+		const press = pressRef.current;
+		pressRef.current = null;
+		if (!press || press.moved) return;
 
-		const { mode, pane, voxelStart, previewStart } = stroke;
+		const { mode, pane, canvasPos } = press;
 		const voxelsRef = mode === "fg" ? fgVoxelsRef : bgVoxelsRef;
-		const addedVoxels = voxelsRef.current.slice(voxelStart);
-		const addedPreview = previewRef.current[pane][mode].slice(previewStart);
-		if (!addedVoxels.length) return; // clicked but no valid voxel under the cursor
+		const voxelStart = voxelsRef.current.length;
+		const previewStart = previewRef.current[pane][mode].length;
+		const added = addPoint(mode, pane, canvasPos);
+		if (!added) {
+			// clicked but no valid voxel under the cursor
+			onNoop?.("That spot is outside the scan. Click on the image.");
+			return;
+		}
+		const { voxel, dot, firstForeground } = added;
 
-		pushEditHistory({
+		const entry = pushEditHistory({
 			undo: () => {
 				voxelsRef.current = voxelsRef.current.slice(0, voxelStart);
+				if (firstForeground) fgPaneRef.current = null;
 				updatePreview({
 					...previewRef.current,
 					[pane]: { ...previewRef.current[pane], [mode]: previewRef.current[pane][mode].slice(0, previewStart) },
 				});
 			},
 			redo: () => {
-				voxelsRef.current = [...voxelsRef.current, ...addedVoxels];
+				voxelsRef.current = [...voxelsRef.current, voxel];
+				if (firstForeground) fgPaneRef.current = pane;
 				updatePreview({
 					...previewRef.current,
-					[pane]: { ...previewRef.current[pane], [mode]: [...previewRef.current[pane][mode], ...addedPreview] },
+					[pane]: { ...previewRef.current[pane], [mode]: [...previewRef.current[pane][mode], dot] },
 				});
 			},
 		});
+		strokeEntriesRef.current.push(entry);
 	};
 
 	// Canvas-pixel view of the world-space preview dots, reprojected against
@@ -177,6 +230,8 @@ export function useSmartFill({ enabled, sliceInfoRef, maskFilter, onLog }: UseSm
 			}
 		});
 	});
+
+	handleMouseUpRef.current = handleMouseUp;
 
 	return {
 		markMode,

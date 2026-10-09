@@ -56,6 +56,7 @@ import { SoloChallengeDock, SoloChallengeHeader } from "../education/SoloChallen
 import { QuizPracticeDock, QuizPracticeHeader } from "../education/QuizPracticeChrome";
 import type { QuizPracticeController, SoloChallengeController } from "../education/types";
 import SegmentsPopup from "../components/segmentation/SegmentsPopup";
+import { toggleCheckState, visibilityById, visibilityFromCheckState } from "../components/segmentation/segmentVisibility";
 import MarginPanel from "../components/segmentation/MarginPanel";
 import IslandsPanel from "../components/segmentation/IslandsPanel";
 import LogicalOperatorsPanel from "../components/segmentation/LogicalOperatorsPanel";
@@ -68,6 +69,7 @@ import CopyAcrossSlicesFlyout from "../components/segmentation/CopyAcrossSlicesF
 import { GuidedStepModal } from "../components/segmentation/SliceAnchorPickerUI";
 import HollowFlyout from "../components/segmentation/HollowFlyout";
 import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
+import { organTipPosition } from "../helpers/viewer/organTipPosition";
 import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
 import { voxelsLog } from "../helpers/viewer/editLog";
 import { useInteractivePromptTool } from "../helpers/viewer/useInteractivePromptTool";
@@ -112,6 +114,7 @@ import {
     getMeasurementSummaries,
     getSharedMprView,
     getOrganCentroids,
+    isSegmentationComplete,
     getOrganLabelAtPoint,
     getOrganLabelOnClick,
     LENGTH_TOOL,
@@ -120,13 +123,18 @@ import {
     PROBE_TOOL,
     removeRemoteMeasurement,
     redoMaskEdit,
+    getMaskEditHistoryState,
+    subscribeToMaskHistory,
     registerNewSegmentColor,
+    removeCustomSegmentLabel,
     renderVisualization,
+    resetMaskEditHistory,
     resetMprOrientation,
 	releasePrimaryMouseTools,
     ROI_TOOL,
     rotatePane90Clockwise,
     setActiveMaskEditTool,
+    setCustomSegmentLabel,
     setActiveMeasurementTool,
     setFillOpacity,
     setOutlineOpacity,
@@ -195,13 +203,14 @@ import {
 } from "../helpers/readingSession";
 import { toolDisplayName, type ReportMeasurement } from "../helpers/sessionReport";
 import {getPanTSId } from "../helpers/utils";
-import { filenameToName } from "../helpers/utils.name";
+import { classInSentence, filenameToName } from "../helpers/utils.name";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
 import { LiveRoomDock, LiveRoomHeader } from "../liveRooms/LiveRoomChrome";
 import LiveRoomCreateDialog from "../liveRooms/LiveRoomCreateDialog";
 import { appRootRelativeUrl } from "../liveRooms/protocol";
 import type { LiveRoomController, LiveRoomMaskPatch } from "../liveRooms/types";
 import { type CheckBoxData } from "../types";
+import { splitClassBookkeeping } from "../helpers/splitClassBookkeeping";
 import "./VisualizationPage.css";
 import LiveWireOverlay from "../components/viewer/LiveWireOverlay";
 
@@ -499,6 +508,13 @@ const INCLUDE_3D_PANE_IN_SNAPSHOTS: boolean = false;
 const VIEWER_LOAD_TIMEOUT_MS = 300_000;
 const VIEWER_RETRY_BASE_DELAY_MS = 2_000;
 const VIEWER_RETRY_MAX_DELAY_MS = 30_000;
+
+// The undo and redo tooltips name the keys the reader's own keyboard has: Cmd on Apple
+// devices, Ctrl everywhere else.
+function shortcutModifier(withShift = false): string {
+	const platform = typeof navigator === "undefined" ? "" : navigator.platform || navigator.userAgent || "";
+	return /Mac|iPhone|iPad/.test(platform) ? (withShift ? "⇧⌘" : "⌘") : withShift ? "Ctrl+Shift+" : "Ctrl+";
+}
 
 function isRetryableViewerLoadError(error: unknown): boolean {
 	if (error instanceof DOMException && error.name === "AbortError") return false;
@@ -964,7 +980,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const [levelTraceTolerance, setLevelTraceTolerance] = useState(50);
 	const [levelTraceOperation, setLevelTraceOperation] = useState<LevelTraceOperation>("fillInside");
 	const [segmentColorsHex, setSegmentColorsHex] = useState<Record<number, string>>({});
-	const [segmentVisibility, setSegmentVisibility] = useState<Record<number, boolean>>({});
 	// "Show only target class's mask" toggle state — on by default. See the
 	// isolation effect below for how this actually filters visibility.
 	const [showOnlyTargetMask, setShowOnlyTargetMask] = useState(true);
@@ -1025,25 +1040,23 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		const dup = checkBoxData.some((s) => s.id !== id && s.label.toLowerCase() === name.toLowerCase());
 		if (dup) return false;
 		setCheckBoxData((prev) => prev.map((s) => (s.id === id ? { ...s, label: name } : s)));
+		setCustomSegmentLabel(id, name);
 		return true;
 	};
 
 	const handleSegmentColorChange = (id: number, hex: string) => {
 	setSegmentColorsHex((prev) => ({ ...prev, [id]: hex }));
-	registerNewSegmentColor(id, hexToColor(hex));
+	const color = hexToColor(hex);
+	registerNewSegmentColor(id, color);
+	// labelColorMap is what the 3D mesh, the hover tip swatch and the AI legend read.
+	setLabelColorMap((prev) => ({ ...prev, [id]: color }));
 	};
 
+	// checkState is the one record of what is visible (the isolation effect and
+	// the no-target reset write it too), so the eye flips it directly.
 	const handleToggleSegmentVisibility = (id: number) => {
 	track("viewer_toggle_organ");
-	setSegmentVisibility((prev) => {
-		const next = { ...prev, [id]: prev[id] === false ? true : false };
-		setCheckState((cs) => {
-		const arr = [...cs];
-		arr[id] = next[id] !== false;
-		return arr;
-		});
-		return next;
-	});
+	setCheckState((cs) => toggleCheckState(cs, id));
 	};
 	const hasAnySegments = checkBoxData.length > 0;
 	useEffect(() => {
@@ -1068,11 +1081,16 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// present in the 3D render, masking scopes, islands, etc) even though the
 	// row disappears from the popup.
 	const r = deleteSegmentEverywhere(id);
-	if (r) sessionRef.current?.log("edit", `Deleted segment (${r.changedVoxels.toLocaleString()} vox)`, 2000);
+	if (r) {
+		sessionRef.current?.log("edit", `Deleted class (${voxelsLog(r.changedVoxels)})`, 2000);
+		// The dialog says this can't be undone. Left on the history, Undo would put the
+		// voxels back under a class with no row, colour or name.
+		resetMaskEditHistory();
+	}
+	removeCustomSegmentLabel(id);
 	setCheckBoxData((prev) => prev.filter((s) => s.id !== id));
 	setCheckState((prev) => { const n = [...prev]; n[id] = false; return n; });
 	setSegmentColorsHex((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
-	setSegmentVisibility((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
 	// Deleting a class should always leave nothing targeted — not fall back
 	// to auto-picking another remaining class as the new target — so the
 	// person has to deliberately pick their next target rather than
@@ -1104,7 +1122,19 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 				onCloseSettings={onCloseSettings}
 				onGuidedControlsChange={onGuidedControlsChange}
 				onApply={(op, min) => {
-					const r = applyIslandsOperation(op, min, islandSeedVoxel ?? undefined, maskFilter);
+					// Undo and Redo of a split take the new classes out of the list and put
+					// them back, so an undone split leaves no empty Class N rows or target.
+					const splitClasses = splitClassBookkeeping({
+						setCheckBoxData, setCheckState, setLabelColorMap, setSegmentColorsHex,
+						setActiveSegment: setActiveSegmentState,
+						setActiveCatalogOrgan: setActiveCatalogOrganId,
+						getTarget: () => classTargetRef.current,
+						colorToHex,
+					}, { segment: activeSegment, catalogOrgan: activeCatalogOrganId });
+					const r = applyIslandsOperation(op, min, islandSeedVoxel ?? undefined, maskFilter, {
+						onUndoCreated: splitClasses.remove,
+						onRedoCreated: splitClasses.add,
+					});
 				  if (r?.changedVoxels) {
 					sessionRef.current?.log("edit", `${ISLANDS_LOG[op] ?? "Edited islands"} (${voxelsLog(r.changedVoxels)})`, 2000);
 					// "Split islands to segments" creates brand-new segment indices on
@@ -1112,36 +1142,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 					// them into the same UI state a manually-created class would use,
 					// so they show up in the segments popup as real, functioning
 					// custom classes rather than invisible/unlabeled data.
-					if (r.createdSegments?.length) {
-						setCheckBoxData((prev) => [
-							...prev,
-							...r.createdSegments!.map((s) => ({ id: s.id, label: s.label })),
-						]);
-						setCheckState((prev) => {
-							const next = [...prev];
-							for (const s of r.createdSegments!) next[s.id] = true;
-							return next;
-						});
-						setLabelColorMap((prev) => {
-							const next = { ...prev };
-							for (const s of r.createdSegments!) next[s.id] = s.color;
-							return next;
-						});
-						setSegmentColorsHex((prev) => {
-							const next = { ...prev };
-							for (const s of r.createdSegments!) next[s.id] = colorToHex(s.color);
-							return next;
-						});
-						// Same "just-created class becomes the target" behavior as
-						// handleCreateClass above — otherwise the edit target is left
-						// pointed at whatever the split just broke apart, which is a
-						// confusing thing to keep painting into. Picks the first of
-						// the new classes (order matches newLabelForComponent's
-						// insertion order on the backend, which isn't otherwise
-						// meaningful, but it has to be one of them).
-						setActiveSegmentState(r.createdSegments[0].id);
-						setActiveCatalogOrganId(null);
-					}
+					if (r.createdSegments?.length) splitClasses.add(r.createdSegments);
 				  }
 				  return r;
 				}}
@@ -1256,7 +1257,6 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	
 	const morphPicker = useMorphPicker({
 		panelOpen: showAnnotationToolbar,
-		onLog: (detail) => sessionRef.current?.log("edit", detail, 1500),
 	  });
 
 	// The islands "keep/remove selected" picker shares morphPicker.seedVoxel with
@@ -1276,11 +1276,14 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		// also cancel an in-progress pick — otherwise morphPicker.picking stays
 		// true and the viewport is left silently armed/waiting for a click for
 		// an operation that may no longer need one.
-		// If useMorphPicker doesn't expose a cancel method yet, add one there —
-		// this call is a no-op until it does.
-		(morphPicker as unknown as { stopPicking?: () => void; cancelPicking?: () => void }).stopPicking?.();
-		(morphPicker as unknown as { stopPicking?: () => void; cancelPicking?: () => void }).cancelPicking?.();
+		morphPicker.stopPicking();
 	};
+	// Switching ribbon tool hands the panes to the new tool, so a pick still
+	// waiting for a click must not swallow the next one.
+	const stopMorphPicking = morphPicker.stopPicking;
+	useEffect(() => {
+		stopMorphPicking();
+	}, [activeToolbarTool, stopMorphPicking]);
 	const islandSeedVoxel =
 		morphPicker.seedVoxel && morphPicker.seedVoxel !== clearedIslandSeed
 			? morphPicker.seedVoxel
@@ -1372,17 +1375,33 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [maskingArea, checkBoxData, visibleSegmentIndices, activeSegment, editMode, renderingEngine, viewportIds, volumeId]);
 
+	// A drawing gesture that changed nothing says so on screen for a few
+	// seconds; the session log alone is invisible unless a reading is recording.
+	const [toolNotice, setToolNotice] = useState<string | null>(null);
+	const toolNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const showToolNotice = useCallback((message: string) => {
+		setToolNotice(message);
+		if (toolNoticeTimerRef.current) clearTimeout(toolNoticeTimerRef.current);
+		toolNoticeTimerRef.current = setTimeout(() => setToolNotice(null), 5000);
+	}, []);
+	useEffect(() => () => {
+		if (toolNoticeTimerRef.current) clearTimeout(toolNoticeTimerRef.current);
+	}, []);
+
 	const smartFill = useSmartFill({
 		enabled: editMode === "smartfill",
 		sliceInfoRef,
 		maskFilter,
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+		onNoop: showToolNotice,
 	});
 	
 	const lasso = useLassoTool({
 		enabled: editMode === "lasso" && activeToolbarTool !== "scissors",
 		maskFilter,
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+		onNoop: showToolNotice,
+		sliceKey: (pane) => sliceInfo[pane]?.current,
 	});
 	
 	const { applyToVisible, ids } = resolveMaskingTargets();
@@ -1395,6 +1414,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		maskFilter, // <-- add this
 		magnetEnabled: scissorsOptions.magnetEnabled,
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 2000),
+		onNoop: showToolNotice,
+		sliceKey: (pane) => sliceInfo[pane]?.current,
 	});
 	const levelTracing = useLevelTracing({
 		enabled: activeToolbarTool === "levelTracing",
@@ -1407,12 +1428,63 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 		// instead of leaving it drawn at old canvas pixels until the next
 		// mousemove happens to refresh it.
 		cameraVersion: zoomLevel,
+		sliceKey: `${sliceInfo.axial?.current}/${sliceInfo.sagittal?.current}/${sliceInfo.coronal?.current}`,
 		onLog: (detail) => sessionRef.current?.log("edit", detail, 1500),
+		onNoop: showToolNotice,
 	});
 
 	// The active drawing tool for the pane handlers below — whichever one is
 	// actually armed right now (they're mutually exclusive via `enabled`).
 	const activeDrawTool = activeToolbarTool === "scissors" ? scissors : lasso;
+
+	// Whether the real undo/redo stacks (brush and eraser strokes and measurements in
+	// Cornerstone's HistoryMemo, every other edit on our fill stack) have anything to
+	// step through, so the Undo and Redo buttons can go dim when they would do nothing.
+	// Our fill stack announces its own changes (subscribeToMaskHistory); Cornerstone's
+	// has no change event, so this also re-reads both after every edit, measurement
+	// change and undo or redo. The read waits a tick because
+	// Cornerstone announces a change before it updates its counts. A brush or eraser
+	// drag pushes its stroke onto the stack on mouse up, after its last edit event, so
+	// the end of every pointer press re-reads it too. Shortcut presses are covered by
+	// the keydown listener (macOS sends no keyup for Z while Cmd is held), since the
+	// shortcut hook calls undo and redo itself.
+	const [maskHistory, setMaskHistory] = useState({ canUndo: false, canRedo: false });
+	const maskHistoryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const refreshMaskHistory = useCallback(() => {
+		if (maskHistoryTimerRef.current) clearTimeout(maskHistoryTimerRef.current);
+		maskHistoryTimerRef.current = setTimeout(() => {
+			maskHistoryTimerRef.current = null;
+			let next = { canUndo: false, canRedo: false };
+			try {
+				next = getMaskEditHistoryState();
+			} catch {
+				/* history not initialised yet */
+			}
+			setMaskHistory((prev) => (prev.canUndo === next.canUndo && prev.canRedo === next.canRedo ? prev : next));
+		}, 0);
+	}, []);
+	useEffect(() => {
+		refreshMaskHistory();
+		const unsubscribeEdits = subscribeToSegmentationEdits(() => refreshMaskHistory());
+		const unsubscribeMeasurements = subscribeToMeasurementChanges(() => refreshMaskHistory());
+		const unsubscribeHistory = subscribeToMaskHistory(() => refreshMaskHistory());
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key?.toLowerCase() === "z") refreshMaskHistory();
+		};
+		const onPointerEnd = () => refreshMaskHistory();
+		window.addEventListener("keydown", onKeyDown);
+		window.addEventListener("pointerup", onPointerEnd, true);
+		window.addEventListener("mouseup", onPointerEnd, true);
+		return () => {
+			unsubscribeEdits();
+			unsubscribeMeasurements();
+			unsubscribeHistory();
+			window.removeEventListener("keydown", onKeyDown);
+			window.removeEventListener("pointerup", onPointerEnd, true);
+			window.removeEventListener("mouseup", onPointerEnd, true);
+			if (maskHistoryTimerRef.current) clearTimeout(maskHistoryTimerRef.current);
+		};
+	}, [viewerReady, refreshMaskHistory]);
 
 	// Single entry point for both the toolbar's Undo button and the ⌘Z/Ctrl+Z
 	// shortcut. Scissors/lasso place polygon points one click at a time
@@ -1436,7 +1508,13 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			return;
 		}
 		undoMaskEdit();
-	}, [activeDrawTool]);
+		refreshMaskHistory();
+	}, [activeDrawTool, refreshMaskHistory]);
+
+	const handleRedo = useCallback(() => {
+		redoMaskEdit();
+		refreshMaskHistory();
+	}, [refreshMaskHistory]);
 
 	// Progressive resolution: after the fast low-res load, the full-res CT streams in
 	// the background and hot-swaps in place (no reload). idle → streaming → done/failed.
@@ -1490,9 +1568,11 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const windowRef = useRef({ w: windowWidth, c: windowCenter });
 	const checkStateRef = useRef(checkState);
 	const checkBoxDataRef = useRef(checkBoxData);
+	const classTargetRef = useRef({ segment: activeSegment, catalogOrgan: activeCatalogOrganId });
 	useEffect(() => { windowRef.current = { w: windowWidth, c: windowCenter }; }, [windowWidth, windowCenter]);
 	useEffect(() => { checkStateRef.current = checkState; }, [checkState]);
 	useEffect(() => { checkBoxDataRef.current = checkBoxData; }, [checkBoxData]);
+	useEffect(() => { classTargetRef.current = { segment: activeSegment, catalogOrgan: activeCatalogOrganId }; }, [activeSegment, activeCatalogOrganId]);
 
 	// "Show only target class's mask" — one effect, driven directly off the
 	// toggle + whatever's currently targeted:
@@ -2365,10 +2445,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			// setVolumes resets the transfer function and rebuilds the labelmap actors —
 			// re-apply the *current* window and organ visibility (live refs, not closures).
 			handleWindowChange(windowRef.current.w, windowRef.current.c);
-			setVisibilities([
-				true,
-				...checkBoxDataRef.current.map((item) => !!checkStateRef.current[item.id]),
-			]);
+			setVisibilities(visibilityById(checkBoxDataRef.current, checkStateRef.current));
 			// The segmentation volume must be rebuilt at full-res too, or its voxel
 			// grid stays on the old low-res spacing while the CT (and displayed
 			// slice) is now full-res — brush strokes then compute against mismatched
@@ -2927,6 +3004,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const collaborationDisabled = !viewerReady || Boolean(liveRoom && (
 		liveRoom.connectionState !== "connected" || liveRoom.collaborationLocked
 	));
+	// Undo steps back through a half-placed scissors or lasso point first, then the
+	// shared stacks. In a live room the server owns the history, so the button stays on.
+	const canUndo = maskHistory.canUndo || activeDrawTool.anchorsCanvas.length > 0 || Boolean(liveRoom);
 
 	// The Layout ▾ trigger shows the pane-layout preset's name when one is active
 	// (it's the more specific choice), otherwise the current view mode.
@@ -2940,12 +3020,25 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// view has to be synced explicitly — and make sure the organ is visible there.
 	const handleJumpToOrgan = (label: number) => {
 		const centroid = getOrganCentroids()?.[label];
-		if (!centroid) return; // organ not present in this scan
+		if (!centroid) {
+			// Say so rather than do nothing. Until the mask has fully streamed in, the map is
+			// missing or partial, so a missing organ there is not yet known to be absent. With no
+			// mask requested at all (quiz practice before the reveal), nothing is loading, so
+			// asking for a retry would never work.
+			showToolNotice(
+				!loading && !segUrl
+					? "No organ map is loaded for this scan."
+					: loading || !isSegmentationComplete()
+						? "The organ map is still loading. Try again in a moment."
+						: "That organ is not in this scan."
+			);
+			return;
+		}
 		moveCornerstoneCrosshairToMm(centroid);
 		setCrosshairMm(centroid);
 		sessionRef.current?.log(
 			"organ",
-			`Jumped to ${checkBoxData.find((o) => o.id === label)?.label ?? `organ ${label}`}`
+			`Jumped to ${classInSentence(checkBoxData.find((o) => o.id === label)?.label ?? `organ ${label}`)}`
 		);
 		// if (NV) moveNiiVueCrosshairToMm(NV, centroid);
 		setCheckState((prev) => {
@@ -3259,10 +3352,8 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// Update segmentation visibility when state changes
 	useEffect(() => {
 		if (viewerReady && checkState) {
-			const checkStateArr = [
-				true, // ID=0 background 永远可见
-				...checkBoxData.map((item) => !!checkState[item.id]),
-			];
+			// ID=0 background 永远可见; indexed by segment id, not list position
+			const checkStateArr = visibilityById(checkBoxData, checkState);
 			// const visible = checkStateArr.map((item, idx) => item === true ? idx - 1 : null).filter((item) => item !== null);
 			// if (visible.length !== checkBoxData.length+1 && visible.length !== 1) {
 			// 	visible.splice(0, 1);
@@ -3507,6 +3598,11 @@ const customOrgans = useMemo(
     () => checkBoxData.filter((o) => o.id > segmentation_categories.length),
     [checkBoxData]
 );
+// The popup's eyes read what is actually drawn, not a map of their own.
+const segmentVisibility = useMemo(
+	() => visibilityFromCheckState(customOrgans, checkState),
+	[customOrgans, checkState]
+);
 
 
 // The organs this scan actually has. Until its segmentation has loaded (or if
@@ -3635,11 +3731,13 @@ const aiAvailableOrgans = useMemo(() => {
 			return;
 		}
 		const rawLabel = resolveOrganLabel(idx);
+		const tipText = rawLabel ?? "Unknown";
+		const { x, y } = organTipPosition(e.clientX, e.clientY, tipText);
 		setHoverOrganTip({
 			visible: true,
-			x: e.clientX + 14,
-			y: e.clientY + 14,
-			text: rawLabel?? "Unknown",
+			x,
+			y,
+			text: tipText,
 			// Same LUT the mask overlay is rendered with, so the swatch/border always
 			// matches the color the organ is actually painted in the pane.
 			color: colorToCss(labelColorMap[idx]),
@@ -4167,28 +4265,28 @@ const aiAvailableOrgans = useMemo(() => {
 
 											{/* Undo/redo stay standalone (not grouped) — they're used constantly
 											    during a review and shouldn't cost an extra click to reach. Cover
-											    measurements as well as mask edits; ⌘Z/⇧⌘Z work everywhere too.
+											    measurements as well as mask edits; ⌘Z/⇧⌘Z (Ctrl+Z/Ctrl+Shift+Z) work everywhere too.
 											    Wrapped in undoRedoGroupRef so clicking either button never closes
 											    an already-open annotation ribbon (see the topbar's onClick above) —
 											    undo/redo history is independent of ribbon visibility. */}
 											<div ref={undoRedoGroupRef} style={{ display: "contents" }}>
 												<button
-													className="vp-tool"
+													className="vp-tool vp-tool--history"
 												onClick={() => liveRoom ? liveRoom.requestUndo() : handleUndo()}
-												disabled={collaborationDisabled}
+												disabled={collaborationDisabled || !canUndo}
 													aria-label="Undo"
 												>
 													<IconArrowBackUp size={20} color="white" />
-													<span className="vp-tool__tip">Undo (⌘Z) — measurements & mask edits</span>
+													<span className="vp-tool__tip">{`Undo measurements and mask edits (${shortcutModifier()}Z)`}</span>
 												</button>
 												<button
-													className="vp-tool"
-													onClick={() => redoMaskEdit()}
-													disabled={Boolean(liveRoom)}
+													className="vp-tool vp-tool--history"
+													onClick={handleRedo}
+													disabled={Boolean(liveRoom) || !maskHistory.canRedo}
 													aria-label="Redo"
 												>
 													<IconArrowForwardUp size={20} color="white" />
-													<span className="vp-tool__tip">Redo (⇧⌘Z)</span>
+													<span className="vp-tool__tip">{`Redo (${shortcutModifier(true)}Z)`}</span>
 												</button>
 											</div>
 											
@@ -4559,7 +4657,7 @@ const aiAvailableOrgans = useMemo(() => {
 								levelTracing.handleMouseMove("axial")(e);
 								boxSegment.handleMouseMove("axial")(e);
 							}}
-							onMouseLeave={handlePaneHoverLeave("axial")}
+							onMouseLeave={() => { handlePaneHoverLeave("axial")(); levelTracing.clearPreview(); }}
 							onWheel={focusedPane.handleWheel("axial")}
 						></div>
 						{!loading && renderPaneOverlays("axial")}
@@ -4642,7 +4740,7 @@ const aiAvailableOrgans = useMemo(() => {
 							levelTracing.handleMouseMove("sagittal")(e);
 							boxSegment.handleMouseMove("sagittal")(e);
 						}}
-						onMouseLeave={handlePaneHoverLeave("sagittal")}
+						onMouseLeave={() => { handlePaneHoverLeave("sagittal")(); levelTracing.clearPreview(); }}
 						onWheel={focusedPane.handleWheel("sagittal")}
 					></div>
 						{!loading && renderPaneOverlays("sagittal")}
@@ -4728,7 +4826,7 @@ const aiAvailableOrgans = useMemo(() => {
 							levelTracing.handleMouseMove("coronal")(e);
 							boxSegment.handleMouseMove("coronal")(e);
 						}}
-						onMouseLeave={handlePaneHoverLeave("coronal")}
+						onMouseLeave={() => { handlePaneHoverLeave("coronal")(); levelTracing.clearPreview(); }}
 						onWheel={focusedPane.handleWheel("coronal")}
 					></div>
 					{!loading && renderPaneOverlays("coronal")}
@@ -5121,6 +5219,34 @@ const aiAvailableOrgans = useMemo(() => {
 					<div className="vp-annotate-hd-overlay__label">
 						Loading HD resolution{enhance.state === "streaming" && enhance.pct != null ? ` — ${enhance.pct}%` : "…"}
 					</div>
+				</div>
+			)}
+			{toolNotice && (
+				<div
+					className="vp-tool-notice"
+					role="status"
+					aria-live="polite"
+					style={{
+						position: "fixed",
+						bottom: 24,
+						left: "50%",
+						transform: "translateX(-50%)",
+						// Above the report (z 9998) and the REC pill (10003) that asks for it.
+						zIndex: showReportScreen ? 10004 : 950,
+						// Over the report it sits on the step dots and Next/Back; taps go through.
+						pointerEvents: showReportScreen ? "none" : undefined,
+						// left:50% alone would shrink the box to the half of the screen right of centre.
+						width: "max-content",
+						maxWidth: "calc(100vw - 32px)",
+						background: "rgba(12,14,18,0.94)",
+						border: "1px solid rgba(255,255,255,0.16)",
+						borderRadius: 6,
+						padding: "10px 14px",
+						color: "rgba(255,255,255,0.9)",
+						fontSize: 13.5,
+					}}
+				>
+					{toolNotice}
 				</div>
 			)}
 			<AnnotationToolbar

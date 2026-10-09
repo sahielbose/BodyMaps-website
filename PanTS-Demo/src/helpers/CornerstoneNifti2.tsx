@@ -948,6 +948,19 @@ export function setActiveMeasurementTool(toolName: PrimaryMouseToolName | null) 
 // Cornerstone's history, and export of the edited labelmap for download.
 // ---------------------------------------------------------------------------
 
+// Whether a world point lands inside the loaded segmentation grid. A pane can
+// show black margin around the scan (a wide pane, zoomed out, panned), and
+// canvasToWorld still answers there; a prompt placed in that margin has no
+// voxel to work on. True when there is no volume to judge by, so callers only
+// refuse a point they can positively place outside.
+export function isWorldPointInSegmentation(world: Point3): boolean {
+  const volume = cache.getVolume(segmentationId) as any;
+  const dims = (volume?.dimensions ?? volume?.voxelManager?.dimensions) as number[] | undefined;
+  if (!volume?.imageData || !dims || dims.length < 3) return true;
+  const [i, j, k] = volume.imageData.worldToIndex(world).map((v: number) => Math.round(v));
+  return i >= 0 && j >= 0 && k >= 0 && i < dims[0] && j < dims[1] && k < dims[2];
+}
+
 // The segment the brush paints. Module-level so setVisibilities can restore it
 // (its loop clobbers the active segment index).
 let _activeEditSegment = 1;
@@ -990,6 +1003,21 @@ export function colorForNewClass(segmentIndex: number): Color {
 
 export function getCustomSegmentLabels(): Readonly<Record<number, string>> {
   return _customSegmentLabels;
+}
+
+// Keeps the name the Identify tooltips read in step with a rename in the panel.
+// Only classes the person created have an entry here; the fixed organ catalog
+// resolves its names elsewhere, so an id with no entry is left alone.
+export function setCustomSegmentLabel(segmentIndex: number, name: string) {
+  if (!(segmentIndex in _customSegmentLabels)) return;
+  const trimmed = name.trim();
+  if (trimmed) _customSegmentLabels[segmentIndex] = trimmed;
+}
+
+// Drops a deleted class's name so the tooltips stop reporting it and an export
+// no longer lists it.
+export function removeCustomSegmentLabel(segmentIndex: number) {
+  delete _customSegmentLabels[segmentIndex];
 }
 
 export type CustomLabelEntry = { name: string; color: Color };
@@ -2842,6 +2870,14 @@ const volumeIsComplete = (volume: any) => {
     return !status || !!status.loaded;
 };
 
+// True once the segmentation volume exists and every slice has arrived. Until then
+// getOrganCentroids() answers from a partial map, so a missing label is not yet known
+// to be absent from the scan.
+export function isSegmentationComplete(): boolean {
+    const volume = cache.getVolume(segmentationId);
+    return !!volume && volumeIsComplete(volume);
+}
+
 export function getOrganCentroids(): Record<number, [number, number, number]> | null {
     if (_organCentroids) return _organCentroids;
     const volume = cache.getVolume(segmentationId);
@@ -3460,7 +3496,7 @@ export function subscribeToMaskHistory(listener: () => void): () => void {
   };
 }
 
-function _pushFillHistory(entry: FillHistoryEntry) {
+function _pushFillHistory(entry: FillHistoryEntry): FillHistoryEntry {
   const stored = { ...entry, seq: ++_editSeq };
   _fillHistory = _fillHistory.slice(0, _fillHistoryIndex + 1);
   _fillHistory.push(stored);
@@ -3468,6 +3504,7 @@ function _pushFillHistory(entry: FillHistoryEntry) {
   _fillHistoryIndex = _fillHistory.length - 1;
   _redoOrder = [];
   _announceMaskHistory();
+  return stored;
 }
 
 // Empties both undo stacks. Called when a case is disposed (and again as a new
@@ -3495,8 +3532,39 @@ export function resetMaskEditHistory() {
 // scribble-point placement) can register their own undo/redo pairs on the
 // same shared history stack as every other edit tool, rather than keeping
 // a separate parallel undo system just for scribbles.
-export function pushEditHistory(entry: FillHistoryEntry) {
-  _pushFillHistory(entry);
+export function pushEditHistory(entry: FillHistoryEntry): FillHistoryEntry {
+  return _pushFillHistory(entry);
+}
+
+// Takes entries that no longer mean anything off the shared history, so Undo
+// and Redo never spend a press on them (Grow from seeds' strokes once its
+// marks are cleared). `entries` are the objects pushEditHistory returned.
+export function discardEditHistoryEntries(entries: FillHistoryEntry[]) {
+  if (!entries.length) return;
+  const drop = new Set<FillHistoryEntry>(entries);
+  let behind = 0;
+  let dropsAhead = false;
+  _fillHistory.forEach((entry, i) => {
+    if (!drop.has(entry)) return;
+    if (i <= _fillHistoryIndex) behind++;
+    else dropsAhead = true;
+  });
+  if (!behind && !dropsAhead) return;
+  // Each undone fill-stack edit left one "fill" on the redo order. Counting
+  // from the end, the nth "fill" belongs to the nth entry past the index
+  // (Redo takes the oldest undone edit first), so drop only the tokens whose
+  // entry is going: a "fill" of some other undone edit keeps its place.
+  if (dropsAhead) {
+    const undone = _fillHistory.slice(_fillHistoryIndex + 1);
+    let nth = 0;
+    for (let i = _redoOrder.length - 1; i >= 0; i--) {
+      if (_redoOrder[i] !== "fill") continue;
+      if (drop.has(undone[nth++])) _redoOrder.splice(i, 1);
+    }
+  }
+  _fillHistory = _fillHistory.filter((entry) => !drop.has(entry));
+  _fillHistoryIndex -= behind;
+  _announceMaskHistory();
 }
 
 export function undoSmartFill(): boolean {
@@ -4214,7 +4282,13 @@ export function applyIslandsOperation(
   operation: IslandsOperation,
   minimumSizeVoxels = 1000,
   seedVoxel?: [number, number, number],
-  maskFilter: MaskFilter = () => true
+  maskFilter: MaskFilter = () => true,
+  // Split to classes creates classes the page lists; Undo and Redo hand them back
+  // so the page can drop and re-add those rows along with the voxels.
+  splitHistory?: {
+    onUndoCreated: (created: { id: number; label: string; color: Color }[]) => void;
+    onRedoCreated: (created: { id: number; label: string; color: Color }[]) => void;
+  }
 ): { changedVoxels: number; newSegmentsCreated?: number; createdSegments?: { id: number; label: string; color: Color }[] } | null {
   const comp = _activeSegmentComponents(26);
   if (!comp) return null;
@@ -4238,6 +4312,8 @@ export function applyIslandsOperation(
   let newSegmentsCreated = 0;
   const createdSegments: { id: number; label: string; color: Color }[] = [];
   const newLabelForComponent = new Map<number, number>();
+  // One scan of the labelmap for the whole split, not one per island.
+  const firstNewClassIndex = operation === "splitToSegments" ? _getNextAvailableSegmentIndex() : 0;
 
   const walkAndDecide = (i: number, j: number, k: number, existing: number) => {
     const label = labels[idxLocal3(i, j, k)];
@@ -4261,13 +4337,13 @@ export function applyIslandsOperation(
         // The largest island IS the original class — it keeps living under
         // `activeSegment` (no voxel change needed for it), exactly like
         // splitting a custom-made class does. Only the smaller islands are
-        // peeled off into fresh Class_N segments; without this check every
+        // peeled off into fresh Class N segments; without this check every
         // component (largest included) got reassigned to a new id and the
         // original class vanished entirely instead of just shedding its
         // extra islands.
         if (label === largestLabel) break;
         if (!newLabelForComponent.has(label)) {
-          const nextIdx = _getNextAvailableSegmentIndex() + newLabelForComponent.size;
+          const nextIdx = firstNewClassIndex + newLabelForComponent.size;
           newLabelForComponent.set(label, nextIdx);
         }
         const target = newLabelForComponent.get(label)!;
@@ -4290,7 +4366,11 @@ export function applyIslandsOperation(
     newSegmentsCreated = newLabelForComponent.size;
     for (const newIdx of newLabelForComponent.values()) {
       const color = colorForNewClass(newIdx);
-      const label = `Class_${newIdx}`;
+      // Sentence case with a space, like every other class name. The viewer
+      // refuses duplicate names, so step past one a person already used.
+      const taken = new Set(Object.values(_customSegmentLabels).map((n) => n.toLowerCase()));
+      let label = `Class ${newIdx}`;
+      for (let n = 2; taken.has(label.toLowerCase()); n++) label = `Class ${newIdx} (${n})`;
       registerNewSegmentColor(newIdx, color);
       _customSegmentLabels[newIdx] = label;
       createdSegments.push({ id: newIdx, label, color });
@@ -4299,11 +4379,34 @@ export function applyIslandsOperation(
 
   if (!changes.length) return { changedVoxels: 0, newSegmentsCreated: 0, createdSegments };
   for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, c.next);
+  // What Redo brings back: the name and color each class has when Undo removes it,
+  // so a rename or recolor made after the split survives Undo then Redo.
+  let restorable = createdSegments;
   // Split to classes moves voxels into new classes, so then the event names no class.
   const edited = _changedSegment(changes);
   _pushFillHistory({
-    undo: () => { for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, c.prev); _notifySegmentationChanged(edited); },
-    redo: () => { for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, c.next); _notifySegmentationChanged(edited); },
+    undo: () => {
+      for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, c.prev);
+      restorable = createdSegments.map((s) => ({
+        id: s.id,
+        label: _customSegmentLabels[s.id] ?? s.label,
+        color: (_lastColorLUT?.[s.id] ? [..._lastColorLUT[s.id]] : s.color) as Color,
+      }));
+      // The islands are back in the original class, so the classes made for them
+      // are empty: take their names off the tooltips and the export too.
+      for (const s of createdSegments) delete _customSegmentLabels[s.id];
+      if (createdSegments.length) splitHistory?.onUndoCreated(restorable);
+      _notifySegmentationChanged(edited);
+    },
+    redo: () => {
+      for (const c of changes) vm.setAtIJK(c.i, c.j, c.k, c.next);
+      for (const s of restorable) {
+        registerNewSegmentColor(s.id, s.color);
+        _customSegmentLabels[s.id] = s.label;
+      }
+      if (createdSegments.length) splitHistory?.onRedoCreated(restorable);
+      _notifySegmentationChanged(edited);
+    },
   });
   _notifySegmentationChanged(edited);
   return { changedVoxels: changes.length, newSegmentsCreated, createdSegments };
@@ -5048,24 +5151,72 @@ export interface ScissorsCutParams {
   visibleSegmentIndices: number[];
 }
 
-function _rasterizePolygonInsideMask(
+// Clips a polygon to the axis-aligned rectangle [a0,a1] x [b0,b1] (Sutherland-
+// Hodgman). Used to keep the flood-fill grid bounded when a leg leaves the scan.
+function _clipPolygonToRect(
+  poly: Array<[number, number]>,
+  a0: number, b0: number, a1: number, b1: number
+): Array<[number, number]> {
+  const clipEdge = (
+    pts: Array<[number, number]>,
+    inside: (p: [number, number]) => boolean,
+    cross: (p: [number, number], q: [number, number]) => [number, number]
+  ) => {
+    const out: Array<[number, number]> = [];
+    for (let i = 0; i < pts.length; i++) {
+      const cur = pts[i], prev = pts[(i + pts.length - 1) % pts.length];
+      if (inside(cur)) {
+        if (!inside(prev)) out.push(cross(prev, cur));
+        out.push(cur);
+      } else if (inside(prev)) {
+        out.push(cross(prev, cur));
+      }
+    }
+    return out;
+  };
+  const atA = (v: number) => (p: [number, number], q: [number, number]): [number, number] =>
+    [v, p[1] + ((q[1] - p[1]) * (v - p[0])) / (q[0] - p[0])];
+  const atB = (v: number) => (p: [number, number], q: [number, number]): [number, number] =>
+    [p[0] + ((q[0] - p[0]) * (v - p[1])) / (q[1] - p[1]), v];
+  let out = poly;
+  if (out.length) out = clipEdge(out, (p) => p[0] >= a0, atA(a0));
+  if (out.length) out = clipEdge(out, (p) => p[0] <= a1, atA(a1));
+  if (out.length) out = clipEdge(out, (p) => p[1] >= b0, atB(b0));
+  if (out.length) out = clipEdge(out, (p) => p[1] <= b1, atB(b1));
+  return out;
+}
+
+// Draws the polygon boundary and floods the outside from the grid border over
+// the polygon's own bounding box, which is NOT clamped to the volume: a shape
+// that crosses the scan edge must stay closed or the outside flood leaks into
+// it. The polygon is first clipped to the volume footprint plus a one pixel
+// ring (so a far-off click cannot allocate a huge grid); the clip closes the
+// loop along the ring. Callers clamp only when they write results out.
+type PolygonFlood = {
+  boxA0: number; boxB0: number; w: number; h: number;
+  boundary: Uint8Array; outside: Uint8Array;
+};
+function _floodPolygon(
   dimA: number,
   dimB: number,
   polygonAB: Array<[number, number]>
-): Uint8Array {
+): PolygonFlood | null {
+  if (polygonAB.length < 3) return null;
+  const inVolume = polygonAB.every(([a, b]) => a >= 0 && a <= dimA - 1 && b >= 0 && b <= dimB - 1);
+  const poly = inVolume ? polygonAB : _clipPolygonToRect(polygonAB, -1, -1, dimA, dimB);
+  if (poly.length < 3) return null;
   let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
-  for (const [a, b] of polygonAB) {
+  for (const [a, b] of poly) {
     minA = Math.min(minA, a); maxA = Math.max(maxA, a);
     minB = Math.min(minB, b); maxB = Math.max(maxB, b);
   }
-  const boxA0 = Math.max(0, Math.floor(minA) - 1);
-  const boxA1 = Math.min(dimA - 1, Math.ceil(maxA) + 1);
-  const boxB0 = Math.max(0, Math.floor(minB) - 1);
-  const boxB1 = Math.min(dimB - 1, Math.ceil(maxB) + 1);
+  const boxA0 = Math.floor(minA) - 1;
+  const boxA1 = Math.ceil(maxA) + 1;
+  const boxB0 = Math.floor(minB) - 1;
+  const boxB1 = Math.ceil(maxB) + 1;
   const w = boxA1 - boxA0 + 1;
   const h = boxB1 - boxB0 + 1;
-  const full = new Uint8Array(dimA * dimB);
-  if (w < 2 || h < 2 || polygonAB.length < 3) return full;
+  if (w < 2 || h < 2) return null;
 
   const idxLocal = (a: number, b: number) => (a - boxA0) + (b - boxB0) * w;
   const boundary = new Uint8Array(w * h);
@@ -5083,9 +5234,9 @@ function _rasterizePolygonInsideMask(
       if (e2 <= dx) { err += dx; y0 += sy; }
     }
   };
-  for (let i = 0; i < polygonAB.length; i++) {
-    const [a0, b0] = polygonAB[i];
-    const [a1, b1] = polygonAB[(i + 1) % polygonAB.length];
+  for (let i = 0; i < poly.length; i++) {
+    const [a0, b0] = poly[i];
+    const [a1, b1] = poly[(i + 1) % poly.length];
     drawLine(a0, b0, a1, b1);
   }
 
@@ -5105,11 +5256,23 @@ function _rasterizePolygonInsideMask(
     const x = li % w, y = Math.floor(li / w);
     tryPush(x + 1, y); tryPush(x - 1, y); tryPush(x, y + 1); tryPush(x, y - 1);
   }
+  return { boxA0, boxB0, w, h, boundary, outside };
+}
 
+export function _rasterizePolygonInsideMask(
+  dimA: number,
+  dimB: number,
+  polygonAB: Array<[number, number]>
+): Uint8Array {
+  const full = new Uint8Array(dimA * dimB);
+  const flood = _floodPolygon(dimA, dimB, polygonAB);
+  if (!flood) return full;
+  const { boxA0, boxB0, w, h, outside } = flood;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const li = x + y * w;
-      if (!outside[li]) full[(x + boxA0) + (y + boxB0) * dimA] = 1; // boundary + interior
+      const a = x + boxA0, b = y + boxB0;
+      if (a < 0 || b < 0 || a >= dimA || b >= dimB) continue;
+      if (!outside[x + y * w]) full[a + b * dimA] = 1; // boundary + interior
     }
   }
   return full;
@@ -5212,7 +5375,7 @@ export function cutSegmentWithPolygon(
 // polygon boundary. Shared by lassoCommitPolygon below.
 // ---------------------------------------------------------------------------
 
-function _rasterizeClosedPolygon(
+export function _rasterizeClosedPolygon(
   pane: CinePane,
   sliceIndex: number,
   polygonAB: Array<[number, number]>,
@@ -5229,60 +5392,9 @@ function _rasterizeClosedPolygon(
   const at = (a: number, b: number): [number, number, number] =>
     axis === 2 ? [a, b, sliceIndex] : axis === 0 ? [sliceIndex, a, b] : [a, sliceIndex, b];
 
-  let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
-  for (const [a, b] of polygonAB) {
-    minA = Math.min(minA, a); maxA = Math.max(maxA, a);
-    minB = Math.min(minB, b); maxB = Math.max(maxB, b);
-  }
-  const boxA0 = Math.max(0, Math.floor(minA) - 1);
-  const boxA1 = Math.min(dimA - 1, Math.ceil(maxA) + 1);
-  const boxB0 = Math.max(0, Math.floor(minB) - 1);
-  const boxB1 = Math.min(dimB - 1, Math.ceil(maxB) + 1);
-  const w = boxA1 - boxA0 + 1;
-  const h = boxB1 - boxB0 + 1;
-  if (w < 2 || h < 2) return { filledVoxels: 0 };
-
-  const idxLocal = (a: number, b: number) => (a - boxA0) + (b - boxB0) * w;
-
-  const boundary = new Uint8Array(w * h);
-  const drawLine = (a0: number, b0: number, a1: number, b1: number) => {
-    let x0 = Math.round(a0), y0 = Math.round(b0);
-    const x1 = Math.round(a1), y1 = Math.round(b1);
-    const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-    const dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-    let err = dx + dy;
-    for (;;) {
-      if (x0 >= boxA0 && x0 <= boxA1 && y0 >= boxB0 && y0 <= boxB1) {
-        boundary[idxLocal(x0, y0)] = 1;
-      }
-      if (x0 === x1 && y0 === y1) break;
-      const e2 = 2 * err;
-      if (e2 >= dy) { err += dy; x0 += sx; }
-      if (e2 <= dx) { err += dx; y0 += sy; }
-    }
-  };
-  for (let i = 0; i < polygonAB.length; i++) {
-    const [a0, b0] = polygonAB[i];
-    const [a1, b1] = polygonAB[(i + 1) % polygonAB.length];
-    drawLine(a0, b0, a1, b1);
-  }
-
-  const outside = new Uint8Array(w * h);
-  const stack: number[] = [];
-  const tryPush = (x: number, y: number) => {
-    if (x < 0 || y < 0 || x >= w || y >= h) return;
-    const li = x + y * w;
-    if (boundary[li] || outside[li]) return;
-    outside[li] = 1;
-    stack.push(li);
-  };
-  for (let x = 0; x < w; x++) { tryPush(x, 0); tryPush(x, h - 1); }
-  for (let y = 0; y < h; y++) { tryPush(0, y); tryPush(w - 1, y); }
-  while (stack.length) {
-    const li = stack.pop()!;
-    const x = li % w, y = Math.floor(li / w);
-    tryPush(x + 1, y); tryPush(x - 1, y); tryPush(x, y + 1); tryPush(x, y - 1);
-  }
+  const flood = _floodPolygon(dimA, dimB, polygonAB);
+  if (!flood) return { filledVoxels: 0 };
+  const { boxA0, boxB0, w, h, outside } = flood;
 
   const changes: Array<{ i: number; j: number; k: number; prev: number }> = [];
   for (let y = 0; y < h; y++) {
@@ -5291,8 +5403,8 @@ function _rasterizeClosedPolygon(
       if (outside[li]) continue;
       const a = x + boxA0, b = y + boxB0;
       const [i, j, k] = at(a, b);
-      if (!maskFilter(i, j, k)) continue; // <-- gate
       if (i < 0 || j < 0 || k < 0 || i >= dimX || j >= dimY || k >= dimZ) continue;
+      if (!maskFilter(i, j, k)) continue; // <-- gate
       const existing = vm.getAtIJK(i, j, k);
       if (existing === segmentIndex) continue; // already this class — nothing to change
       changes.push({ i, j, k, prev: existing }); // overwrite anything else, same as the brush
@@ -5326,72 +5438,12 @@ export type ScissorsCutOptions = {
 // Rasterizes the polygon into a same-size 0/1 mask over the pane's 2D footprint,
 // WITHOUT touching the labelmap — used by scissors to know inside/outside before
 // deciding erase vs fill per-voxel.
-function _rasterizePolygonMask(
+export function _rasterizePolygonMask(
   dimA: number,
   dimB: number,
   polygonAB: Array<[number, number]>
 ): Uint8Array {
-  let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
-  for (const [a, b] of polygonAB) {
-    minA = Math.min(minA, a); maxA = Math.max(maxA, a);
-    minB = Math.min(minB, b); maxB = Math.max(maxB, b);
-  }
-  const boxA0 = Math.max(0, Math.floor(minA) - 1);
-  const boxA1 = Math.min(dimA - 1, Math.ceil(maxA) + 1);
-  const boxB0 = Math.max(0, Math.floor(minB) - 1);
-  const boxB1 = Math.min(dimB - 1, Math.ceil(maxB) + 1);
-  const w = boxA1 - boxA0 + 1;
-  const h = boxB1 - boxB0 + 1;
-  const full = new Uint8Array(dimA * dimB);
-  if (w < 2 || h < 2 || polygonAB.length < 3) return full;
-
-  const idxLocal = (a: number, b: number) => (a - boxA0) + (b - boxB0) * w;
-  const boundary = new Uint8Array(w * h);
-  const drawLine = (a0: number, b0: number, a1: number, b1: number) => {
-    let x0 = Math.round(a0), y0 = Math.round(b0);
-    const x1 = Math.round(a1), y1 = Math.round(b1);
-    const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-    const dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-    let err = dx + dy;
-    for (;;) {
-      if (x0 >= boxA0 && x0 <= boxA1 && y0 >= boxB0 && y0 <= boxB1) boundary[idxLocal(x0, y0)] = 1;
-      if (x0 === x1 && y0 === y1) break;
-      const e2 = 2 * err;
-      if (e2 >= dy) { err += dy; x0 += sx; }
-      if (e2 <= dx) { err += dx; y0 += sy; }
-    }
-  };
-  for (let i = 0; i < polygonAB.length; i++) {
-    const [a0, b0] = polygonAB[i];
-    const [a1, b1] = polygonAB[(i + 1) % polygonAB.length];
-    drawLine(a0, b0, a1, b1);
-  }
-
-  const outside = new Uint8Array(w * h);
-  const stack: number[] = [];
-  const tryPush = (x: number, y: number) => {
-    if (x < 0 || y < 0 || x >= w || y >= h) return;
-    const li = x + y * w;
-    if (boundary[li] || outside[li]) return;
-    outside[li] = 1;
-    stack.push(li);
-  };
-  for (let x = 0; x < w; x++) { tryPush(x, 0); tryPush(x, h - 1); }
-  for (let y = 0; y < h; y++) { tryPush(0, y); tryPush(w - 1, y); }
-  while (stack.length) {
-    const li = stack.pop()!;
-    const x = li % w, y = Math.floor(li / w);
-    tryPush(x + 1, y); tryPush(x - 1, y); tryPush(x, y + 1); tryPush(x, y - 1);
-  }
-
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const li = x + y * w;
-      const inside = !outside[li] && !boundary[li] ? 1 : (boundary[li] ? 1 : 0);
-      if (inside) full[(x + boxA0) + (y + boxB0) * dimA] = 1;
-    }
-  }
-  return full;
+  return _rasterizePolygonInsideMask(dimA, dimB, polygonAB);
 }
 
 // Applies a scissors cut using the drawn polygon (in one slice's 2D pixel space).
@@ -6035,6 +6087,9 @@ export function computeLevelTraceMask(
   const sliceOf = (a: number, b: number): [number, number, number] =>
     axis === 2 ? [a, b, seedIJK[2]] : axis === 0 ? [seedIJK[0], a, b] : [a, seedIJK[1], b];
   const [si, sj, sk] = seedIJK;
+  // A seed off the grid would read the wrong voxel and wrap the flood onto the
+  // opposite edge of the adjacent row.
+  if (si < 0 || sj < 0 || sk < 0 || si >= dimX || sj >= dimY || sk >= dimZ) return null;
   const seedA = axis === 2 ? si : axis === 0 ? sj : si;
   const seedB = axis === 2 ? sj : axis === 0 ? sk : sk;
 

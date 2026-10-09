@@ -472,8 +472,15 @@
   border-bottom-color: rgba(255, 255, 255, 0.05);
 }
 
-.VisualizationPage.annotation-open .vp-topbar .vp-tool:not(.vp-tool--active) {
+.VisualizationPage.annotation-open .vp-topbar .vp-tool:not(.vp-tool--active):not(.vp-tool--history):not(:disabled) {
   opacity: 0.5;
+}
+
+/* Undo and redo are the one pair whose state matters most while annotating,
+   so they are never dimmed with the other tools: enabled they read at full
+   strength, and disabled they sit below the dimmed tools, not level with them. */
+.VisualizationPage.annotation-open .vp-topbar .vp-tool:disabled {
+  opacity: 0.35;
 }
 
 /* Shaded volume-rendering target: Cornerstone owns the canvas inside. */
@@ -1739,6 +1746,9 @@
   font-family: var(--vp-mono);
   font-size: 11px;
   letter-spacing: 0.02em;
+  /* One line: organTipPosition flips the tip to the other side of the pointer
+     near a window edge, so it never has to wrap into a narrow column. */
+  white-space: nowrap;
   background: rgba(14, 15, 18, 0.92);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
