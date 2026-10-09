@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "../contexts/authContext";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -236,5 +236,15 @@ describe("Viewer shell layout", () => {
 		expect(segpop).toHaveClass("is-closed");
 		expect(ribbon).toHaveAttribute("inert");
 		expect(segpop).toHaveAttribute("inert");
+	});
+
+	it("exposes the 3D pane's rendering toggle state, not just a class", async () => {
+		renderViewer();
+		const bar = await screen.findByRole("group", { name: "3D rendering" });
+		const pressed = within(bar)
+			.getAllByRole("button")
+			.filter((b) => b.getAttribute("aria-pressed") === "true");
+		expect(pressed).toHaveLength(1);
+		expect(pressed[0]).toHaveClass("is-active");
 	});
 });

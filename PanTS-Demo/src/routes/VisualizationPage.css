@@ -580,7 +580,11 @@
 /* Shaded volume-rendering target: Cornerstone owns the canvas inside. */
 .vp-vol3d {
   width: 100%;
-  height: 100%;
+  /* The render stops above the preset pill and the mode toggle instead of running
+     under them, so the pill no longer straddles the picture's bottom edge. On a short
+     pane (a landscape phone's 2x2 grid, a short window) the fixed inset would leave a
+     strip a few dozen pixels tall, so the render keeps at least half the pane there. */
+  height: max(50%, calc(100% - var(--vp-vol3d-bar-inset, 96px)));
   background: var(--vp-pane-bg, #000);
   /* The scan's bounding box would otherwise show as a bright rectangle with hard
      cuts on a black pane. The render fades out at that box, on all four sides: the
@@ -614,6 +618,26 @@
   mask-composite: intersect;
 }
 
+/* Below the desktop layout the toggle and the preset pill both get 32px touch
+   targets, which makes the bar about 104px tall; the stacked layout under 540px of pane
+   is back to about 88px (set in the vp3d 540px block below, which comes later). */
+@media (max-width: 899px) {
+  .vp-vol3d,
+  .vp-vol3d-host {
+    --vp-vol3d-bar-inset: 112px;
+  }
+}
+
+/* The phone annotate tile is about 210px tall and its bar keeps both rows, the
+   presets and the compact toggle, about 62px sitting 4px off the bottom, so the render
+   stops 70px short of the tile's bottom edge. */
+@media (max-width: 640px) {
+  .VisualizationPage.annotation-open .vp-vol3d,
+  .VisualizationPage.annotation-open .vp-vol3d-host {
+    --vp-vol3d-bar-inset: 70px;
+  }
+}
+
 /* 3D pane footer bar: Meshes/Volume mode toggle + volume presets. */
 .vp-3dbar {
   position: absolute;
@@ -624,15 +648,27 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
-  justify-content: center;
+  /* An absolutely placed box at left: 50% is offered only the room to its
+     right (half the pane), so without max-content a 224px pane wrapped Volume
+     onto its own line. The pane-width rules below stack the presets under the
+     toggle when the bar no longer fits on one row. */
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  width: max-content;
   max-width: calc(100% - 24px);
   padding: 5px 7px;
-  border-radius: 999px;
+  border-radius: 18px;
   background: rgba(14, 15, 18, 0.78);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   border: 1px solid var(--vp-border);
+}
+
+/* The bar answers to the width of its own pane, not the window's: the same
+   phone window holds a 190px tile in the 2x2 grid and a 125px tile beside a
+   large pane, and a tablet split can leave the pane narrower than the row. */
+.vp-pane--render {
+  container: vp3d / inline-size;
 }
 
 .vp-3dbar__btn {
@@ -640,16 +676,23 @@
   border-radius: 999px;
   border: 1px solid transparent;
   background: transparent;
-  color: var(--vp-text-dim);
+  color: rgba(255, 255, 255, 0.78);
   font-family: var(--vp-font);
   font-size: 11.5px;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  flex: none;
 }
 
-.vp-3dbar__btn:hover {
+.vp-3dbar__btn:hover:not(:disabled):not(.is-active) {
   color: var(--vp-text);
+}
+
+/* Meshes while a quiz or solo challenge holds the organ meshes back. */
+.vp-3dbar__btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .vp-3dbar__btn.is-active {
@@ -657,17 +700,48 @@
   color: #08090b;
 }
 
+/* With only Volume to offer (local scans have no meshes) there is nothing to
+   switch between, so the word is a label and not a selected-looking pill. */
+.vp-3dbar__label {
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--vp-text-dim);
+  white-space: nowrap;
+  flex: none;
+}
+
+/* The presets are a pill of their own above the toggle, centred on it, so
+   choosing Volume never widens the bar and moves the toggle sideways. A pane
+   under 540px puts them back inside the bar as a second row (see below). The
+   pill sits outside the bar's own box, so a blur here would have nothing to
+   sample: the plate is near-opaque instead, to keep the labels legible over
+   bright bone. */
 .vp-3dbar__presets {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
+  flex: none;
   gap: 3px;
-  padding-left: 6px;
-  border-left: 1px solid var(--vp-border);
+  width: max-content;
+  max-width: calc(100cqi - 16px);
+  padding: 5px 7px;
+  border-radius: 18px;
+  border: 1px solid var(--vp-border);
+  background: rgba(14, 15, 18, 0.92);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.vp-3dbar__presets::-webkit-scrollbar {
+  display: none;
 }
 
 .vp-3dbar__btn--preset {
   font-size: 10.5px;
   padding: 4px 8px;
-  font-family: var(--vp-mono);
   font-weight: 500;
 }
 
@@ -689,6 +763,144 @@
   }
 }
 
+/* The mode is the loud pill; the preset inside it is a quieter tint. */
+.vp-3dbar__btn--preset.is-active {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+}
+
+/* Phones: real touch targets on the toggle. */
+@media (max-width: 640px) {
+  .vp-3dbar__btn {
+    min-height: 32px;
+    padding: 0 12px;
+    font-size: 12px;
+  }
+
+  .vp-3dbar__btn--preset {
+    padding: 0 9px;
+    font-size: 11px;
+  }
+}
+
+/* Under about 540px of pane the presets no longer fit beside the toggle (one row
+   is about 460px at 375-wide type sizes, 500px with the phone's larger buttons):
+   they move to their own row above it and scroll sideways (with a fade at the right
+   edge as the cue), so the toggle never scrolls away. */
+@container vp3d (max-width: 540px) {
+  .vp-3dbar {
+    flex-wrap: wrap;
+    justify-content: center;
+    row-gap: 4px;
+    bottom: 8px;
+    max-width: calc(100% - 16px);
+    padding: 3px;
+    border-radius: 16px;
+  }
+
+  .vp-3dbar__presets {
+    position: static;
+    transform: none;
+    width: auto;
+    max-width: none;
+    border-radius: 0;
+    background: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    flex: 1 1 100%;
+    min-width: 0;
+    /* Laid out above the toggle: the bar is anchored at the bottom, so the row grows
+       upward and the Surface / Volume toggle never moves when Volume shows it. */
+    order: -1;
+    padding: 0 0 3px;
+    border-width: 0 0 1px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    /* Centred under the label. "safe" falls back to the start when the row
+       overflows, so the first preset is never scrolled out of reach. The
+       padding equals the fade, so both edges fade over padding at rest and the
+       row stays centred; the fade only touches a chip once it has scrolled. */
+    justify-content: center;
+    justify-content: safe center;
+    padding-inline: 18px;
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  }
+
+  .vp-3dbar__presets::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* The stacked bar is about 88px tall. */
+  .vp-vol3d,
+  .vp-vol3d-host {
+    --vp-vol3d-bar-inset: 96px;
+  }
+}
+
+/* A side tile (about 125px on a phone) cannot hold two words side by side. */
+@container vp3d (max-width: 160px) {
+  .vp-3dbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .vp-3dbar__btn,
+  .vp-3dbar__label {
+    padding-inline: 8px;
+    font-size: 11px;
+    text-align: center;
+  }
+
+  .vp-3dbar__presets {
+    flex: none;
+  }
+
+  /* The side tile's column bar is taller than the pane; keep its render whole, in
+     annotate too (a 320px phone's annotate tile lands here). */
+  .vp-vol3d,
+  .vp-vol3d-host,
+  .VisualizationPage.annotation-open .vp-vol3d,
+  .VisualizationPage.annotation-open .vp-vol3d-host {
+    --vp-vol3d-bar-inset: 0px;
+  }
+
+  /* No bar-free area here (the bar is taller than the pane), so the message
+     sits at the top, the part of the tile the bar leaves alone. */
+  .vp-3d-empty--over {
+    justify-content: flex-start;
+    padding-top: 8px;
+  }
+
+  .vp-3d-empty--over span {
+    display: none;
+  }
+}
+
+/* Tablet: annotate with the panels open leaves the 3D pane about 220px wide,
+   so the toggle gets the same touch-sized buttons as the phone. */
+@media (max-width: 899px) {
+  .vp-3dbar__btn {
+    min-height: 32px;
+  }
+}
+
+/* Phone annotate: the 3D tile is only about 100px tall, so the full-size bar
+   would cover a third of it. Keep the toggle, just smaller and tighter to the
+   bottom edge. */
+@media (max-width: 640px) {
+  .VisualizationPage.annotation-open .vp-3dbar {
+    bottom: 4px;
+    padding: 2px;
+  }
+
+  .VisualizationPage.annotation-open .vp-3dbar__btn {
+    min-height: 24px;
+    padding: 0 10px;
+    font-size: 11px;
+  }
+}
+
 /* 3D pane placeholder for local DICOM (no segmentation → no meshes). */
 .vp-3d-empty {
   height: 100%;
@@ -697,6 +909,10 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
+  padding: 0 16px;
+  box-sizing: border-box;
+  text-align: center;
+  text-wrap: balance;
   font-family: var(--vp-font);
   font-size: 13px;
   color: var(--vp-text-dim);
@@ -705,6 +921,51 @@
 .vp-3d-empty span {
   font-size: 11.5px;
   color: var(--vp-text-faint);
+  text-wrap: balance;
+}
+
+/* The volume pane stays mounted when rendering fails (Try again needs its element),
+   so the message sits over it instead of replacing it. The overlay covers the same
+   area as the render (above the 3D bar, same inset), so the button is never under it. */
+.vp-vol3d-host {
+  position: relative;
+  height: 100%;
+}
+
+.vp-3d-empty--over {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: max(50%, calc(100% - var(--vp-vol3d-bar-inset, 96px)));
+  background: var(--vp-pane-bg, #000);
+}
+
+/* The phone annotate tile leaves about 50px above its bar: one line and the button. */
+@media (max-width: 640px) {
+  .VisualizationPage.annotation-open .vp-3d-empty--over {
+    gap: 4px;
+  }
+
+  .VisualizationPage.annotation-open .vp-3d-empty--over span {
+    display: none;
+  }
+
+  .VisualizationPage.annotation-open .vp-3d-empty--over .vp-btn {
+    margin-top: 0;
+    padding: 3px 10px;
+  }
+}
+
+.vp-3d-empty__msg {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.vp-3d-empty .vp-btn {
+  margin-top: 6px;
 }
 
 /* Case / session identity block at the toolbar's left. */

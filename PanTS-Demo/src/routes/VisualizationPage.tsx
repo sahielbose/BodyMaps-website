@@ -75,6 +75,7 @@ import RefineFlyout from "../components/segmentation/RefineFlyout";
 import LevelTracingFlyout from "../components/segmentation/LevelTracingFlyout";
 import { organTipPosition } from "../helpers/viewer/organTipPosition";
 import { useScissorsTool } from "../helpers/viewer/useScissorsTool";
+import { useEditedCatalogIds } from "../helpers/viewer/useEditedCatalogIds";
 import { voxelsLog } from "../helpers/viewer/editLog";
 import { MODEL_NEEDS_DATASET_CASE, useInteractivePromptTool } from "../helpers/viewer/useInteractivePromptTool";
 import { loadRecentUploads, renameRecentUpload, runsOf } from "../helpers/recentUploads";
@@ -226,6 +227,8 @@ import { ClearMeasurementsFlyoutItem } from "../components/MeasurementPanel/Clea
 import {getPanTSId } from "../helpers/utils";
 import { classInSentence, filenameToName } from "../helpers/utils.name";
 import { decodeViewerState, encodeViewerState } from "../helpers/viewerShareState";
+import { scrollRowToActive } from "../helpers/scrollRowToActive";
+import { meshCheckStateFor, meshesHeldBack } from "../helpers/meshVisibility";
 import { LiveRoomDock, LiveRoomHeader } from "../liveRooms/LiveRoomChrome";
 import LiveRoomCreateDialog from "../liveRooms/LiveRoomCreateDialog";
 import { appRootRelativeUrl } from "../liveRooms/protocol";
@@ -629,6 +632,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	const isLiveRoom = Boolean(liveRoom);
 	const isSoloChallenge = Boolean(soloChallenge);
 	const isQuizPractice = Boolean(quizPractice);
+	// A quiz withholds the answer, so the panels that name or measure the lesion (Organs,
+	// Hover identify, Organ stats, Case metadata) and the assistant are not offered in it at
+	// all; the reveal shows the answer on the scan itself.
+	const answerHidden = liveRoom?.metadata.mode === "quiz" || isQuizPractice;
 	const liveRoomMaskUrl = liveRoom?.maskUrl;
 	const soloChallengeMaskUrl = soloChallenge?.maskUrl;
 	const quizPracticeMaskUrl = quizPractice?.maskUrl;
@@ -653,6 +660,9 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// the local file and only fall back to the public HuggingFace mirror when it isn't
 	// present (e.g. a dev checkout without the image data), so the viewer never breaks.
 	const caseId = isLocalNifti ? "Local NIfTI" : isDicom ? "Local DICOM" : pantsCase ?? sessionId ?? "1";
+	// Catalog classes edited on this page (see editedCatalogOrgans). Refreshed by hand after
+	// live-room mask patches, which do not fire a local edit event.
+	const { ids: editedCatalogIds, refresh: refreshEditedCatalog } = useEditedCatalogIds(caseId, segmentation_categories.length);
 	const [ctUrl, setCtUrl] = useState<string | null>(null);
 	const [segUrl, setSegUrl] = useState<string | null>(null);
 	// Whether the local volumes exist (enables the HD toggle). Dataset cases default to
@@ -761,27 +771,26 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 
 	const [checkState, setCheckState] = useState<boolean[]>([true]);
 	const meshCheckState = useMemo(() => {
-		if (liveRoom?.metadata.mode === "quiz") {
-			const lesionRevealed = Boolean(liveRoom.quiz?.reveal?.viewer_cue?.show_lesion_overlay);
+		const liveQuiz = liveRoom?.metadata.mode === "quiz";
+		const finalReveal = quizPractice?.result?.reveals.find((item) => item.question_id === "conclusion");
+		return meshCheckStateFor({
+			checkState,
 			// The source-mask label can differ from the viewer's pancreatic-lesion mesh ID.
 			// Keep that mesh hidden until the server-authored final reveal.
-			const lesionMeshId = segmentation_categories.indexOf("pancreatic_lesion") + 1;
-			return checkState.map((_, index) => (
-				index === 0 || lesionRevealed || index !== lesionMeshId
-			));
-		}
-		if (quizPractice) {
-			const finalReveal = quizPractice.result?.reveals.find((item) => item.question_id === "conclusion");
-			const lesionRevealed = Boolean(finalReveal?.viewer_cue?.show_lesion_overlay);
-			const lesionMeshId = segmentation_categories.indexOf("pancreatic_lesion") + 1;
-			return checkState.map((_, index) => (
-				index === 0 || lesionRevealed || index !== lesionMeshId
-			));
-		}
-		const meshOrganId = soloChallenge?.result?.ground_truth.mesh_organ_id;
-		if (!isSoloChallenge || !meshOrganId || meshOrganId >= checkState.length) return checkState;
-		return checkState.map((_, index) => index === 0 || index === meshOrganId);
+			lesionMeshId: segmentation_categories.indexOf("pancreatic_lesion") + 1,
+			lesionRevealed: liveQuiz
+				? Boolean(liveRoom?.quiz?.reveal?.viewer_cue?.show_lesion_overlay)
+				: Boolean(finalReveal?.viewer_cue?.show_lesion_overlay),
+			mode: liveQuiz ? "liveQuiz" : quizPractice ? "quizPractice" : isSoloChallenge ? "soloChallenge" : "other",
+			soloMeshOrganId: soloChallenge?.result?.ground_truth.mesh_organ_id,
+		});
 	}, [checkState, isSoloChallenge, liveRoom?.metadata.mode, liveRoom?.quiz?.reveal, quizPractice, soloChallenge?.result]);
+	// A quiz or solo challenge withholds the answer masks until the answer is graded, so
+	// the mesh pane has no organ to draw; it says so instead of sitting black.
+	const meshesHeld = meshesHeldBack(
+		quizPractice ? "quizPractice" : isSoloChallenge ? "soloChallenge" : "other",
+		Boolean(quizPractice?.result || soloChallenge?.result),
+	);
 	const [NV, _setNV] = useState<Niivue | undefined>();
 	const [checkBoxData, setCheckBoxData] = useState<CheckBoxData[]>([]);
 	// Fill (solid color wash) and outline (border) opacity are independent sliders — see
@@ -1749,7 +1758,16 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// CT presets by default; chosen again from the scan's modality on every load (MR gets its own set).
 	const [volume3DPresets, setVolume3DPresets] = useState<readonly { name: string; label: string }[]>(VOLUME_3D_PRESETS);
 	const [volume3DFailed, setVolume3DFailed] = useState(false);
+	// Bumped by Try again: re-runs the enable effect on the same mounted pane.
+	const [volume3DAttempt, setVolume3DAttempt] = useState(0);
 	const volume3DRef = useRef<HTMLDivElement>(null);
+	const volumePresetsRef = useRef<HTMLSpanElement>(null);
+	// In a narrow pane the presets scroll sideways: bring the selected one into the
+	// visible part (clear of the fade at the right edge) rather than leaving, say,
+	// MIP off-screen. Only the row itself scrolls, never the page.
+	useEffect(() => {
+		scrollRowToActive(volumePresetsRef.current);
+	}, [threeDMode, volumePreset, volume3DFailed, loading]);
 	// Toolbar flyout groups — each declutters a cluster of related buttons behind one
 	// icon + dropdown (same portal-at-fixed-position pattern, so none of them get
 	// clipped by the scrollable toolbar). See useToolbarFlyout.
@@ -2418,6 +2436,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	useEffect(() => {
 		if (!liveRoom?.pendingEvents.length || !viewerReady) return;
 		let appliedThrough = 0;
+		let maskPatched = false;
 		for (const { event, replayed } of liveRoom.pendingEvents) {
 			appliedThrough = Math.max(appliedThrough, event.seq);
 			// Sender already has ordinary live edits. Replayed edits and server-generated
@@ -2431,10 +2450,13 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			} else if (event.type === "mask.patch") {
 				const patch = payload as unknown as LiveRoomMaskPatch;
 				applyRemoteMaskRanges(patch.ranges, segmentationShadowRef.current);
+				maskPatched = true;
 			}
 		}
+		// A patch may fill a catalog class this scan has no baked mesh for.
+		if (maskPatched) refreshEditedCatalog();
 		liveRoom.acknowledgeEvents(appliedThrough);
-	}, [liveRoom?.pendingEvents, liveRoom?.participantId, liveRoom?.acknowledgeEvents, viewerReady]);
+	}, [liveRoom?.pendingEvents, liveRoom?.participantId, liveRoom?.acknowledgeEvents, viewerReady, refreshEditedCatalog]);
 
 	// Client shadow + modified-slice RLE keeps brush traffic proportional to changed
 	// voxels instead of serializing a full labelmap after every stroke.
@@ -2746,9 +2768,10 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 			disableVolume3D();
 		};
 		// volumePreset intentionally omitted — preset changes are applied in place below,
-		// without tearing the viewport down.
+		// without tearing the viewport down. The pane stays mounted while it has failed
+		// (the message sits over it), so the ref is there for every retry.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [threeDMode, viewerReady, renderingEngine]);
+	}, [threeDMode, viewerReady, renderingEngine, volume3DAttempt]);
 
 	useEffect(() => {
 		if (threeDMode === "volume") applyVolume3DPreset(volumePreset);
@@ -3294,6 +3317,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	// (NiiVue) crosshair — the Cornerstone move suppresses its change event, so the 3D
 	// view has to be synced explicitly — and make sure the organ is visible there.
 	const handleJumpToOrgan = (label: number) => {
+		if (answerHidden) return;
 		const centroid = getOrganCentroids()?.[label];
 		if (!centroid) {
 			// Say so rather than do nothing. Until the mask has fully streamed in, the map is
@@ -4007,6 +4031,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	}, [showStats, showMetadata, showMeasurePanel, showAISidebar]);
 
 	const handleToggleStats = () => {
+		if (answerHidden) return;
 		// The right-side slot is shared by stats / metadata / measurements / mask editing.
 		setShowMetadata(false);
 		setShowMeasurePanel(false);
@@ -4020,6 +4045,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	};
 
 	const handleToggleMetadata = () => {
+		if (answerHidden) return;
 		setShowStats(false);
 		setShowMeasurePanel(false);
 		// Also drops the target class, so the mask isolation ends with the ribbon.
@@ -4031,7 +4057,7 @@ function VisualizationPage({ liveRoom, soloChallenge, quizPractice }: Visualizat
 	};
 
 	const handleToggleAISidebar = () => {
-		if (liveRoom?.metadata.mode === "quiz") return;
+		if (answerHidden) return;
 		const opening = !showAISidebar;
 
 		if (opening) track("assistant_open");
@@ -4076,6 +4102,12 @@ const flaggedOrgans = useMemo(() => summarizeOutOfRange(statRows), [statRows]);
 const customOrgans = useMemo(
     () => checkBoxData.filter((o) => o.id > segmentation_categories.length),
     [checkBoxData]
+);
+// Catalog classes edited on this page, for the 3D pane: one the scan has no
+// baked mesh for is drawn live there (see SegmentationMeshViewer).
+const editedCatalogOrgans = useMemo(
+	() => (editedCatalogIds.length ? checkBoxData.filter((o) => editedCatalogIds.includes(o.id)) : []),
+	[checkBoxData, editedCatalogIds]
 );
 // The popup's eyes read what is actually drawn, not a map of their own.
 const segmentVisibility = useMemo(
@@ -4893,7 +4925,7 @@ const aiAvailableOrgans = useMemo(() => {
 															className="vp-flyout"
 															{...panelsFlyout.panelProps("Panels")}
 														>
-															{!isLocal && (
+															{!isLocal && !answerHidden && (
 																<button
 																	className={`vp-flyout__item ${showOrganDetails ? "is-active" : ""}`}
 																	aria-pressed={showOrganDetails}
@@ -4913,7 +4945,7 @@ const aiAvailableOrgans = useMemo(() => {
 																	<span>Organs</span>
 																</button>
 															)}
-															{!isLocal && (
+															{!isLocal && !answerHidden && (
 																<button
 																	className={`vp-flyout__item ${showStats ? "is-active" : ""}`}
 																	aria-pressed={showStats}
@@ -4926,7 +4958,7 @@ const aiAvailableOrgans = useMemo(() => {
 																	<span>Organ stats</span>
 																</button>
 															)}
-															{!isLocal && (
+															{!isLocal && !answerHidden && (
 																<button
 																	className={`vp-flyout__item ${showMetadata ? "is-active" : ""}`}
 																	aria-pressed={showMetadata}
@@ -5019,7 +5051,7 @@ const aiAvailableOrgans = useMemo(() => {
 													</span>
 												</button>
 											)}
-											{!isLocal && !soloChallenge && (
+											{!isLocal && !soloChallenge && !answerHidden && (
 												<button
 													type="button"
 													className={`vp-tool ${showAISidebar ? "vp-tool--active" : ""}`}
@@ -5076,7 +5108,7 @@ const aiAvailableOrgans = useMemo(() => {
 				<h1 className="sr-only">
 					{isLocal ? caseId : sessionId && scanLabel ? scanLabel : `${sessionId ? "Session" : "Case"} ${caseId}`}
 				</h1>
-				{!isLocal && !soloChallenge && (
+				{!isLocal && !soloChallenge && !answerHidden && (
 					<OrganCheckbox
 						setCheckState={setCheckState}
 						checkState={checkState}
@@ -5408,51 +5440,82 @@ const aiAvailableOrgans = useMemo(() => {
 					<div className={`render ${loading ? "" : "vp-pane vp-pane--render"}`} data-label="3D" style={{ ...panelStyle("3d"), ...paneGridStyle("3d") }}>
 						<div className="canvas">
 							{threeDMode === "volume" ? (
-								volume3DFailed ? (
-									<div className="vp-3d-empty">
-										Volume rendering isn't available here
-										<span>(needs GPU/WebGL rendering)</span>
-									</div>
-								) : (
-									// Shaded ray-cast rendering of the CT itself (Cornerstone VOLUME_3D).
+								<div className="vp-vol3d-host">
+									{/* Shaded ray-cast rendering of the CT itself (Cornerstone VOLUME_3D). */}
 									<div className="vp-vol3d" ref={volume3DRef} />
-								)
+									{volume3DFailed && (
+										<div className="vp-3d-empty vp-3d-empty--over">
+											{/* Only the message is announced, not the button after it. */}
+											<div className="vp-3d-empty__msg" role="status">
+												Volume rendering isn't available here
+												<span>(needs GPU/WebGL rendering)</span>
+											</div>
+											<button type="button" className="vp-btn" onClick={() => setVolume3DAttempt((n) => n + 1)}>
+												Try again
+											</button>
+										</div>
+									)}
+								</div>
 							) : isLocal ? (
 								// Meshes come from the case's segmentation on the server — a local
 								// DICOM scan has none.
 								<div className="vp-3d-empty">
-									No organ meshes for local DICOM
-									<span>(switch to Volume rendering above)</span>
+									No organ meshes for this scan
+									<span>(switch to Volume rendering below)</span>
 								</div>
-											) : (
-								<SegmentationMeshViewer caseId={caseId} isSession={!!sessionId && !pantsCase} crosshairMm={crosshairMm} checkState={meshCheckState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} labelColorMap={labelColorMap} />
+							) : meshesHeld ? (
+								<div className="vp-3d-empty">
+									Organ meshes are hidden until you submit
+									<span>(switch to Volume rendering below)</span>
+								</div>
+							) : (
+								// The report's backdrop is a scan to look at, not a workspace: no crosshair
+								// lines over it, and the camera follows the organ it isolates.
+								<SegmentationMeshViewer caseId={caseId} isSession={!!sessionId && !pantsCase} crosshairMm={showReportScreen ? null : crosshairMm} fitVisible={showReportScreen} checkState={meshCheckState} loading={loading} opacity={opacityValue} customOrgans={customOrgans} editedOrgans={editedCatalogOrgans} labelColorMap={labelColorMap} />
 							)}
 						</div>
 						{!loading && (
-							<div className="vp-3dbar">
+							<div className="vp-3dbar" role="group" aria-label="3D rendering">
 								{!isLocal && (
 									<button
-										className={`vp-3dbar__btn ${threeDMode === "mesh" ? "is-active" : ""}`}
+										// While the meshes are held back the pill is a dimmed label, not a
+										// selected one: a disabled white fill would read as a grey disc.
+										className={`vp-3dbar__btn ${threeDMode === "mesh" && !meshesHeld ? "is-active" : ""}`}
+										aria-pressed={threeDMode === "mesh" && !meshesHeld}
+										disabled={meshesHeld}
 										onClick={() => setThreeDMode("mesh")}
 									>
 										Meshes
 									</button>
 								)}
-								<button
-									className={`vp-3dbar__btn ${threeDMode === "volume" ? "is-active" : ""}`}
-									onClick={() => {
-										setThreeDMode("volume");
-										sessionRef.current?.log("view", "Switched 3D pane to volume rendering");
-									}}
-								>
-									Volume
-								</button>
+								{isLocal ? (
+									// Nothing to switch to, so it reads as a label and not a selected pill.
+									<span className="vp-3dbar__label">Volume</span>
+								) : (
+									<button
+										className={`vp-3dbar__btn ${threeDMode === "volume" ? "is-active" : ""}`}
+										aria-pressed={threeDMode === "volume"}
+										onClick={() => {
+											// The enable effect clears a failure when it runs again. Already on
+											// Volume, the mode does not change, so a failed render retries here.
+											if (threeDMode === "volume") {
+												if (volume3DFailed) setVolume3DAttempt((n) => n + 1);
+												return;
+											}
+											setThreeDMode("volume");
+											sessionRef.current?.log("view", "Switched 3D pane to volume rendering");
+										}}
+									>
+										Volume
+									</button>
+								)}
 								{threeDMode === "volume" && !volume3DFailed && (
-									<span className="vp-3dbar__presets">
+									<span className="vp-3dbar__presets" role="group" aria-label="Volume preset" ref={volumePresetsRef}>
 										{volume3DPresets.map((preset) => (
 											<button
 												key={preset.name}
 												className={`vp-3dbar__btn vp-3dbar__btn--preset ${volumePreset === preset.name ? "is-active" : ""}`}
+												aria-pressed={volumePreset === preset.name}
 												onClick={() => setVolumePreset(preset.name)}
 											>
 												{preset.label}
@@ -5725,7 +5788,7 @@ const aiAvailableOrgans = useMemo(() => {
 			)}
 
 			{/* Kept mounted (display toggles) so the chat history survives open/close. */}
-			{!soloChallenge && liveRoom?.metadata.mode !== "quiz" && <AISidebar
+			{!soloChallenge && !answerHidden && <AISidebar
 				open={showAISidebar}
 				onClose={() => setShowAISidebar(false)}
 				caseId={String(caseId)}
